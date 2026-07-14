@@ -260,7 +260,7 @@
     <div class="header">
         <div class="header-brand">
             <img src="logo.svg" alt="ArgoNVR" class="header-logo">
-            <h2>ArgoNVR</h2>
+            <h2 id="brand-text">ArgoNVR</h2>
         </div>
         
         <div class="date-display" id="global-date" onclick="toggleCalendar()">
@@ -296,6 +296,24 @@
     </div>
 
     <script>
+        // --- Easter Egg: Occasional Brand Glitch ---
+        function runEasterEgg() {
+            const brand = document.getElementById('brand-text');
+            if (!brand) return;
+
+            // 15% chance to trigger every 10 seconds
+            if (Math.random() < 0.15) {
+                const originalText = brand.innerText;
+                brand.innerText = (originalText === "ArgoNVR") ? "ArgonVR" : "ArgoNVR";
+                
+                // Switch back after 3 seconds
+                setTimeout(() => {
+                    brand.innerText = originalText;
+                }, 3000);
+            }
+        }
+        setInterval(runEasterEgg, 10000);
+
         let globalManifest = {};
         const hlsPlayers = {};
         const activeCameras = [];
@@ -370,7 +388,6 @@
 
         async function fetchManifest() {
             try {
-                // FIXED: Explicitly send auth credentials for history fetch
                 const response = await fetch('./recordings/history.json', { cache: 'no-store', credentials: 'include' });
                 globalManifest = await response.json();
                 
@@ -579,7 +596,6 @@
                 const freshPlaylistUrl = `./cameras/${camId}/stream.m3u8?t=${Date.now()}`;
                 
                 if (Hls.isSupported()) {
-                    // FIXED: explicitly allow credentials for internal JS requests
                     const hls = new Hls({ 
                         liveDurationInfinity: true, 
                         manifestLoadingMaxRetry: 5,
@@ -713,7 +729,6 @@
             const videoElement = document.getElementById(`video-${camId}`);
 
             if (Hls.isSupported()) {
-                // FIXED: explicitly allow credentials for internal JS requests
                 const hls = new Hls({ 
                     liveDurationInfinity: true, 
                     manifestLoadingMaxRetry: 5,
@@ -738,7 +753,6 @@
                 const camId = `cam${index}`;
                 const streamPath = `./cameras/${camId}/stream.m3u8`;
                 try {
-                    // FIXED: Explicitly send auth credentials for camera discovery ping
                     const response = await fetch(streamPath, { method: 'HEAD', cache: 'no-store', credentials: 'include' });
                     if (response.ok) {
                         createCameraDOM(camId, streamPath);
