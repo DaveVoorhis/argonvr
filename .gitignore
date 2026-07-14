@@ -1,0 +1,11 @@
+# Ignore runtime and sensitive data
+/recordings/
+/cameras/
+argonvr.cfg
+
+# Ignore python cache
+__pycache__/
+*.pyc
+
+# Ignore environment files
+.env

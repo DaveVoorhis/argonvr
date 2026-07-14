@@ -1,0 +1,9 @@
+[CAMERAS]
+cam1 = rtsp://user:password@192.168.1.11:554/stream
+cam2 = rtsp://user:password@192.168.1.12:554/stream
+
+[SETTINGS]
+WEB_USER = admin
+WEB_PASS = ChangeMe123!
+BASE_DIR = ./cameras
+MOTION_THRESHOLD = 0.01

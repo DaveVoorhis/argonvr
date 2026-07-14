@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <script>
+        document.title = Math.random() > 0.5 ? "ArgoNVR" : "ArgonVR";
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <style>
+        body { 
+            background: #0a0a0a; 
+            margin: 0; 
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            color: white;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        
+        .header {
+            background: #1a1a1a;
+            padding: 10px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid #333;
+            height: 40px; 
+            flex-shrink: 0;
+            position: relative; 
+        }
+        .header-brand {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        .header-logo {
+            height: 32px;
+            width: 32px;
+            object-fit: contain;
+        }
+        .header h2 { margin: 0; font-size: 1.2rem; color: #e0e0e0; letter-spacing: 1px; }
+        
+        .date-display { 
+            color: #888; 
+            font-size: 1rem; 
+            cursor: pointer; 
+            transition: color 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 4px 10px;
+            border-radius: 4px;
+            background: rgba(255,255,255,0.05);
+        }
+        .date-display:hover { color: #f39c12; background: rgba(255,255,255,0.1); }
+
+        .calendar-popup { 
+            display: none; 
+            position: absolute; 
+            top: 55px; 
+            right: 20px; 
+            background: #1a1a1a; 
+            border: 1px solid #333; 
+            border-radius: 6px; 
+            padding: 15px; 
+            z-index: 100; 
+            box-shadow: 0 8px 25px rgba(0,0,0,0.8); 
+            width: 260px; 
+        }
+        .calendar-popup.visible { display: block; }
+        .cal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; font-weight: bold;}
+        .cal-btn { background: #333; border: none; color: white; cursor: pointer; padding: 6px 12px; border-radius: 4px; transition: background 0.2s; }
+        .cal-btn:hover { background: #555; }
+        .cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; text-align: center; }
+        .cal-day-header { font-size: 0.75rem; color: #888; padding-bottom: 5px; }
+        .cal-day { padding: 8px 0; font-size: 0.85rem; cursor: pointer; border-radius: 4px; background: #222; }
+        .cal-day:hover { background: #444; }
+        .cal-day.has-video { background: #e74c3c; color: #fff; font-weight: bold; }
+        .cal-day.has-video:hover { background: #c0392b; }
+        .cal-day.empty { background: transparent; cursor: default; }
+        .cal-day.active-day { border: 2px solid #f39c12; padding: 6px 0;}
+        .cal-quick-btns { display: flex; justify-content: space-between; margin-top: 15px; padding-top: 15px; border-top: 1px solid #333; }
+        
+        .video-grid {
+            display: grid;
+            gap: 10px;
+            padding: 10px;
+            flex-grow: 1;
+            overflow: hidden; 
+            background: #000;
+            grid-auto-rows: minmax(220px, 1fr); 
+        }
+
+        .camera-card {
+            position: relative;
+            background: #111;
+            border-radius: 6px;
+            overflow: hidden;
+            border: 1px solid #2a2a2a;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .camera-header {
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            padding: 8px 12px;
+            background: linear-gradient(to bottom, rgba(0,0,0,0.9), rgba(0,0,0,0));
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            z-index: 10;
+            pointer-events: none;
+        }
+        
+        .camera-title { font-weight: 600; text-transform: uppercase; font-size: 0.85rem; color: #fff; }
+        .status-badge { 
+            font-size: 0.75rem; 
+            padding: 2px 6px; 
+            border-radius: 4px; 
+            background: #e74c3c; 
+            font-weight: bold;
+        }
+        .status-badge.history { background: #f39c12; }
+        .status-badge.nomotion { background: #555; }
+
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: contain; 
+            background: #000;
+        }
+        
+        .no-video-overlay {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: repeating-linear-gradient(45deg, #111, #111 10px, #1a1a1a 10px, #1a1a1a 20px);
+            display: none;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            color: #666;
+            z-index: 5;
+        }
+
+        .timeline-bar {
+            background: #1a1a1a;
+            border-top: 1px solid #333;
+            padding: 15px 20px;
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            height: 40px; 
+            flex-shrink: 0;
+        }
+
+        .ctrl-btn {
+            background: #333;
+            border: none;
+            color: white;
+            padding: 8px 15px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            white-space: nowrap;
+        }
+        .ctrl-btn:hover { background: #444; }
+        .ctrl-btn.live-btn { background: #e74c3c; }
+        .ctrl-btn.live-btn:hover { background: #c0392b; }
+
+        .time-display {
+            font-family: monospace;
+            font-size: 1.2rem;
+            color: #4cd137;
+            min-width: 90px;
+            text-align: center;
+        }
+
+        .timeline-wrapper {
+            position: relative;
+            flex-grow: 1;
+            height: 20px;
+            display: flex;
+            align-items: center;
+        }
+
+        .heatmap-track {
+            position: absolute;
+            left: 0; right: 0;
+            height: 8px;
+            background: #222;
+            border-radius: 4px;
+            pointer-events: none;
+            overflow: hidden;
+            z-index: 1;
+        }
+
+        .heatmap-tick {
+            position: absolute;
+            top: 0; bottom: 0;
+            background: #e74c3c;
+            opacity: 0.8;
+        }
+
+        input[type=range] {
+            position: absolute;
+            width: 100%;
+            -webkit-appearance: none;
+            background: transparent;
+            cursor: pointer;
+            z-index: 2;
+            margin: 0;
+        }
+        input[type=range]:focus { outline: none; }
+        
+        input[type=range]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 8px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 4px;
+        }
+        
+        input[type=range]::-webkit-slider-thumb {
+            height: 20px;
+            width: 10px;
+            border-radius: 2px;
+            background: #f39c12;
+            -webkit-appearance: none;
+            margin-top: -6px;
+            box-shadow: 0 0 5px rgba(0,0,0,0.5);
+        }
+
+        @media (max-width: 800px) {
+            .timeline-bar {
+                flex-wrap: wrap; 
+                height: auto;
+                padding: 10px;
+                justify-content: space-between;
+                gap: 10px;
+            }
+            .timeline-wrapper {
+                width: 100%;
+                order: 3; 
+                margin-top: 5px;
+                flex-grow: 1;
+                flex-basis: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <div class="header-brand">
+            <img src="logo.svg" alt="ArgoNVR" class="header-logo">
+            <h2>ArgoNVR</h2>
+        </div>
+        
+        <div class="date-display" id="global-date" onclick="toggleCalendar()">
+            <span>Loading...</span> 📅
+        </div>
+        
+        <div class="calendar-popup" id="calendar-popup">
+            <div class="cal-header">
+                <button class="cal-btn" onclick="changeMonth(-1)">◀</button>
+                <div id="cal-month-label">Month</div>
+                <button class="cal-btn" onclick="changeMonth(1)">▶</button>
+            </div>
+            <div class="cal-grid" id="cal-grid"></div>
+            <div class="cal-quick-btns">
+                <button class="cal-btn" onclick="selectQuickDate('yesterday')">Yesterday</button>
+                <button class="cal-btn" onclick="selectQuickDate('today')">Today</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="video-grid" id="grid"></div>
+
+    <div class="timeline-bar">
+        <button class="ctrl-btn" id="btn-play">▶ Play</button>
+        <div class="time-display" id="time-label">LIVE</div>
+        
+        <div class="timeline-wrapper">
+            <div id="heatmap" class="heatmap-track"></div>
+            <input type="range" id="scrubber" min="0" max="86400" value="86400">
+        </div>
+        
+        <button class="ctrl-btn live-btn" id="btn-live">🔴 Go Live</button>
+    </div>
+
+    <script>
+        let globalManifest = {};
+        const hlsPlayers = {};
+        const activeCameras = [];
+        
+        let isLive = true;
+        let isPlayingHistory = false;
+        let playbackInterval = null;
+        let currentDayString = ""; 
+        
+        let availableDates = new Set();
+        let calViewDate = new Date(); 
+
+        const scrubber = document.getElementById('scrubber');
+        const timeLabel = document.getElementById('time-label');
+        const playBtn = document.getElementById('btn-play');
+        const liveBtn = document.getElementById('btn-live');
+        const dateDisplay = document.getElementById('global-date');
+
+        function getTodayString() {
+            const now = new Date();
+            const yyyy = now.getFullYear();
+            const mm = String(now.getMonth() + 1).padStart(2, '0');
+            const dd = String(now.getDate()).padStart(2, '0');
+            return `${yyyy}${mm}${dd}`;
+        }
+
+        function setDate(dateObj) {
+            const yyyy = dateObj.getFullYear();
+            const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
+            const dd = String(dateObj.getDate()).padStart(2, '0');
+            currentDayString = `${yyyy}${mm}${dd}`;
+            dateDisplay.innerHTML = `<span>${dd}/${mm}/${yyyy}</span> 📅`; 
+            
+            renderTimelineHeatmap();
+            
+            if (activeCameras.length > 0) {
+                if (isPlayingHistory) playBtn.click();
+                
+                if (currentDayString === getTodayString()) {
+                    returnToLive();
+                } else {
+                    isLive = false;
+                    timeLabel.style.color = "#f39c12";
+                    activeCameras.forEach(camId => {
+                        if (hlsPlayers[camId]) hlsPlayers[camId].detachMedia();
+                    });
+                    
+                    scrubber.value = 43200; 
+                    timeLabel.innerText = secondsToTimeStr(43200);
+                    updateCamerasToScrubber(43200, true);
+                }
+            }
+        }
+
+        function secondsToTimeStr(seconds) {
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = seconds % 60;
+            return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+        }
+
+        function parseFilenameToSeconds(filename) {
+            const match = filename.match(/_(\d{8})_(\d{2})(\d{2})(\d{2})\.mp4/);
+            if (!match) return null;
+            if (match[1] !== currentDayString) return null; 
+
+            const h = parseInt(match[2], 10);
+            const m = parseInt(match[3], 10);
+            const s = parseInt(match[4], 10);
+            return (h * 3600) + (m * 60) + s;
+        }
+
+        async function fetchManifest() {
+            try {
+                // FIXED: Explicitly send auth credentials for history fetch
+                const response = await fetch('./recordings/history.json', { cache: 'no-store', credentials: 'include' });
+                globalManifest = await response.json();
+                
+                availableDates.clear();
+                Object.values(globalManifest).forEach(clips => {
+                    clips.forEach(clip => {
+                        const match = clip.filename.match(/_(\d{8})_/);
+                        if (match) availableDates.add(match[1]);
+                    });
+                });
+                
+                renderTimelineHeatmap();
+                
+                if (document.getElementById('calendar-popup').classList.contains('visible')) {
+                    renderCalendar();
+                }
+            } catch (e) {
+                console.log("Could not load history manifest. Likely an auth issue.");
+            }
+        }
+
+        function renderTimelineHeatmap() {
+            const heatmap = document.getElementById('heatmap');
+            heatmap.innerHTML = ''; 
+
+            Object.keys(globalManifest).forEach(camId => {
+                const clips = globalManifest[camId];
+                clips.forEach(clip => {
+                    const startSec = parseFilenameToSeconds(clip.filename);
+                    if (startSec === null) return; 
+                    
+                    const leftPct = (startSec / 86400) * 100;
+                    const widthPct = Math.max((60 / 86400) * 100, 0.15); 
+
+                    const tick = document.createElement('div');
+                    tick.className = 'heatmap-tick';
+                    tick.style.left = `${leftPct}%`;
+                    tick.style.width = `${widthPct}%`;
+                    heatmap.appendChild(tick);
+                });
+            });
+        }
+
+        function toggleCalendar() {
+            const popup = document.getElementById('calendar-popup');
+            popup.classList.toggle('visible');
+            if (popup.classList.contains('visible')) {
+                const y = parseInt(currentDayString.substring(0,4));
+                const m = parseInt(currentDayString.substring(4,6)) - 1;
+                calViewDate = new Date(y, m, 1);
+                renderCalendar();
+            }
+        }
+
+        function changeMonth(delta) {
+            calViewDate.setMonth(calViewDate.getMonth() + delta);
+            renderCalendar();
+        }
+
+        function renderCalendar() {
+            const label = document.getElementById('cal-month-label');
+            const grid = document.getElementById('cal-grid');
+            
+            label.innerText = calViewDate.toLocaleString('default', { month: 'long', year: 'numeric' });
+            
+            const year = calViewDate.getFullYear();
+            const month = calViewDate.getMonth();
+            const firstDay = new Date(year, month, 1).getDay(); 
+            const daysInMonth = new Date(year, month + 1, 0).getDate();
+            
+            let html = `
+                <div class="cal-day-header">Su</div><div class="cal-day-header">Mo</div><div class="cal-day-header">Tu</div>
+                <div class="cal-day-header">We</div><div class="cal-day-header">Th</div><div class="cal-day-header">Fr</div><div class="cal-day-header">Sa</div>
+            `;
+            
+            for (let i = 0; i < firstDay; i++) {
+                html += `<div class="cal-day empty"></div>`;
+            }
+            
+            for (let day = 1; day <= daysInMonth; day++) {
+                const dateStr = `${year}${String(month + 1).padStart(2, '0')}${String(day).padStart(2, '0')}`;
+                const hasVideo = availableDates.has(dateStr);
+                const isActive = (dateStr === currentDayString);
+                
+                let classes = "cal-day";
+                if (hasVideo) classes += " has-video";
+                if (isActive) classes += " active-day";
+                
+                html += `<div class="${classes}" onclick="selectDateFromCalendar('${dateStr}')">${day}</div>`;
+            }
+            grid.innerHTML = html;
+        }
+
+        function selectDateFromCalendar(dateStr) {
+            const y = parseInt(dateStr.substring(0,4));
+            const m = parseInt(dateStr.substring(4,6)) - 1;
+            const d = parseInt(dateStr.substring(6,8));
+            setDate(new Date(y, m, d));
+            toggleCalendar(); 
+        }
+
+        function selectQuickDate(keyword) {
+            const d = new Date();
+            if (keyword === 'yesterday') d.setDate(d.getDate() - 1);
+            setDate(d);
+            toggleCalendar(); 
+        }
+
+        function findClipForCamera(camId, targetSeconds) {
+            const clips = globalManifest[camId] || [];
+            for (let clip of clips) {
+                const startSec = parseFilenameToSeconds(clip.filename);
+                if (startSec === null) continue; 
+                const endSec = startSec + 60; 
+                
+                if (targetSeconds >= startSec && targetSeconds <= endSec) {
+                    return { url: clip.url, offset: targetSeconds - startSec };
+                }
+            }
+            return null; 
+        }
+
+        function updateCamerasToScrubber(targetSeconds, isManualScrub = false) {
+            activeCameras.forEach(camId => {
+                const videoEl = document.getElementById(`video-${camId}`);
+                const statusBadge = document.getElementById(`badge-${camId}`);
+                const overlay = document.getElementById(`overlay-${camId}`);
+                const clip = findClipForCamera(camId, targetSeconds);
+
+                if (clip) {
+                    if (!videoEl.src.includes(clip.url.replace('./', ''))) {
+                        videoEl.src = clip.url;
+                        videoEl.style.display = 'block';
+                        overlay.style.display = 'none';
+                        statusBadge.innerText = "HISTORY";
+                        statusBadge.className = "status-badge history";
+                        
+                        videoEl.onloadedmetadata = () => {
+                            videoEl.currentTime = clip.offset;
+                            if (isPlayingHistory) videoEl.play().catch(e => {});
+                        };
+                    } else {
+                        if (videoEl.readyState > 0 && clip.offset > videoEl.duration) {
+                            videoEl.style.display = 'none';
+                            overlay.style.display = 'flex';
+                            statusBadge.innerText = "NO MOTION";
+                            statusBadge.className = "status-badge nomotion";
+                        } else {
+                            videoEl.style.display = 'block';
+                            overlay.style.display = 'none';
+                            statusBadge.innerText = "HISTORY";
+                            statusBadge.className = "status-badge history";
+                            
+                            const drift = Math.abs(videoEl.currentTime - clip.offset);
+                            if (isManualScrub || drift > 3) {
+                                 videoEl.currentTime = clip.offset;
+                            }
+                            
+                            if (isPlayingHistory && videoEl.paused) {
+                                videoEl.play().catch(e => {});
+                            } else if (!isPlayingHistory && !videoEl.paused) {
+                                videoEl.pause();
+                            }
+                        }
+                    }
+                } else {
+                    videoEl.src = "";
+                    videoEl.style.display = 'block'; 
+                    overlay.style.display = 'flex';
+                    statusBadge.innerText = "NO MOTION";
+                    statusBadge.className = "status-badge nomotion";
+                }
+            });
+        }
+
+        function returnToLive() {
+            isLive = true;
+            isPlayingHistory = false;
+            if (playbackInterval) clearInterval(playbackInterval);
+            
+            playBtn.innerText = "▶ Play";
+            timeLabel.innerText = "LIVE";
+            timeLabel.style.color = "#4cd137";
+            scrubber.value = 86400; 
+
+            if (currentDayString !== getTodayString()) {
+                setDate(new Date());
+            }
+
+            activeCameras.forEach(camId => {
+                const videoEl = document.getElementById(`video-${camId}`);
+                const statusBadge = document.getElementById(`badge-${camId}`);
+                const overlay = document.getElementById(`overlay-${camId}`);
+                
+                videoEl.style.display = 'block';
+                overlay.style.display = 'none';
+                statusBadge.innerText = "LIVE";
+                statusBadge.className = "status-badge";
+                
+                videoEl.pause();
+                videoEl.removeAttribute('src'); 
+                videoEl.load();
+                
+                if (hlsPlayers[camId]) hlsPlayers[camId].destroy(); 
+                
+                const freshPlaylistUrl = `./cameras/${camId}/stream.m3u8?t=${Date.now()}`;
+                
+                if (Hls.isSupported()) {
+                    // FIXED: explicitly allow credentials for internal JS requests
+                    const hls = new Hls({ 
+                        liveDurationInfinity: true, 
+                        manifestLoadingMaxRetry: 5,
+                        xhrSetup: function(xhr) {
+                            xhr.withCredentials = true;
+                        }
+                    });
+                    hlsPlayers[camId] = hls;
+                    hls.loadSource(freshPlaylistUrl);
+                    hls.attachMedia(videoEl);
+                    hls.on(Hls.Events.MANIFEST_PARSED, () => videoEl.play().catch(e => {}));
+                } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+                    videoEl.src = freshPlaylistUrl;
+                    videoEl.play().catch(e => {});
+                }
+            });
+        }
+
+        scrubber.addEventListener('input', async (e) => {
+            if (isLive) {
+                isLive = false;
+                timeLabel.style.color = "#f39c12";
+                activeCameras.forEach(camId => {
+                    if (hlsPlayers[camId]) hlsPlayers[camId].detachMedia();
+                });
+                await fetchManifest();
+            }
+            const targetSeconds = parseInt(e.target.value, 10);
+            timeLabel.innerText = secondsToTimeStr(targetSeconds);
+            if (isPlayingHistory) playBtn.click(); 
+            
+            updateCamerasToScrubber(targetSeconds, true); 
+        });
+
+        playBtn.addEventListener('click', () => {
+            if (isLive) return; 
+
+            isPlayingHistory = !isPlayingHistory;
+            if (isPlayingHistory) {
+                playBtn.innerText = "⏸ Pause";
+                playbackInterval = setInterval(() => {
+                    let currentVal = parseInt(scrubber.value, 10);
+                    if (currentVal >= 86399) {
+                        returnToLive();
+                    } else {
+                        currentVal += 1; 
+                        scrubber.value = currentVal;
+                        timeLabel.innerText = secondsToTimeStr(currentVal);
+                        
+                        updateCamerasToScrubber(currentVal, false); 
+                    }
+                }, 1000); 
+            } else {
+                playBtn.innerText = "▶ Play";
+                clearInterval(playbackInterval);
+                activeCameras.forEach(camId => {
+                    document.getElementById(`video-${camId}`).pause();
+                });
+            }
+        });
+
+        liveBtn.addEventListener('click', returnToLive);
+
+        document.addEventListener("visibilitychange", () => {
+            if (document.visibilityState === "visible") {
+                if (isLive) {
+                    returnToLive();
+                } else {
+                    fetchManifest();
+                }
+            }
+        });
+
+        document.addEventListener('click', (e) => {
+            const popup = document.getElementById('calendar-popup');
+            const dateBtn = document.getElementById('global-date');
+            if (popup.classList.contains('visible') && !popup.contains(e.target) && !dateBtn.contains(e.target)) {
+                popup.classList.remove('visible');
+            }
+        });
+
+        function adjustGridLayout() {
+            const grid = document.getElementById('grid');
+            const count = activeCameras.length;
+            if (count === 0) return;
+
+            if (window.innerWidth <= 800) {
+                grid.style.gridTemplateColumns = '1fr';
+                grid.style.gridTemplateRows = 'auto';
+                grid.style.overflowY = 'auto';
+                return;
+            }
+
+            grid.style.overflowY = 'hidden'; 
+            let cols, rows;
+            if (count === 1) { cols = 1; rows = 1; }
+            else if (count === 2) { cols = 2; rows = 1; }
+            else if (count <= 4) { cols = 2; rows = 2; }
+            else if (count <= 6) { cols = 3; rows = 2; }
+            else if (count <= 9) { cols = 3; rows = 3; }
+            else if (count <= 12) { cols = 4; rows = 3; }
+            else { 
+                cols = Math.ceil(Math.sqrt(count)); 
+                rows = Math.ceil(count / cols); 
+            }
+            grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+            grid.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
+        }
+
+        window.addEventListener('resize', adjustGridLayout);
+
+        function createCameraDOM(camId, streamPath) {
+            const grid = document.getElementById('grid');
+            const card = document.createElement('div');
+            card.className = 'camera-card';
+            
+            card.innerHTML = `
+                <div class="camera-header">
+                    <span class="camera-title">${camId}</span>
+                    <span class="status-badge" id="badge-${camId}">LIVE</span>
+                </div>
+                <video id="video-${camId}" muted playsinline></video>
+                <div class="no-video-overlay" id="overlay-${camId}">
+                    <div>No Motion Detected</div>
+                </div>
+            `;
+            grid.appendChild(card);
+            activeCameras.push(camId);
+            adjustGridLayout();
+
+            const videoElement = document.getElementById(`video-${camId}`);
+
+            if (Hls.isSupported()) {
+                // FIXED: explicitly allow credentials for internal JS requests
+                const hls = new Hls({ 
+                    liveDurationInfinity: true, 
+                    manifestLoadingMaxRetry: 5,
+                    xhrSetup: function(xhr) {
+                        xhr.withCredentials = true;
+                    } 
+                });
+                hlsPlayers[camId] = hls;
+                hls.loadSource(streamPath);
+                hls.attachMedia(videoElement);
+                hls.on(Hls.Events.MANIFEST_PARSED, () => videoElement.play().catch(e => {}));
+            } else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
+                videoElement.src = streamPath;
+                videoElement.addEventListener('loadedmetadata', () => videoElement.play().catch(e => {}));
+            }
+        }
+
+        async function discoverCameras() {
+            const maxCameras = 10;
+            let foundCount = 0;
+            for (let index = 1; index <= maxCameras; index++) {
+                const camId = `cam${index}`;
+                const streamPath = `./cameras/${camId}/stream.m3u8`;
+                try {
+                    // FIXED: Explicitly send auth credentials for camera discovery ping
+                    const response = await fetch(streamPath, { method: 'HEAD', cache: 'no-store', credentials: 'include' });
+                    if (response.ok) {
+                        createCameraDOM(camId, streamPath);
+                        foundCount++;
+                    }
+                } catch (error) {}
+            }
+            if (foundCount === 0) setTimeout(discoverCameras, 2000);
+        }  
+        
+        setDate(new Date()); 
+        fetchManifest(); 
+        setInterval(fetchManifest, 30000); 
+        discoverCameras();
+    </script>
+</body>
+</html>
