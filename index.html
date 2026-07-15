@@ -102,7 +102,7 @@
             display: flex;
             justify-content: center;
             align-items: center;
-            box-sizing: border-box; /* Ensures the border doesn't break the layout */
+            box-sizing: border-box;
         }
 
         .camera-header {
@@ -150,11 +150,11 @@
         .timeline-bar {
             background: #1a1a1a;
             border-top: 1px solid #333;
-            padding: 15px 20px;
+            padding: 10px 20px;
             display: flex;
             align-items: center;
-            gap: 20px;
-            height: 40px; 
+            gap: 15px;
+            height: 50px; 
             flex-shrink: 0;
         }
 
@@ -184,10 +184,35 @@
             text-align: center;
         }
 
-        .timeline-wrapper {
+        /* --- Viewport and Content Styling --- */
+        .timeline-viewport {
             position: relative;
             flex-grow: 1;
+            height: 100%;
+            overflow-x: auto;
+            overflow-y: hidden;
+            scrollbar-width: thin;
+            scrollbar-color: #555 transparent;
+            display: flex;
+            align-items: center;
+        }
+        
+        .timeline-viewport::-webkit-scrollbar {
+            height: 6px;
+        }
+        .timeline-viewport::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        .timeline-viewport::-webkit-scrollbar-thumb {
+            background-color: #555;
+            border-radius: 3px;
+        }
+
+        .timeline-content {
+            position: relative;
             height: 20px;
+            width: 100%;
+            flex-shrink: 0; /* THE FIX: Prevents flexbox from squishing the zoomed timeline */
             display: flex;
             align-items: center;
         }
@@ -195,7 +220,7 @@
         .heatmap-track {
             position: absolute;
             left: 0; right: 0;
-            height: 14px; /* Increased height to accommodate multiple lanes */
+            height: 14px; 
             background: #222;
             border-radius: 4px;
             pointer-events: none;
@@ -205,36 +230,95 @@
 
         .heatmap-tick {
             position: absolute;
-            /* background is now set dynamically in JS */
+            min-width: 2px; /* Ensures visibility when zoomed out */
             opacity: 0.8;
+            border-radius: 1px;
         }
 
+        .zoom-container {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            min-width: 120px;
+            background: #222;
+            padding: 4px 10px;
+            border-radius: 4px;
+        }
+
+        /* --- Range Slider Resets and Custom Styling --- */
         input[type=range] {
-            position: absolute;
-            width: 100%;
             -webkit-appearance: none;
             background: transparent;
             cursor: pointer;
-            z-index: 2;
-            margin: 0;
         }
         input[type=range]:focus { outline: none; }
         
-        input[type=range]::-webkit-slider-runnable-track {
+        #scrubber {
+            position: absolute;
             width: 100%;
-            height: 14px; /* Matched to heatmap track */
+            z-index: 2;
+            margin: 0;
+        }
+        #scrubber::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 14px;
             background: rgba(255, 255, 255, 0.05);
             border-radius: 4px;
         }
-        
-        input[type=range]::-webkit-slider-thumb {
-            height: 24px; /* Slightly taller for the new track */
-            width: 10px;
+        #scrubber::-moz-range-track {
+            width: 100%;
+            height: 14px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 4px;
+        }
+        #scrubber::-webkit-slider-thumb {
+            height: 24px;
+            width: 4px;
             border-radius: 2px;
             background: #f39c12;
             -webkit-appearance: none;
             margin-top: -5px;
-            box-shadow: 0 0 5px rgba(0,0,0,0.5);
+            box-shadow: 0 0 5px rgba(0,0,0,0.8);
+        }
+        #scrubber::-moz-range-thumb {
+            height: 24px;
+            width: 4px;
+            border-radius: 2px;
+            background: #f39c12;
+            border: none;
+            box-shadow: 0 0 5px rgba(0,0,0,0.8);
+        }
+
+        #zoom-slider {
+            width: 100%;
+            margin: 0;
+        }
+        #zoom-slider::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 4px;
+            background: #444;
+            border-radius: 2px;
+        }
+        #zoom-slider::-moz-range-track {
+            width: 100%;
+            height: 4px;
+            background: #444;
+            border-radius: 2px;
+        }
+        #zoom-slider::-webkit-slider-thumb {
+            height: 12px;
+            width: 12px;
+            border-radius: 50%;
+            background: #4cd137;
+            -webkit-appearance: none;
+            margin-top: -4px;
+        }
+        #zoom-slider::-moz-range-thumb {
+            height: 12px;
+            width: 12px;
+            border-radius: 50%;
+            background: #4cd137;
+            border: none;
         }
 
         @media (max-width: 800px) {
@@ -245,7 +329,7 @@
                 justify-content: space-between;
                 gap: 10px;
             }
-            .timeline-wrapper {
+            .timeline-viewport {
                 width: 100%;
                 order: 3; 
                 margin-top: 5px;
@@ -287,42 +371,35 @@
         <button class="ctrl-btn" id="btn-play">▶ Play</button>
         <div class="time-display" id="time-label">LIVE</div>
         
-        <div class="timeline-wrapper">
-            <div id="heatmap" class="heatmap-track"></div>
-            <input type="range" id="scrubber" min="0" max="86400" value="86400">
+        <div class="timeline-viewport" id="timeline-viewport">
+            <div class="timeline-content" id="timeline-content">
+                <div id="heatmap" class="heatmap-track"></div>
+                <input type="range" id="scrubber" min="0" max="86400" value="86400">
+            </div>
+        </div>
+
+        <div class="zoom-container" title="Zoom Timeline">
+            <span style="font-size: 0.8rem;">🔍</span>
+            <input type="range" id="zoom-slider" min="1" max="144" value="1" step="1">
         </div>
         
         <button class="ctrl-btn live-btn" id="btn-live">🔴 Go Live</button>
     </div>
 
     <script>
-        // --- Easter Egg: Occasional Brand Glitch ---
         function runEasterEgg() {
             const brand = document.getElementById('brand-text');
             if (!brand) return;
-
-            // 15% chance to trigger every 10 seconds
             if (Math.random() < 0.15) {
                 const originalText = brand.innerText;
                 brand.innerText = (originalText === "ArgoNVR") ? "ArgonVR" : "ArgoNVR";
-                
-                // Switch back after 3 seconds
-                setTimeout(() => {
-                    brand.innerText = originalText;
-                }, 3000);
+                setTimeout(() => { brand.innerText = originalText; }, 3000);
             }
         }
         setInterval(runEasterEgg, 10000);
 
-        // --- Color Palette and Helper ---
         const CAMERA_COLORS = [
-            '#3498db', // Blue
-            '#2ecc71', // Green
-            '#f39c12', // Orange
-            '#9b59b6', // Purple
-            '#e74c3c', // Red
-            '#1abc9c', // Teal
-            '#e84393'  // Pink
+            '#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#e74c3c', '#1abc9c', '#e84393'
         ];
 
         function getCameraColor(camId) {
@@ -347,6 +424,24 @@
         const playBtn = document.getElementById('btn-play');
         const liveBtn = document.getElementById('btn-live');
         const dateDisplay = document.getElementById('global-date');
+        const zoomSlider = document.getElementById('zoom-slider');
+        const timelineContent = document.getElementById('timeline-content');
+        const timelineViewport = document.getElementById('timeline-viewport');
+
+        // --- Viewport Helper Functions ---
+        function centerViewportOnScrubber() {
+            const viewportWidth = timelineViewport.clientWidth;
+            const currentVal = parseInt(scrubber.value, 10);
+            const scrubberPct = currentVal / 86400;
+            const newScrubberX = scrubberPct * timelineContent.clientWidth;
+            timelineViewport.scrollLeft = newScrubberX - (viewportWidth / 2);
+        }
+
+        zoomSlider.addEventListener('input', () => {
+            const zoomLevel = parseFloat(zoomSlider.value);
+            timelineContent.style.width = `${zoomLevel * 100}%`;
+            centerViewportOnScrubber();
+        });
 
         function getTodayString() {
             const now = new Date();
@@ -380,6 +475,7 @@
                     scrubber.value = 43200; 
                     timeLabel.innerText = secondsToTimeStr(43200);
                     updateCamerasToScrubber(43200, true);
+                    setTimeout(centerViewportOnScrubber, 50);
                 }
             }
         }
@@ -441,7 +537,8 @@
                     if (startSec === null) return; 
                     
                     const leftPct = (startSec / 86400) * 100;
-                    const widthPct = Math.max((60 / 86400) * 100, 0.15); 
+                    // Provide true percentage without arbitrary inflation; min-width handles visibility
+                    const widthPct = (60 / 86400) * 100; 
 
                     const tick = document.createElement('div');
                     tick.className = 'heatmap-tick';
@@ -449,7 +546,6 @@
                     tick.style.width = `${widthPct}%`;
                     tick.style.backgroundColor = camColor;
 
-                    // Create horizontal micro-lanes to prevent overlapping
                     const laneHeight = 100 / numCams;
                     tick.style.top = `${index * laneHeight}%`;
                     tick.style.height = `${laneHeight}%`;
@@ -600,6 +696,7 @@
             timeLabel.innerText = "LIVE";
             timeLabel.style.color = "#4cd137";
             scrubber.value = 86400; 
+            setTimeout(centerViewportOnScrubber, 50);
 
             if (currentDayString !== getTodayString()) {
                 setDate(new Date());
@@ -656,6 +753,15 @@
             if (isPlayingHistory) playBtn.click(); 
             
             updateCamerasToScrubber(targetSeconds, true); 
+
+            // Auto-pan viewport if dragging near the edge
+            const scrubberX = (targetSeconds / 86400) * timelineContent.clientWidth;
+            const buffer = 50; 
+            if (scrubberX < timelineViewport.scrollLeft + buffer) {
+                timelineViewport.scrollLeft = scrubberX - buffer;
+            } else if (scrubberX > timelineViewport.scrollLeft + timelineViewport.clientWidth - buffer) {
+                timelineViewport.scrollLeft = scrubberX - timelineViewport.clientWidth + buffer;
+            }
         });
 
         playBtn.addEventListener('click', () => {
@@ -674,6 +780,12 @@
                         timeLabel.innerText = secondsToTimeStr(currentVal);
                         
                         updateCamerasToScrubber(currentVal, false); 
+                        
+                        // Keep playhead in view while playing
+                        const scrubberX = (currentVal / 86400) * timelineContent.clientWidth;
+                        if (scrubberX < timelineViewport.scrollLeft || scrubberX > timelineViewport.scrollLeft + timelineViewport.clientWidth) {
+                            timelineViewport.scrollLeft = scrubberX - timelineViewport.clientWidth / 2;
+                        }
                     }
                 }, 1000); 
             } else {
