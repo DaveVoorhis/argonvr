@@ -730,40 +730,44 @@
                 setDate(new Date());
             }
 
-            activeCameras.forEach(camId => {
+            activeCameras.forEach((camId, index) => {
                 const videoEl = document.getElementById(`video-${camId}`);
                 const statusBadge = document.getElementById(`badge-${camId}`);
                 const overlay = document.getElementById(`overlay-${camId}`);
                 
+                // Immediately update the UI for snappy feedback
                 videoEl.style.display = 'block';
                 overlay.style.display = 'none';
                 statusBadge.innerText = "LIVE";
                 statusBadge.className = "status-badge";
                 
-                videoEl.pause();
-                videoEl.removeAttribute('src'); 
-                videoEl.load();
-                
-                if (hlsPlayers[camId]) hlsPlayers[camId].destroy(); 
-                
-                const freshPlaylistUrl = `./cameras/${camId}/stream.m3u8?t=${Date.now()}`;
-                
-                if (Hls.isSupported()) {
-                    const hls = new Hls({ 
-                        liveDurationInfinity: true, 
-                        manifestLoadingMaxRetry: 5,
-                        xhrSetup: function(xhr) {
-                            xhr.withCredentials = true;
-                        }
-                    });
-                    hlsPlayers[camId] = hls;
-                    hls.loadSource(freshPlaylistUrl);
-                    hls.attachMedia(videoEl);
-                    hls.on(Hls.Events.MANIFEST_PARSED, () => videoEl.play().catch(e => {}));
-                } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-                    videoEl.src = freshPlaylistUrl;
-                    videoEl.play().catch(e => {});
-                }
+                // Stagger the network requests by 100ms per camera
+                setTimeout(() => {
+                    videoEl.pause();
+                    videoEl.removeAttribute('src'); 
+                    videoEl.load();
+                    
+                    if (hlsPlayers[camId]) hlsPlayers[camId].destroy(); 
+                    
+                    const freshPlaylistUrl = `./cameras/${camId}/stream.m3u8?t=${Date.now()}`;
+                    
+                    if (Hls.isSupported()) {
+                        const hls = new Hls({ 
+                            liveDurationInfinity: true, 
+                            manifestLoadingMaxRetry: 5,
+                            xhrSetup: function(xhr) {
+                                xhr.withCredentials = true;
+                            }
+                        });
+                        hlsPlayers[camId] = hls;
+                        hls.loadSource(freshPlaylistUrl);
+                        hls.attachMedia(videoEl);
+                        hls.on(Hls.Events.MANIFEST_PARSED, () => videoEl.play().catch(e => {}));
+                    } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+                        videoEl.src = freshPlaylistUrl;
+                        videoEl.play().catch(e => {});
+                    }
+                }, index * 100); 
             });
         }
 

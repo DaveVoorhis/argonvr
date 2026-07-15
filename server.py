@@ -104,7 +104,6 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(b"Invalid username or password.")
 
 if __name__ == "__main__":
-    socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("", PORT), SecureAuthHandler) as httpd:
-        print(f"🔒 Secure ArgoNVR web server running on port {PORT}")
+    with http.server.ThreadingHTTPServer(("", PORT), SecureAuthHandler) as httpd:
+        print(f"🔒 Secure ArgoNVR web server running on port {PORT} (Multi-threaded)")
         httpd.serve_forever()
