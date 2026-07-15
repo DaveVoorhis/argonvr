@@ -212,14 +212,14 @@
             position: relative;
             height: 20px;
             width: 100%;
-            flex-shrink: 0; /* THE FIX: Prevents flexbox from squishing the zoomed timeline */
+            flex-shrink: 0; 
             display: flex;
             align-items: center;
         }
 
         .heatmap-track {
             position: absolute;
-            left: 0; right: 0;
+            left: 2px; right: 2px; /* Fix 1: Align bounds with 4px slider thumb travel */
             height: 14px; 
             background: #222;
             border-radius: 4px;
@@ -230,7 +230,7 @@
 
         .heatmap-tick {
             position: absolute;
-            min-width: 2px; /* Ensures visibility when zoomed out */
+            min-width: 1px; /* Fix 2: Reduced from 2px to stop visual duration bloat */
             opacity: 0.8;
             border-radius: 1px;
         }
@@ -258,6 +258,7 @@
             width: 100%;
             z-index: 2;
             margin: 0;
+            padding: 0;
         }
         #scrubber::-webkit-slider-runnable-track {
             width: 100%;
@@ -273,7 +274,7 @@
         }
         #scrubber::-webkit-slider-thumb {
             height: 24px;
-            width: 4px;
+            width: 4px; /* The 4px width defines the 2px geometric margin */
             border-radius: 2px;
             background: #f39c12;
             -webkit-appearance: none;
@@ -428,7 +429,6 @@
         const timelineContent = document.getElementById('timeline-content');
         const timelineViewport = document.getElementById('timeline-viewport');
 
-        // --- Viewport Helper Functions ---
         function centerViewportOnScrubber() {
             const viewportWidth = timelineViewport.clientWidth;
             const currentVal = parseInt(scrubber.value, 10);
@@ -501,7 +501,21 @@
         async function fetchManifest() {
             try {
                 const response = await fetch('./recordings/history.json', { cache: 'no-store', credentials: 'include' });
-                globalManifest = await response.json();
+                const newManifest = await response.json();
+                
+                // Preserve true durations that we dynamically loaded from metadata
+                Object.keys(newManifest).forEach(camId => {
+                    if (globalManifest[camId]) {
+                        newManifest[camId].forEach(newClip => {
+                            const existingClip = globalManifest[camId].find(c => c.filename === newClip.filename);
+                            if (existingClip && existingClip.duration) {
+                                newClip.duration = existingClip.duration;
+                            }
+                        });
+                    }
+                });
+                
+                globalManifest = newManifest;
                 
                 availableDates.clear();
                 Object.values(globalManifest).forEach(clips => {
@@ -536,9 +550,11 @@
                     const startSec = parseFilenameToSeconds(clip.filename);
                     if (startSec === null) return; 
                     
+                    // Fix 3: Use the dynamically captured actual duration, or safely fallback to the 60s max
+                    const clipDuration = clip.duration || 60; 
+                    
                     const leftPct = (startSec / 86400) * 100;
-                    // Provide true percentage without arbitrary inflation; min-width handles visibility
-                    const widthPct = (60 / 86400) * 100; 
+                    const widthPct = (clipDuration / 86400) * 100; 
 
                     const tick = document.createElement('div');
                     tick.className = 'heatmap-tick';
@@ -622,13 +638,16 @@
 
         function findClipForCamera(camId, targetSeconds) {
             const clips = globalManifest[camId] || [];
-            for (let clip of clips) {
-                const startSec = parseFilenameToSeconds(clip.filename);
+            for (let clipRef of clips) {
+                const startSec = parseFilenameToSeconds(clipRef.filename);
                 if (startSec === null) continue; 
-                const endSec = startSec + 60; 
+                
+                const clipDuration = clipRef.duration || 60; 
+                const endSec = startSec + clipDuration; 
                 
                 if (targetSeconds >= startSec && targetSeconds <= endSec) {
-                    return { url: clip.url, offset: targetSeconds - startSec };
+                    // Return the exact manifest reference so we can update it later
+                    return { manifestRef: clipRef, offset: targetSeconds - startSec };
                 }
             }
             return null; 
@@ -639,22 +658,31 @@
                 const videoEl = document.getElementById(`video-${camId}`);
                 const statusBadge = document.getElementById(`badge-${camId}`);
                 const overlay = document.getElementById(`overlay-${camId}`);
-                const clip = findClipForCamera(camId, targetSeconds);
+                const matchData = findClipForCamera(camId, targetSeconds);
 
-                if (clip) {
-                    if (!videoEl.src.includes(clip.url.replace('./', ''))) {
-                        videoEl.src = clip.url;
+                if (matchData) {
+                    const manifestRef = matchData.manifestRef;
+                    const offset = matchData.offset;
+
+                    if (!videoEl.src.includes(manifestRef.url.replace('./', ''))) {
+                        videoEl.src = manifestRef.url;
                         videoEl.style.display = 'block';
                         overlay.style.display = 'none';
                         statusBadge.innerText = "HISTORY";
                         statusBadge.className = "status-badge history";
                         
                         videoEl.onloadedmetadata = () => {
-                            videoEl.currentTime = clip.offset;
+                            // Fix 3 cont: Capture the real duration the first time the video loads
+                            if (!manifestRef.duration && videoEl.duration > 0 && videoEl.duration !== Infinity) {
+                                manifestRef.duration = videoEl.duration;
+                                renderTimelineHeatmap(); // Immediately snap the heatmap tick to true length
+                            }
+                            
+                            videoEl.currentTime = offset;
                             if (isPlayingHistory) videoEl.play().catch(e => {});
                         };
                     } else {
-                        if (videoEl.readyState > 0 && clip.offset > videoEl.duration) {
+                        if (videoEl.readyState > 0 && offset > videoEl.duration) {
                             videoEl.style.display = 'none';
                             overlay.style.display = 'flex';
                             statusBadge.innerText = "NO MOTION";
@@ -665,9 +693,9 @@
                             statusBadge.innerText = "HISTORY";
                             statusBadge.className = "status-badge history";
                             
-                            const drift = Math.abs(videoEl.currentTime - clip.offset);
+                            const drift = Math.abs(videoEl.currentTime - offset);
                             if (isManualScrub || drift > 3) {
-                                 videoEl.currentTime = clip.offset;
+                                 videoEl.currentTime = offset;
                             }
                             
                             if (isPlayingHistory && videoEl.paused) {
@@ -754,7 +782,6 @@
             
             updateCamerasToScrubber(targetSeconds, true); 
 
-            // Auto-pan viewport if dragging near the edge
             const scrubberX = (targetSeconds / 86400) * timelineContent.clientWidth;
             const buffer = 50; 
             if (scrubberX < timelineViewport.scrollLeft + buffer) {
@@ -781,7 +808,6 @@
                         
                         updateCamerasToScrubber(currentVal, false); 
                         
-                        // Keep playhead in view while playing
                         const scrubberX = (currentVal / 86400) * timelineContent.clientWidth;
                         if (scrubberX < timelineViewport.scrollLeft || scrubberX > timelineViewport.scrollLeft + timelineViewport.clientWidth) {
                             timelineViewport.scrollLeft = scrubberX - timelineViewport.clientWidth / 2;
