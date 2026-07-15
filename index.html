@@ -102,6 +102,7 @@
             display: flex;
             justify-content: center;
             align-items: center;
+            box-sizing: border-box; /* Ensures the border doesn't break the layout */
         }
 
         .camera-header {
@@ -194,7 +195,7 @@
         .heatmap-track {
             position: absolute;
             left: 0; right: 0;
-            height: 8px;
+            height: 14px; /* Increased height to accommodate multiple lanes */
             background: #222;
             border-radius: 4px;
             pointer-events: none;
@@ -204,8 +205,7 @@
 
         .heatmap-tick {
             position: absolute;
-            top: 0; bottom: 0;
-            background: #e74c3c;
+            /* background is now set dynamically in JS */
             opacity: 0.8;
         }
 
@@ -222,18 +222,18 @@
         
         input[type=range]::-webkit-slider-runnable-track {
             width: 100%;
-            height: 8px;
+            height: 14px; /* Matched to heatmap track */
             background: rgba(255, 255, 255, 0.05);
             border-radius: 4px;
         }
         
         input[type=range]::-webkit-slider-thumb {
-            height: 20px;
+            height: 24px; /* Slightly taller for the new track */
             width: 10px;
             border-radius: 2px;
             background: #f39c12;
             -webkit-appearance: none;
-            margin-top: -6px;
+            margin-top: -5px;
             box-shadow: 0 0 5px rgba(0,0,0,0.5);
         }
 
@@ -313,6 +313,22 @@
             }
         }
         setInterval(runEasterEgg, 10000);
+
+        // --- Color Palette and Helper ---
+        const CAMERA_COLORS = [
+            '#3498db', // Blue
+            '#2ecc71', // Green
+            '#f39c12', // Orange
+            '#9b59b6', // Purple
+            '#e74c3c', // Red
+            '#1abc9c', // Teal
+            '#e84393'  // Pink
+        ];
+
+        function getCameraColor(camId) {
+            const num = parseInt(camId.replace(/\D/g, '')) || 1;
+            return CAMERA_COLORS[(num - 1) % CAMERA_COLORS.length];
+        }
 
         let globalManifest = {};
         const hlsPlayers = {};
@@ -413,8 +429,13 @@
             const heatmap = document.getElementById('heatmap');
             heatmap.innerHTML = ''; 
 
-            Object.keys(globalManifest).forEach(camId => {
+            const cams = Object.keys(globalManifest);
+            const numCams = cams.length || 1;
+
+            cams.forEach((camId, index) => {
                 const clips = globalManifest[camId];
+                const camColor = getCameraColor(camId);
+
                 clips.forEach(clip => {
                     const startSec = parseFilenameToSeconds(clip.filename);
                     if (startSec === null) return; 
@@ -426,6 +447,13 @@
                     tick.className = 'heatmap-tick';
                     tick.style.left = `${leftPct}%`;
                     tick.style.width = `${widthPct}%`;
+                    tick.style.backgroundColor = camColor;
+
+                    // Create horizontal micro-lanes to prevent overlapping
+                    const laneHeight = 100 / numCams;
+                    tick.style.top = `${index * laneHeight}%`;
+                    tick.style.height = `${laneHeight}%`;
+
                     heatmap.appendChild(tick);
                 });
             });
@@ -712,9 +740,12 @@
             const card = document.createElement('div');
             card.className = 'camera-card';
             
+            const camColor = getCameraColor(camId);
+            card.style.borderTop = `4px solid ${camColor}`;
+            
             card.innerHTML = `
                 <div class="camera-header">
-                    <span class="camera-title">${camId}</span>
+                    <span class="camera-title" style="color: ${camColor}; text-shadow: 1px 1px 2px black;">${camId}</span>
                     <span class="status-badge" id="badge-${camId}">LIVE</span>
                 </div>
                 <video id="video-${camId}" muted playsinline></video>
