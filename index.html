@@ -173,8 +173,18 @@
             white-space: nowrap;
         }
         .ctrl-btn:hover { background: #444; }
+        
+        .ctrl-btn:disabled {
+            background: #2a2a2a !important;
+            color: #666 !important;
+            cursor: not-allowed;
+        }
+
         .ctrl-btn.live-btn { background: #e74c3c; }
         .ctrl-btn.live-btn:hover { background: #c0392b; }
+        
+        .ctrl-btn.live-btn.active { background: #2ecc71; }
+        .ctrl-btn.live-btn.active:hover { background: #27ae60; }
 
         .time-display {
             font-family: monospace;
@@ -184,7 +194,6 @@
             text-align: center;
         }
 
-        /* --- Viewport and Content Styling --- */
         .timeline-viewport {
             position: relative;
             flex-grow: 1;
@@ -219,7 +228,7 @@
 
         .heatmap-track {
             position: absolute;
-            left: 2px; right: 2px; /* Fix 1: Align bounds with 4px slider thumb travel */
+            left: 2px; right: 2px; 
             height: 14px; 
             background: #222;
             border-radius: 4px;
@@ -230,7 +239,7 @@
 
         .heatmap-tick {
             position: absolute;
-            min-width: 1px; /* Fix 2: Reduced from 2px to stop visual duration bloat */
+            min-width: 1px; 
             opacity: 0.8;
             border-radius: 1px;
         }
@@ -245,7 +254,6 @@
             border-radius: 4px;
         }
 
-        /* --- Range Slider Resets and Custom Styling --- */
         input[type=range] {
             -webkit-appearance: none;
             background: transparent;
@@ -274,7 +282,7 @@
         }
         #scrubber::-webkit-slider-thumb {
             height: 24px;
-            width: 4px; /* The 4px width defines the 2px geometric margin */
+            width: 4px; 
             border-radius: 2px;
             background: #f39c12;
             -webkit-appearance: none;
@@ -415,6 +423,7 @@
         let isLive = true;
         let isPlayingHistory = false;
         let playbackInterval = null;
+        let liveSyncInterval = null; 
         let currentDayString = ""; 
         
         let availableDates = new Set();
@@ -467,6 +476,10 @@
                     returnToLive();
                 } else {
                     isLive = false;
+                    playBtn.disabled = false;
+                    liveBtn.classList.remove('active');
+                    if (liveSyncInterval) clearInterval(liveSyncInterval);
+
                     timeLabel.style.color = "#f39c12";
                     activeCameras.forEach(camId => {
                         if (hlsPlayers[camId]) hlsPlayers[camId].detachMedia();
@@ -503,7 +516,6 @@
                 const response = await fetch('./recordings/history.json', { cache: 'no-store', credentials: 'include' });
                 const newManifest = await response.json();
                 
-                // Preserve true durations that we dynamically loaded from metadata
                 Object.keys(newManifest).forEach(camId => {
                     if (globalManifest[camId]) {
                         newManifest[camId].forEach(newClip => {
@@ -550,7 +562,6 @@
                     const startSec = parseFilenameToSeconds(clip.filename);
                     if (startSec === null) return; 
                     
-                    // Fix 3: Use the dynamically captured actual duration, or safely fallback to the 60s max
                     const clipDuration = clip.duration || 60; 
                     
                     const leftPct = (startSec / 86400) * 100;
@@ -646,7 +657,6 @@
                 const endSec = startSec + clipDuration; 
                 
                 if (targetSeconds >= startSec && targetSeconds <= endSec) {
-                    // Return the exact manifest reference so we can update it later
                     return { manifestRef: clipRef, offset: targetSeconds - startSec };
                 }
             }
@@ -672,10 +682,9 @@
                         statusBadge.className = "status-badge history";
                         
                         videoEl.onloadedmetadata = () => {
-                            // Fix 3 cont: Capture the real duration the first time the video loads
                             if (!manifestRef.duration && videoEl.duration > 0 && videoEl.duration !== Infinity) {
                                 manifestRef.duration = videoEl.duration;
-                                renderTimelineHeatmap(); // Immediately snap the heatmap tick to true length
+                                renderTimelineHeatmap(); 
                             }
                             
                             videoEl.currentTime = offset;
@@ -716,64 +725,99 @@
         }
 
         function returnToLive() {
+            if (liveSyncInterval) clearInterval(liveSyncInterval);
+
             isLive = true;
             isPlayingHistory = false;
             if (playbackInterval) clearInterval(playbackInterval);
             
+            // Adjust Play button appearance
             playBtn.innerText = "▶ Play";
+            playBtn.disabled = true;
+
+            // Make the Go Live button green
+            liveBtn.classList.add('active');
+
             timeLabel.innerText = "LIVE";
             timeLabel.style.color = "#4cd137";
-            scrubber.value = 86400; 
+
+            // Determine the exact current time for the scrubber
+            const setScrubberToNow = () => {
+                const d = new Date();
+                const curSec = (d.getHours() * 3600) + (d.getMinutes() * 60) + d.getSeconds();
+                scrubber.value = curSec;
+                return curSec;
+            };
+            
+            setScrubberToNow();
             setTimeout(centerViewportOnScrubber, 50);
+
+            // Continuously advance the scrubber to match the real clock
+            liveSyncInterval = setInterval(() => {
+                if (!isLive) return;
+                const curSec = setScrubberToNow();
+
+                // If zoomed in, cleanly pan the viewport when the scrubber reaches the right edge
+                const scrubberX = (curSec / 86400) * timelineContent.clientWidth;
+                const viewLeft = timelineViewport.scrollLeft;
+                const viewRight = viewLeft + timelineViewport.clientWidth;
+                
+                if (scrubberX > viewRight - 50 || scrubberX < viewLeft) {
+                    timelineViewport.scrollLeft = scrubberX - timelineViewport.clientWidth / 2;
+                }
+            }, 1000);
 
             if (currentDayString !== getTodayString()) {
                 setDate(new Date());
+                return;
             }
 
-            activeCameras.forEach((camId, index) => {
+            activeCameras.forEach(camId => {
                 const videoEl = document.getElementById(`video-${camId}`);
                 const statusBadge = document.getElementById(`badge-${camId}`);
                 const overlay = document.getElementById(`overlay-${camId}`);
                 
-                // Immediately update the UI for snappy feedback
                 videoEl.style.display = 'block';
                 overlay.style.display = 'none';
                 statusBadge.innerText = "LIVE";
                 statusBadge.className = "status-badge";
                 
-                // Stagger the network requests by 100ms per camera
-                setTimeout(() => {
-                    videoEl.pause();
-                    videoEl.removeAttribute('src'); 
-                    videoEl.load();
-                    
-                    if (hlsPlayers[camId]) hlsPlayers[camId].destroy(); 
-                    
-                    const freshPlaylistUrl = `./cameras/${camId}/stream.m3u8?t=${Date.now()}`;
-                    
-                    if (Hls.isSupported()) {
-                        const hls = new Hls({ 
-                            liveDurationInfinity: true, 
-                            manifestLoadingMaxRetry: 5,
-                            xhrSetup: function(xhr) {
-                                xhr.withCredentials = true;
-                            }
-                        });
-                        hlsPlayers[camId] = hls;
-                        hls.loadSource(freshPlaylistUrl);
-                        hls.attachMedia(videoEl);
-                        hls.on(Hls.Events.MANIFEST_PARSED, () => videoEl.play().catch(e => {}));
-                    } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-                        videoEl.src = freshPlaylistUrl;
-                        videoEl.play().catch(e => {});
-                    }
-                }, index * 100); 
+                videoEl.pause();
+                videoEl.removeAttribute('src'); 
+                videoEl.load();
+                
+                if (hlsPlayers[camId]) hlsPlayers[camId].destroy(); 
+                
+                const freshPlaylistUrl = `./cameras/${camId}/stream.m3u8?t=${Date.now()}`;
+                
+                if (Hls.isSupported()) {
+                    const hls = new Hls({ 
+                        liveDurationInfinity: true, 
+                        manifestLoadingMaxRetry: 5,
+                        xhrSetup: function(xhr) {
+                            xhr.withCredentials = true;
+                        }
+                    });
+                    hlsPlayers[camId] = hls;
+                    hls.loadSource(freshPlaylistUrl);
+                    hls.attachMedia(videoEl);
+                    hls.on(Hls.Events.MANIFEST_PARSED, () => videoEl.play().catch(e => {}));
+                } else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+                    videoEl.src = freshPlaylistUrl;
+                    videoEl.play().catch(e => {});
+                }
             });
         }
 
         scrubber.addEventListener('input', async (e) => {
             if (isLive) {
                 isLive = false;
+                
+                // Re-enable playback options and disable the green Live status
+                playBtn.disabled = false;
+                liveBtn.classList.remove('active');
+                if (liveSyncInterval) clearInterval(liveSyncInterval);
+
                 timeLabel.style.color = "#f39c12";
                 activeCameras.forEach(camId => {
                     if (hlsPlayers[camId]) hlsPlayers[camId].detachMedia();
@@ -936,7 +980,8 @@
             if (foundCount === 0) setTimeout(discoverCameras, 2000);
         }  
         
-        setDate(new Date()); 
+        // Start initialization directly into Live mode
+        returnToLive(); 
         fetchManifest(); 
         setInterval(fetchManifest, 30000); 
         discoverCameras();
