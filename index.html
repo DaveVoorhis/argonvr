@@ -244,6 +244,28 @@
             border-radius: 1px;
         }
 
+        /* --- New Ruler Styling --- */
+        .timeline-ruler {
+            position: absolute;
+            left: 2px; right: 2px; 
+            height: 14px; 
+            pointer-events: none;
+            z-index: 2; /* Sit directly above the colored heatmap, but under the thumb */
+        }
+        .ruler-tick {
+            position: absolute;
+            bottom: 0;
+            width: 1px;
+            background: rgba(255, 255, 255, 0.2);
+        }
+        .ruler-tick.hour {
+            height: 14px; /* Full height of the track */
+            background: rgba(255, 255, 255, 0.5); /* Brighter for hours */
+        }
+        .ruler-tick.five-min {
+            height: 6px; /* Short stub for 5 minutes */
+        }
+
         .zoom-container {
             display: flex;
             align-items: center;
@@ -264,7 +286,7 @@
         #scrubber {
             position: absolute;
             width: 100%;
-            z-index: 2;
+            z-index: 3; /* Elevated above the ruler layer */
             margin: 0;
             padding: 0;
         }
@@ -382,7 +404,7 @@
         
         <div class="timeline-viewport" id="timeline-viewport">
             <div class="timeline-content" id="timeline-content">
-                <div id="heatmap" class="heatmap-track"></div>
+                <div id="timeline-ruler" class="timeline-ruler"></div> <div id="heatmap" class="heatmap-track"></div>
                 <input type="range" id="scrubber" min="0" max="86400" value="86400">
             </div>
         </div>
@@ -437,6 +459,23 @@
         const zoomSlider = document.getElementById('zoom-slider');
         const timelineContent = document.getElementById('timeline-content');
         const timelineViewport = document.getElementById('timeline-viewport');
+
+        function renderTimelineRuler() {
+            const ruler = document.getElementById('timeline-ruler');
+            ruler.innerHTML = ''; 
+            
+            // Generate ticks for every 5 minutes (300 seconds) in a 24-hour period (86400s)
+            for (let sec = 0; sec <= 86400; sec += 300) {
+                const isHour = (sec % 3600 === 0);
+                const leftPct = (sec / 86400) * 100;
+                
+                const tick = document.createElement('div');
+                tick.className = `ruler-tick ${isHour ? 'hour' : 'five-min'}`;
+                tick.style.left = `${leftPct}%`;
+                
+                ruler.appendChild(tick);
+            }
+        }
 
         function centerViewportOnScrubber() {
             const viewportWidth = timelineViewport.clientWidth;
@@ -979,6 +1018,9 @@
             }
             if (foundCount === 0) setTimeout(discoverCameras, 2000);
         }  
+        
+        // Render the static timeline ruler once
+        renderTimelineRuler();
         
         // Start initialization directly into Live mode
         returnToLive(); 
