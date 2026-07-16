@@ -118,15 +118,6 @@
         }
         
         .camera-title { font-weight: 600; text-transform: uppercase; font-size: 0.85rem; color: #fff; }
-        .status-badge { 
-            font-size: 0.75rem; 
-            padding: 2px 6px; 
-            border-radius: 4px; 
-            background: #e74c3c; 
-            font-weight: bold;
-        }
-        .status-badge.history { background: #f39c12; }
-        .status-badge.nomotion { background: #555; }
 
         video {
             width: 100%;
@@ -429,7 +420,7 @@
             <span class="zoom-btn" onclick="adjustZoom(1)">+</span>
         </div>
         
-        <button class="ctrl-btn live-btn" id="btn-live">🔴 Go Live</button>
+        <button class="ctrl-btn live-btn" id="btn-live">🔄 Reset</button>
     </div>
 
     <script>
@@ -538,6 +529,7 @@
                     returnToLive();
                 } else {
                     isLive = false;
+                    liveBtn.innerText = "🔴 Go Live";
                     playBtn.disabled = false;
                     liveBtn.classList.remove('active');
                     if (liveSyncInterval) clearInterval(liveSyncInterval);
@@ -728,7 +720,6 @@
         function updateCamerasToScrubber(targetSeconds, isManualScrub = false) {
             activeCameras.forEach(camId => {
                 const videoEl = document.getElementById(`video-${camId}`);
-                const statusBadge = document.getElementById(`badge-${camId}`);
                 const overlay = document.getElementById(`overlay-${camId}`);
                 const matchData = findClipForCamera(camId, targetSeconds);
 
@@ -740,8 +731,6 @@
                         videoEl.src = manifestRef.url;
                         videoEl.style.display = 'block';
                         overlay.style.display = 'none';
-                        statusBadge.innerText = "HISTORY";
-                        statusBadge.className = "status-badge history";
                         
                         videoEl.onloadedmetadata = () => {
                             if (!manifestRef.duration && videoEl.duration > 0 && videoEl.duration !== Infinity) {
@@ -756,13 +745,9 @@
                         if (videoEl.readyState > 0 && offset > videoEl.duration) {
                             videoEl.style.display = 'none';
                             overlay.style.display = 'flex';
-                            statusBadge.innerText = "NO MOTION";
-                            statusBadge.className = "status-badge nomotion";
                         } else {
                             videoEl.style.display = 'block';
                             overlay.style.display = 'none';
-                            statusBadge.innerText = "HISTORY";
-                            statusBadge.className = "status-badge history";
                             
                             const drift = Math.abs(videoEl.currentTime - offset);
                             if (isManualScrub || drift > 3) {
@@ -780,8 +765,6 @@
                     videoEl.src = "";
                     videoEl.style.display = 'block'; 
                     overlay.style.display = 'flex';
-                    statusBadge.innerText = "NO MOTION";
-                    statusBadge.className = "status-badge nomotion";
                 }
             });
         }
@@ -796,6 +779,7 @@
             playBtn.innerText = "▶ Play";
             playBtn.disabled = true;
 
+            liveBtn.innerText = "🔄 Reset";
             liveBtn.classList.add('active');
 
             timeLabel.innerText = "LIVE";
@@ -831,13 +815,10 @@
 
             activeCameras.forEach(camId => {
                 const videoEl = document.getElementById(`video-${camId}`);
-                const statusBadge = document.getElementById(`badge-${camId}`);
                 const overlay = document.getElementById(`overlay-${camId}`);
                 
                 videoEl.style.display = 'block';
                 overlay.style.display = 'none';
-                statusBadge.innerText = "LIVE";
-                statusBadge.className = "status-badge";
                 
                 videoEl.pause();
                 videoEl.removeAttribute('src'); 
@@ -870,6 +851,7 @@
             if (isLive) {
                 isLive = false;
                 
+                liveBtn.innerText = "🔴 Go Live";
                 playBtn.disabled = false;
                 liveBtn.classList.remove('active');
                 if (liveSyncInterval) clearInterval(liveSyncInterval);
@@ -927,7 +909,13 @@
             }
         });
 
-        liveBtn.addEventListener('click', returnToLive);
+        liveBtn.addEventListener('click', () => {
+            if (isLive) {
+                returnToLive(); 
+            } else {
+                returnToLive();
+            }
+        });
 
         document.addEventListener("visibilitychange", () => {
             if (document.visibilityState === "visible") {
@@ -988,7 +976,6 @@
             card.innerHTML = `
                 <div class="camera-header">
                     <span class="camera-title" style="color: ${camColor}; text-shadow: 1px 1px 2px black;">${camId}</span>
-                    <span class="status-badge" id="badge-${camId}">LIVE</span>
                 </div>
                 <video id="video-${camId}" muted playsinline></video>
                 <div class="no-video-overlay" id="overlay-${camId}">
