@@ -1,9 +1,11 @@
 #!/bin/bash
 
-# Start the SECURE HTTP server directly in the background
-# Output is redirected to null to keep your NVR console clean
-python3 server.py >/dev/null 2>&1 &
+# Start the SECURE HTTP server in the background and let it output to the console
+python3 server.py &
 SERVER_PID=$!
+
+# Give the server a second to print its startup message before the engine logs
+sleep 1
 
 # Cleanup function to kill the HTTP server when the Python script exits
 cleanup() {
@@ -14,8 +16,7 @@ cleanup() {
 
 trap cleanup SIGINT SIGTERM
 
-echo "🚀 Starting ArgoNVR..."
-echo "🌐 Secure Web UI available at http://localhost:8000"
+echo "🚀 Starting ArgoNVR Engine..."
 python3 argonvr.py
 
 # Ensure cleanup runs if the python script exits naturally

@@ -11,7 +11,8 @@ USERNAME = config['SETTINGS'].get('WEB_USER', 'admin')
 PASSWORD = config['SETTINGS'].get('WEB_PASS', 'secret')
 STORE_DIR = config['SETTINGS'].get('STORE_DIR', './recordings')
 
-PORT = 8000
+# Read the PORT setting and convert it to an integer (defaults to 8000 if missing)
+PORT = int(config['SETTINGS'].get('PORT', '8000'))
 
 class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
     def translate_path(self, path):
@@ -112,4 +113,3 @@ if __name__ == "__main__":
         print(f"🔒 Secure ArgoNVR web server running on port {PORT} (Multi-threaded)")
         print(f"📂 Storage mapped to: {STORE_DIR}")
         httpd.serve_forever()
-        
