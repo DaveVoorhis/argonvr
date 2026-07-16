@@ -7,3 +7,6 @@ WEB_USER = admin
 WEB_PASS = ChangeMe123!
 BASE_DIR = ./cameras
 MOTION_THRESHOLD = 0.01
+STORE_DIR = ./recordings
+STORAGE_DEVICE = /
+MIN_FREE_SPACE_PCT = 15.0

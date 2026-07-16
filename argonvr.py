@@ -5,6 +5,7 @@ import atexit
 import sys
 import json
 import configparser
+import shutil
 
 config = configparser.ConfigParser()
 config.read('argonvr.cfg')
@@ -20,7 +21,11 @@ WEB_PASS = SETTINGS.get('WEB_PASS', 'secret')
 BASE_DIR = SETTINGS.get('BASE_DIR', './cameras')
 MOTION_THRESHOLD = SETTINGS.get('MOTION_THRESHOLD', '0.01')
 
-STORE_DIR = "./recordings"
+# --- Configurable Storage Options ---
+STORE_DIR = SETTINGS.get('STORE_DIR', './recordings')
+STORAGE_DEVICE = SETTINGS.get('STORAGE_DEVICE', '/')
+MIN_FREE_SPACE_PCT = float(SETTINGS.get('MIN_FREE_SPACE_PCT', '15.0'))
+
 COOLDOWN_PERIOD = 10
 MAX_RECORD_TIME = 60  # Maximum length of a single clip in seconds
 STAGGER_SPIN_UP_SECONDS = 0
@@ -68,6 +73,47 @@ def update_history_manifest():
     with open(os.path.join(STORE_DIR, 'history.json'), 'w') as f:
         json.dump(manifest, f)
         
+def get_free_space_pct(path):
+    try:
+        total, used, free = shutil.disk_usage(path)
+        return (free / total) * 100
+    except Exception:
+        return 100.0 # Fail safe if mount isn't readable
+
+async def storage_manager():
+    """Background loop that deletes oldest videos when disk is full."""
+    while True:
+        try:
+            pct = get_free_space_pct(STORAGE_DEVICE)
+            if pct < MIN_FREE_SPACE_PCT:
+                print(f"[🧹] Low disk space ({pct:.1f}% < {MIN_FREE_SPACE_PCT}%). Purging oldest files...")
+                
+                all_files = []
+                for root, _, files in os.walk(STORE_DIR):
+                    for f in files:
+                        if f.endswith('.mp4'):
+                            all_files.append(os.path.join(root, f))
+                
+                # Sort by modification time so the oldest file is at index 0
+                all_files.sort(key=os.path.getmtime)
+                
+                deleted_count = 0
+                while all_files and get_free_space_pct(STORAGE_DEVICE) < MIN_FREE_SPACE_PCT:
+                    target_file = all_files.pop(0)
+                    try:
+                        os.remove(target_file)
+                        deleted_count += 1
+                    except OSError:
+                        pass
+                        
+                if deleted_count > 0:
+                    print(f"[🧹] Purged {deleted_count} files. Updating history manifest.")
+                    update_history_manifest()
+        except Exception as e:
+            print(f"[⚠️] Storage Manager error: {e}")
+            
+        await asyncio.sleep(60) # Check disk space every minute
+
 class CameraStream:
     def __init__(self, cam_id, rtsp_url):
         self.cam_id = cam_id
@@ -243,6 +289,9 @@ class CameraStream:
 async def main():
     print("🚀 Initializing Engine...")
     tasks = []
+    
+    # Start the background storage manager
+    tasks.append(asyncio.create_task(storage_manager()))
     
     update_history_manifest()
     
