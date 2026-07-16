@@ -3,6 +3,7 @@ import socketserver
 import base64
 import os
 import configparser
+import ssl
 
 config = configparser.ConfigParser()
 config.read('argonvr.cfg')
@@ -13,6 +14,8 @@ STORE_DIR = config['SETTINGS'].get('STORE_DIR', './recordings')
 
 # Read the PORT setting and convert it to an integer (defaults to 8000 if missing)
 PORT = int(config['SETTINGS'].get('PORT', '8000'))
+SSL_CERT = config['SETTINGS'].get('SSL_CERT_PATH')
+SSL_KEY = config['SETTINGS'].get('SSL_KEY_PATH')
 
 class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
     def translate_path(self, path):
@@ -109,7 +112,19 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(b"Invalid username or password.")
 
 if __name__ == "__main__":
-    with http.server.ThreadingHTTPServer(("", PORT), SecureAuthHandler) as httpd:
-        print(f"🔒 Secure ArgoNVR web server running on port {PORT} (Multi-threaded)")
+    # Allow address reuse
+    socketserver.TCPServer.allow_reuse_address = True
+    
+    with socketserver.TCPServer(("", PORT), SecureAuthHandler) as httpd:
+        # Check if SSL is configured
+        if SSL_CERT and SSL_KEY and os.path.exists(SSL_CERT) and os.path.exists(SSL_KEY):
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(certfile=SSL_CERT, keyfile=SSL_KEY)
+            httpd.socket = context.wrap_socket(httpd.socket, server_side=True)
+            print(f"🔒 Secure HTTPS ArgoNVR server running on port {PORT}")
+        else:
+            print(f"🔓 ArgoNVR server running on port {PORT} (No SSL configured)")
+            
         print(f"📂 Storage mapped to: {STORE_DIR}")
         httpd.serve_forever()
+        
