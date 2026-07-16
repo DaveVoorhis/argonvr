@@ -244,13 +244,12 @@
             border-radius: 1px;
         }
 
-        /* --- New Ruler Styling --- */
         .timeline-ruler {
             position: absolute;
             left: 2px; right: 2px; 
             height: 14px; 
             pointer-events: none;
-            z-index: 2; /* Sit directly above the colored heatmap, but under the thumb */
+            z-index: 2; 
         }
         .ruler-tick {
             position: absolute;
@@ -259,11 +258,11 @@
             background: rgba(255, 255, 255, 0.2);
         }
         .ruler-tick.hour {
-            height: 14px; /* Full height of the track */
-            background: rgba(255, 255, 255, 0.5); /* Brighter for hours */
+            height: 14px; 
+            background: rgba(255, 255, 255, 0.5); 
         }
         .ruler-tick.five-min {
-            height: 6px; /* Short stub for 5 minutes */
+            height: 6px; 
         }
 
         .zoom-container {
@@ -276,6 +275,20 @@
             border-radius: 4px;
         }
 
+        .zoom-btn {
+            font-size: 1.2rem;
+            font-weight: bold;
+            color: #888;
+            cursor: pointer;
+            user-select: none;
+            padding: 0 4px;
+            transition: color 0.2s;
+        }
+        
+        .zoom-btn:hover {
+            color: #fff;
+        }
+
         input[type=range] {
             -webkit-appearance: none;
             background: transparent;
@@ -286,7 +299,7 @@
         #scrubber {
             position: absolute;
             width: 100%;
-            z-index: 3; /* Elevated above the ruler layer */
+            z-index: 3; 
             margin: 0;
             padding: 0;
         }
@@ -404,14 +417,16 @@
         
         <div class="timeline-viewport" id="timeline-viewport">
             <div class="timeline-content" id="timeline-content">
-                <div id="timeline-ruler" class="timeline-ruler"></div> <div id="heatmap" class="heatmap-track"></div>
+                <div id="timeline-ruler" class="timeline-ruler"></div>
+                <div id="heatmap" class="heatmap-track"></div>
                 <input type="range" id="scrubber" min="0" max="86400" value="86400">
             </div>
         </div>
 
         <div class="zoom-container" title="Zoom Timeline">
-            <span style="font-size: 0.8rem;">🔍</span>
+            <span class="zoom-btn" onclick="adjustZoom(-1)">−</span>
             <input type="range" id="zoom-slider" min="1" max="144" value="1" step="1">
+            <span class="zoom-btn" onclick="adjustZoom(1)">+</span>
         </div>
         
         <button class="ctrl-btn live-btn" id="btn-live">🔴 Go Live</button>
@@ -460,11 +475,19 @@
         const timelineContent = document.getElementById('timeline-content');
         const timelineViewport = document.getElementById('timeline-viewport');
 
+        function adjustZoom(direction) {
+            const currentVal = parseInt(zoomSlider.value, 10);
+            const newVal = currentVal + direction;
+            if (newVal >= parseInt(zoomSlider.min, 10) && newVal <= parseInt(zoomSlider.max, 10)) {
+                zoomSlider.value = newVal;
+                zoomSlider.dispatchEvent(new Event('input'));
+            }
+        }
+
         function renderTimelineRuler() {
             const ruler = document.getElementById('timeline-ruler');
             ruler.innerHTML = ''; 
             
-            // Generate ticks for every 5 minutes (300 seconds) in a 24-hour period (86400s)
             for (let sec = 0; sec <= 86400; sec += 300) {
                 const isHour = (sec % 3600 === 0);
                 const leftPct = (sec / 86400) * 100;
@@ -770,17 +793,14 @@
             isPlayingHistory = false;
             if (playbackInterval) clearInterval(playbackInterval);
             
-            // Adjust Play button appearance
             playBtn.innerText = "▶ Play";
             playBtn.disabled = true;
 
-            // Make the Go Live button green
             liveBtn.classList.add('active');
 
             timeLabel.innerText = "LIVE";
             timeLabel.style.color = "#4cd137";
 
-            // Determine the exact current time for the scrubber
             const setScrubberToNow = () => {
                 const d = new Date();
                 const curSec = (d.getHours() * 3600) + (d.getMinutes() * 60) + d.getSeconds();
@@ -791,12 +811,10 @@
             setScrubberToNow();
             setTimeout(centerViewportOnScrubber, 50);
 
-            // Continuously advance the scrubber to match the real clock
             liveSyncInterval = setInterval(() => {
                 if (!isLive) return;
                 const curSec = setScrubberToNow();
 
-                // If zoomed in, cleanly pan the viewport when the scrubber reaches the right edge
                 const scrubberX = (curSec / 86400) * timelineContent.clientWidth;
                 const viewLeft = timelineViewport.scrollLeft;
                 const viewRight = viewLeft + timelineViewport.clientWidth;
@@ -852,7 +870,6 @@
             if (isLive) {
                 isLive = false;
                 
-                // Re-enable playback options and disable the green Live status
                 playBtn.disabled = false;
                 liveBtn.classList.remove('active');
                 if (liveSyncInterval) clearInterval(liveSyncInterval);
@@ -1019,10 +1036,8 @@
             if (foundCount === 0) setTimeout(discoverCameras, 2000);
         }  
         
-        // Render the static timeline ruler once
         renderTimelineRuler();
         
-        // Start initialization directly into Live mode
         returnToLive(); 
         fetchManifest(); 
         setInterval(fetchManifest, 30000); 
