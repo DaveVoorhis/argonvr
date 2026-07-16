@@ -590,7 +590,7 @@
                     returnToLive();
                 } else {
                     isLive = false;
-                    liveBtn.innerText = "🔴 Go Live";
+                    liveBtn.innerText = "Go Live";
                     playBtn.disabled = false;
                     liveBtn.classList.remove('active');
                     if (liveSyncInterval) clearInterval(liveSyncInterval);
@@ -944,7 +944,7 @@
             playBtn.innerText = "▶ Play";
             playBtn.disabled = true;
 
-            liveBtn.innerText = "🔄 Reset";
+            liveBtn.innerText = "Reset";
             liveBtn.classList.add('active');
 
             timeLabel.innerText = "LIVE";
@@ -1021,7 +1021,7 @@
             if (isLive) {
                 isLive = false;
                 
-                liveBtn.innerText = "🔴 Go Live";
+                liveBtn.innerText = "Go Live";
                 playBtn.disabled = false;
                 liveBtn.classList.remove('active');
                 if (liveSyncInterval) clearInterval(liveSyncInterval);
