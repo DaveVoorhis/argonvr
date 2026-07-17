@@ -401,44 +401,31 @@
         }
 
 		@media (max-width: 800px) {
-			/* 1. Use dvh (Dynamic Viewport Height) for mobile browser compatibility */
-			body {
-				height: 100dvh; 
-			}
-		
-			/* 2. Constrain the grid so it doesn't push the bar off-screen */
-			.video-grid {
-				flex-grow: 1;
-				overflow-y: auto;
-				/* Ensure it shrinks if content is too large */
-				min-height: 0; 
-			}
-		
-			/* 3. Keep the bar visible */
 			.timeline-bar {
-				flex-wrap: wrap;
-				height: auto; 
+				flex-wrap: wrap; 
+				height: auto;
 				padding: 8px;
 				gap: 5px;
-				flex-shrink: 0; /* Ensures the bar never gets pushed off by the grid */
+				justify-content: center; /* Center items on mobile */
 			}
 		
-			/* 4. Force buttons and timeline to share space correctly */
-			.ctrl-btn, .time-display {
-				font-size: 0.8rem;
-				padding: 5px 8px;
+			/* Keep Play/Live buttons on the top row */
+			.ctrl-btn { font-size: 0.8rem; padding: 5px 10px; }
+		
+			/* Ensure the zoom container stays visible and doesn't get pushed */
+			.zoom-container {
+				display: flex;
+				min-width: 100px;
+				order: 2; /* Put it on the second row */
 			}
 		
+			/* Force the timeline to take the full width */
 			.timeline-viewport {
 				width: 100%;
-				order: 3;
-				flex-basis: 100%;
-				height: 40px; 
+				order: 3; 
 				margin-top: 5px;
-			}
-		
-			.zoom-container {
-				display: none; /* Hide zoom on small screens to save space */
+				flex-grow: 1;
+				min-height: 40px; 
 			}
 		}
     </style>
