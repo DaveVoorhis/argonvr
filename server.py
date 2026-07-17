@@ -22,6 +22,10 @@ LOG_HTTP_REQUESTS = config.getboolean('SETTINGS', 'LOG_HTTP_REQUESTS', fallback=
 
 class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
 
+    def address_string(self):
+        """Prevents reverse DNS lookups that cause initial connection lag."""
+        return self.client_address[0]
+
     def handle(self):
             """Catch and suppress noisy client disconnect errors and SSL-related write errors."""
             try:
