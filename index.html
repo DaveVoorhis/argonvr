@@ -401,26 +401,39 @@
         }
 
 		@media (max-width: 800px) {
-    		.timeline-bar {
-        		gap: 5px; /* Reduce gap to save horizontal space */
-        		padding: 5px;
-    		}
-
-    		/* Force the time label and play button to stay on the top row */
-    		.ctrl-btn {
-        		padding: 5px 8px;
-        		font-size: 0.8rem;
-    		}
-
-    		/* Hide the zoom container on mobile to save space */
-    		.zoom-container {
-        		display: none; 
-    		}
-
-    		.time-display {
-        		min-width: 60px;
-        		font-size: 0.9rem;
-    		}
+			/* 1. Ensure the grid stops growing when the timeline needs space */
+			.video-grid {
+				flex-grow: 1;
+				overflow-y: auto;
+			}
+		
+			/* 2. Optimize the timeline bar for mobile */
+			.timeline-bar {
+				flex-wrap: wrap;
+				height: auto;
+				padding: 8px;
+				gap: 5px;
+				/* Force the bar to stay at the bottom */
+				flex-shrink: 0; 
+			}
+		
+			/* 3. Keep critical controls on one row, push the timeline to its own row */
+			.ctrl-btn, .time-display {
+				order: 1;
+			}
+		
+			.timeline-viewport {
+				order: 2;
+				width: 100%;
+				margin: 5px 0;
+				/* Ensure the viewport has a fixed height so it doesn't expand infinitely */
+				height: 30px; 
+			}
+		
+			/* 4. Hide secondary elements that clutter the small screen */
+			.zoom-container {
+				display: none;
+			}
 		}
     </style>
 </head>
