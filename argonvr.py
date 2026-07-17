@@ -25,13 +25,11 @@ MOTION_THRESHOLD = SETTINGS.get('MOTION_THRESHOLD', '0.01')
 STORE_DIR = SETTINGS.get('STORE_DIR', './recordings')
 STORAGE_DEVICE = SETTINGS.get('STORAGE_DEVICE', '/')
 MIN_FREE_SPACE_PCT = float(SETTINGS.get('MIN_FREE_SPACE_PCT', '15.0'))
+ENCODER = SETTINGS.get('ENCODER', 'libx264')
 
 COOLDOWN_PERIOD = 10
 MAX_RECORD_TIME = 60  # Maximum length of a single clip in seconds
 STAGGER_SPIN_UP_SECONDS = 0
-
-# Automatically select the correct hardware encoder based on your platform
-ENCODER = "h264_v4l2m2m" if sys.platform.startswith("linux") else "h264_videotoolbox"
 
 os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(STORE_DIR, exist_ok=True)
@@ -227,7 +225,10 @@ class CameraStream:
                     record_cmd = [
                         "ffmpeg", 
                         "-i", m3u8_path, 
-                        "-map", "0:v", "-c:v", ENCODER, "-an",
+                        "-map", "0:v", 
+                        "-c:v", ENCODER, 
+                        "-preset", "ultrafast", 
+                        "-an",
                         "-movflags", "faststart", 
                         "-y", self.current_output_file
                     ]                   

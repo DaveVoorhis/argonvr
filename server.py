@@ -17,7 +17,33 @@ PORT = int(config['SETTINGS'].get('PORT', '8000'))
 SSL_CERT = config['SETTINGS'].get('SSL_CERT_PATH')
 SSL_KEY = config['SETTINGS'].get('SSL_KEY_PATH')
 
+# Add the HTTP request logging toggle (defaults to False if not present in config)
+LOG_HTTP_REQUESTS = config.getboolean('SETTINGS', 'LOG_HTTP_REQUESTS', fallback=False)
+
 class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
+
+    def handle(self):
+        """Catch and suppress noisy client disconnect errors."""
+        try:
+            super().handle()
+        except (ConnectionResetError, BrokenPipeError):
+            # The browser abruptly closed the connection.
+            # We can safely ignore this and move on.
+            pass
+            
+    def log_message(self, format, *args):
+        """Overrides the default logger to suppress HLS stream spam and handle errors gracefully."""
+        # Safely grab the request path. If it failed to parse, fallback to an empty string.
+        request_path = getattr(self, 'path', '')
+        
+        # If logging is disabled, drop requests for media and manifest files
+        quiet_extensions = ['.ts', '.m3u8', '.mp4', '.json']
+        if not LOG_HTTP_REQUESTS and any(ext in request_path for ext in quiet_extensions):
+            return
+            
+        # Log everything else
+        super().log_message(format, *args)
+
     def translate_path(self, path):
         # Route requests for recordings to the configured storage directory
         if path.startswith('/recordings/'):
@@ -127,4 +153,3 @@ if __name__ == "__main__":
             
         print(f"📂 Storage mapped to: {STORE_DIR}")
         httpd.serve_forever()
-        

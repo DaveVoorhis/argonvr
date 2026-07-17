@@ -11,6 +11,10 @@ sleep 1
 cleanup() {
   echo -e "\n[$(date '+%Y-%m-%d %H:%M:%S')] 🟢 Terminating HTTP server..."
   kill -TERM "$SERVER_PID" 2>/dev/null
+  
+  # Restore terminal settings on exit
+  stty sane
+  
   exit 0
 }
 
