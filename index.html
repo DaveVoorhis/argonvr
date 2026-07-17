@@ -401,31 +401,48 @@
         }
 
 		@media (max-width: 800px) {
+			/* 1. Use dynamic height to account for mobile browser toolbars */
+			body {
+				height: 100dvh;
+			}
+		
+			/* 2. Force the grid to shrink when space is tight */
+			.video-grid {
+				flex-grow: 1;
+				overflow-y: auto;
+				min-height: 0; 
+			}
+		
+			/* 3. Keep the bar at the bottom and prevent it from expanding */
 			.timeline-bar {
-				flex-wrap: wrap; 
 				height: auto;
-				padding: 8px;
-				gap: 5px;
-				justify-content: center; /* Center items on mobile */
-			}
-		
-			/* Keep Play/Live buttons on the top row */
-			.ctrl-btn { font-size: 0.8rem; padding: 5px 10px; }
-		
-			/* Ensure the zoom container stays visible and doesn't get pushed */
-			.zoom-container {
+				padding: 5px;
+				flex-shrink: 0;
 				display: flex;
-				min-width: 100px;
-				order: 2; /* Put it on the second row */
+				flex-wrap: wrap;
+				gap: 5px;
+				justify-content: center;
 			}
 		
-			/* Force the timeline to take the full width */
+			/* 4. Ensure buttons and timeline don't overflow */
+			.ctrl-btn { 
+				padding: 4px 8px; 
+				font-size: 0.75rem; 
+			}
+			
 			.timeline-viewport {
 				width: 100%;
-				order: 3; 
-				margin-top: 5px;
+				order: 3;
 				flex-grow: 1;
-				min-height: 40px; 
+				min-height: 35px;
+			}
+		
+			/* 5. Keep zoom visible but compact */
+			.zoom-container {
+				display: flex;
+				order: 2;
+				min-width: 90px;
+				padding: 2px 5px;
 			}
 		}
     </style>
