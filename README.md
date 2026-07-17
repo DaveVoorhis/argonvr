@@ -26,7 +26,7 @@ ArgoNVR is a lightweight, self-hosted Network Video Recorder (NVR) designed to r
 2. **Edit `argonvr.cfg`:**
    Open the file and update the `[CAMERAS]` section with your RTSP camera URLs and the `[SETTINGS]` section with your desired username, password, and configuration paths.
 
-## Running the System
+## Running the System (Manual Start)
 
 Ensure you have `ffmpeg` installed on your system.
 
@@ -38,6 +38,33 @@ Ensure you have `ffmpeg` installed on your system.
 
 2. **Access the Dashboard:**
    Open your browser and navigate to `http://localhost:8000`. You will be prompted to log in using the credentials you defined in `argonvr.cfg`.
+
+## Running as a Background Service (Systemd)
+
+To ensure ArgoNVR starts automatically on boot and runs continuously in the background, you can set it up as a systemd service.
+
+1. **Edit the Service File:**
+   Open the provided `argonvr.service` file and update the `WorkingDirectory` and `ExecStart` paths to match the exact directory where your ArgoNVR project is located.
+
+2. **Install the Service:**
+   Copy the modified file into the systemd directory:
+   ```bash
+   sudo cp argonvr.service /etc/systemd/system/
+   ```
+
+3. **Enable and Start:**
+   Reload the systemd daemon, enable the service to start on boot, and launch it:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable argonvr
+   sudo systemctl start argonvr
+   ```
+
+4. **Managing the Service:**
+   You can easily control the NVR engine using standard systemctl commands:
+   * **Stop the service:** `sudo systemctl stop argonvr`
+   * **Restart the service:** `sudo systemctl restart argonvr`
+   * **View live logs:** `sudo journalctl -fu argonvr`
 
 ## Directory Structure
 
