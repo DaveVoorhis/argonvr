@@ -1,0 +1,20 @@
+[Unit]
+Description=ArgoNVR Engine and Web Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/home/dave/argonvr
+# Execute launch.sh directly
+ExecStart=/bin/bash /home/dave/argonvr/launch.sh
+
+# Automatically restart if the script crashes
+Restart=always
+RestartSec=5
+
+# Ensure Python output is not buffered so it shows up in logs instantly
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
