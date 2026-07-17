@@ -179,7 +179,7 @@
 
 		.ctrl-btn.live-btn { 
 			background: #e74c3c; 
-			min-width: 90px;
+			width: 90px;
 			justify-content: center;
 			flex-shrink: 0;
 		}
@@ -188,13 +188,20 @@
         .ctrl-btn.live-btn.active { background: #2ecc71; }
         .ctrl-btn.live-btn.active:hover { background: #27ae60; }
 
-        .time-display {
-            font-family: monospace;
-            font-size: 1.2rem;
-            color: #4cd137;
-            min-width: 90px;
-            text-align: center;
-        }
+		.time-display {
+			font-family: monospace;
+			font-size: 1.2rem;
+			color: #4cd137;
+			width: 110px;        
+			flex-shrink: 0;      
+			text-align: center;
+		}
+		
+		#btn-play {
+			width: 100px;
+			flex-shrink: 0;
+			justify-content: center;
+		}
 
         .timeline-viewport {
             position: relative;
@@ -1051,22 +1058,21 @@
             });
         }
 
-        scrubber.addEventListener('input', async (e) => {
-            if (isLive) {
-                isLive = false;
-                
-                liveBtn.innerText = "Go Live";
-                playBtn.disabled = false;
-                liveBtn.classList.remove('active');
-                if (liveSyncInterval) clearInterval(liveSyncInterval);
-
-                timeLabel.style.color = "#f39c12";
-                activeCameras.forEach(camId => {
-                    if (hlsPlayers[camId]) hlsPlayers[camId].detachMedia();
-                });
-                await fetchManifest();
-            }
-            const targetSeconds = parseInt(e.target.value, 10);
+		scrubber.addEventListener('input', (e) => {
+			if (isLive) {
+				isLive = false;
+				liveBtn.innerText = "Go Live";
+				playBtn.disabled = false;
+				liveBtn.classList.remove('active');
+				if (liveSyncInterval) clearInterval(liveSyncInterval);
+		
+				timeLabel.style.color = "#f39c12";
+				activeCameras.forEach(camId => {
+					if (hlsPlayers[camId]) hlsPlayers[camId].detachMedia();
+				});
+				fetchManifest(); // Let this fetch silently in the background
+			}
+			const targetSeconds = parseInt(e.target.value, 10);
             timeLabel.innerText = secondsToTimeStr(targetSeconds);
             if (isPlayingHistory) playBtn.click(); 
             
