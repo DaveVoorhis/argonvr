@@ -400,23 +400,28 @@
             border: none;
         }
 
-        @media (max-width: 800px) {
-            .timeline-bar {
-                flex-wrap: wrap; 
-                height: auto;
-                padding: 10px;
-                justify-content: space-between;
-                gap: 10px;
-            }
-            .timeline-viewport {
-                width: 100%;
-                order: 3; 
-                margin-top: 5px;
-                flex-grow: 1;
-                flex-basis: 100%;
-                min-height: 40px; 
-            }
-        }
+		@media (max-width: 800px) {
+    		.timeline-bar {
+        		gap: 5px; /* Reduce gap to save horizontal space */
+        		padding: 5px;
+    		}
+
+    		/* Force the time label and play button to stay on the top row */
+    		.ctrl-btn {
+        		padding: 5px 8px;
+        		font-size: 0.8rem;
+    		}
+
+    		/* Hide the zoom container on mobile to save space */
+    		.zoom-container {
+        		display: none; 
+    		}
+
+    		.time-display {
+        		min-width: 60px;
+        		font-size: 0.9rem;
+    		}
+		}
     </style>
 </head>
 <body>
