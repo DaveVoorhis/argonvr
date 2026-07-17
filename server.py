@@ -22,19 +22,19 @@ LOG_HTTP_REQUESTS = config.getboolean('SETTINGS', 'LOG_HTTP_REQUESTS', fallback=
 
 class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
 
-	def handle(self):
-			"""Catch and suppress noisy client disconnect errors and SSL-related write errors."""
-			try:
-				super().handle()
-			except (ConnectionResetError, BrokenPipeError):
-				pass
-			except ssl.SSLError as e:
-				# SSL-specific write errors during rapid client disconnection
-				# These can safely be ignored as the client has already disconnected
-				pass
-			except Exception as e:
-				# Optionally log other, unexpected errors
-				print(f"Unexpected error: {e}")
+    def handle(self):
+            """Catch and suppress noisy client disconnect errors and SSL-related write errors."""
+            try:
+                super().handle()
+            except (ConnectionResetError, BrokenPipeError):
+                pass
+            except ssl.SSLError as e:
+                # SSL-specific write errors during rapid client disconnection
+                # These can safely be ignored as the client has already disconnected
+                pass
+            except Exception as e:
+                # Optionally log other, unexpected errors
+                print(f"Unexpected error: {e}")
             
     def log_message(self, format, *args):
         """Overrides the default logger to suppress HLS stream spam and handle errors gracefully."""
