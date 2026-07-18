@@ -8,3 +8,4 @@ This is human-written.
 1. Saved clips are large and many. Can they be smaller and/or fewer?
 1. Motion sensitivity should be set per-camera
 1. history.json should be per-camera and per-day and include real clip length.
+1. After the frontend has run for a while, refreshing or Reset causes some cameras to sometimes load slowly. Some cleanup not happening?
