@@ -114,9 +114,12 @@ async def storage_manager():
 
 def recover_stale_staging_files():
     """Moves orphaned .ts files from previous unclean shutdowns into the queue."""
-    for cam_id in os.listdir(BASE_DIR):
-        staging_dir = os.path.join(BASE_DIR, cam_id, 'staging')
-        queued_dir = os.path.join(BASE_DIR, cam_id, 'queued')
+    if not os.path.exists(STORE_DIR):
+        return
+        
+    for cam_id in os.listdir(STORE_DIR):
+        staging_dir = os.path.join(STORE_DIR, cam_id, 'staging')
+        queued_dir = os.path.join(STORE_DIR, cam_id, 'queued')
         
         if os.path.exists(staging_dir) and os.path.exists(queued_dir):
             for f in os.listdir(staging_dir):
@@ -134,58 +137,58 @@ async def background_encoder_worker():
     while True:
         task_found = False
         
-        for cam_id in os.listdir(BASE_DIR):
-            queued_dir = os.path.join(BASE_DIR, cam_id, 'queued')
-            if not os.path.isdir(queued_dir):
-                continue
-                
-            queued_files = [f for f in os.listdir(queued_dir) if f.endswith('.ts')]
-            if queued_files:
-                # Sort to encode the oldest first
-                queued_files.sort(key=lambda x: os.path.getmtime(os.path.join(queued_dir, x)))
-                raw_filename = queued_files[0]
-                raw_filepath = os.path.join(queued_dir, raw_filename)
-                
-                base_name = os.path.splitext(raw_filename)[0]
-                final_dir = os.path.join(STORE_DIR, cam_id)
-                os.makedirs(final_dir, exist_ok=True)
-                final_filepath = os.path.join(final_dir, f"{base_name}.mp4")
-                
-                print(f"[⚙️] Encoding queue item: {raw_filename} -> {final_filepath}")
-                timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
-                worker_log.write(f"\n--- [{timestamp}] ENCODING {raw_filepath} ---\n")
-                worker_log.flush()
-                
-                encode_cmd = [
-                    "ffmpeg", 
-                    "-i", raw_filepath, 
-                    "-c:v", ENCODER, 
-                    "-preset", "ultrafast", 
-                    "-an",
-                    "-movflags", "faststart", 
-                    "-y", final_filepath
-                ]
-                
-                proc = await asyncio.create_subprocess_exec(
-                    *encode_cmd, 
-                    stdin=asyncio.subprocess.PIPE, 
-                    stdout=asyncio.subprocess.DEVNULL, 
-                    stderr=worker_log
-                )
-                active_processes.append(proc)
-                await proc.wait()
-                active_processes.remove(proc)
-                
-                if proc.returncode == 0:
-                    print(f"[✅] Successfully encoded and stored: {final_filepath}")
-                    os.remove(raw_filepath)
-                    update_history_manifest()
-                else:
-                    print(f"[❌] Error encoding {raw_filename}. See encoder_worker.log")
-                    os.rename(raw_filepath, raw_filepath + ".failed")
-                
-                task_found = True
-                break # Break out of the directory loop to evaluate the global queue again
+        if os.path.exists(STORE_DIR):
+            for cam_id in os.listdir(STORE_DIR):
+                queued_dir = os.path.join(STORE_DIR, cam_id, 'queued')
+                if not os.path.isdir(queued_dir):
+                    continue
+                    
+                queued_files = [f for f in os.listdir(queued_dir) if f.endswith('.ts')]
+                if queued_files:
+                    # Sort to encode the oldest first
+                    queued_files.sort(key=lambda x: os.path.getmtime(os.path.join(queued_dir, x)))
+                    raw_filename = queued_files[0]
+                    raw_filepath = os.path.join(queued_dir, raw_filename)
+                    
+                    base_name = os.path.splitext(raw_filename)[0]
+                    final_dir = os.path.join(STORE_DIR, cam_id)
+                    final_filepath = os.path.join(final_dir, f"{base_name}.mp4")
+                    
+                    print(f"[⚙️] Encoding queue item: {raw_filename} -> {final_filepath}")
+                    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+                    worker_log.write(f"\n--- [{timestamp}] ENCODING {raw_filepath} ---\n")
+                    worker_log.flush()
+                    
+                    encode_cmd = [
+                        "ffmpeg", 
+                        "-i", raw_filepath, 
+                        "-c:v", ENCODER, 
+                        "-preset", "ultrafast", 
+                        "-an",
+                        "-movflags", "faststart", 
+                        "-y", final_filepath
+                    ]
+                    
+                    proc = await asyncio.create_subprocess_exec(
+                        *encode_cmd, 
+                        stdin=asyncio.subprocess.PIPE, 
+                        stdout=asyncio.subprocess.DEVNULL, 
+                        stderr=worker_log
+                    )
+                    active_processes.append(proc)
+                    await proc.wait()
+                    active_processes.remove(proc)
+                    
+                    if proc.returncode == 0:
+                        print(f"[✅] Successfully encoded and stored: {final_filepath}")
+                        os.remove(raw_filepath)
+                        update_history_manifest()
+                    else:
+                        print(f"[❌] Error encoding {raw_filename}. See encoder_worker.log")
+                        os.rename(raw_filepath, raw_filepath + ".failed")
+                    
+                    task_found = True
+                    break # Break out of the directory loop to evaluate the global queue again
                 
         if not task_found:
             await asyncio.sleep(5) # No tasks, rest the CPU
@@ -196,9 +199,10 @@ class CameraStream:
         self.rtsp_url = rtsp_url
         self.cam_dir = f"{BASE_DIR}/{self.cam_id}"
         
-        # New Staging and Queued directories
-        self.staging_dir = os.path.join(self.cam_dir, "staging")
-        self.queued_dir = os.path.join(self.cam_dir, "queued")
+        # New Staging and Queued directories now point to STORE_DIR
+        self.store_cam_dir = os.path.join(STORE_DIR, self.cam_id)
+        self.staging_dir = os.path.join(self.store_cam_dir, "staging")
+        self.queued_dir = os.path.join(self.store_cam_dir, "queued")
         
         self.recording = False
         self.last_motion = 0
@@ -208,6 +212,7 @@ class CameraStream:
         self.master_proc = None
         
         os.makedirs(self.cam_dir, exist_ok=True)
+        os.makedirs(self.store_cam_dir, exist_ok=True)
         os.makedirs(self.staging_dir, exist_ok=True)
         os.makedirs(self.queued_dir, exist_ok=True)
         
@@ -287,7 +292,6 @@ class CameraStream:
                     self.recording = True
                     self.record_start_time = time.time()
                     
-                    # Target the staging directory, not STORE_DIR
                     self.current_output_file = os.path.join(
                         self.staging_dir, 
                         f"{self.cam_id}_{time.strftime('%Y%m%d_%H%M%S')}.ts"
