@@ -78,10 +78,10 @@ To ensure ArgoNVR starts automatically on boot and runs continuously in the back
 ---
 This project is an experiment in using Google Gemini to generate useful code when prompted
 by an experienced developer. The only directly human-written content is this final
-section of this README.md, plus occasional very minor tweaks like changing a comment
-to be more accurate.
+section of this README.md and the TODO.md, plus occasional minor tweaks like changing a comment
+to be more accurate, or the config values.
 
-Everything else except TODO.md is Gemini output in response to my prompts.
+Everything else is Gemini output in response to my prompts.
 
 As such, the code may be flawed and comments and directions incorrect. For example, the
 text above currently states, "Developed and tested on Linux ..."
