@@ -81,7 +81,7 @@ by an experienced developer. The only directly human-written content is this fin
 section of this README.md, plus occasional very minor tweaks like changing a comment
 to be more accurate.
 
-Everything else is Gemini output in response to my prompts.
+Everything else except TODO.md is Gemini output in response to my prompts.
 
 As such, the code may be flawed and comments and directions incorrect. For example, the
 text above currently states, "Developed and tested on Linux ..."
