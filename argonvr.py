@@ -131,7 +131,8 @@ def recover_stale_staging_files():
 
 async def background_encoder_worker():
     """A background worker that sequentially encodes queued .ts files into .mp4."""
-    worker_log = open(os.path.join(BASE_DIR, "encoder_worker.log"), "a")
+    # Moved worker log to persistent storage
+    worker_log = open(os.path.join(STORE_DIR, "encoder_worker.log"), "a")
     print("[⚙️] Background Encoder Worker started.")
     
     while True:
@@ -197,9 +198,11 @@ class CameraStream:
     def __init__(self, cam_id, rtsp_url):
         self.cam_id = cam_id
         self.rtsp_url = rtsp_url
+        
+        # Ramdisk Directory for active HLS streams
         self.cam_dir = f"{BASE_DIR}/{self.cam_id}"
         
-        # New Staging and Queued directories now point to STORE_DIR
+        # Persistent Storage Directories
         self.store_cam_dir = os.path.join(STORE_DIR, self.cam_id)
         self.staging_dir = os.path.join(self.store_cam_dir, "staging")
         self.queued_dir = os.path.join(self.store_cam_dir, "queued")
@@ -216,8 +219,9 @@ class CameraStream:
         os.makedirs(self.staging_dir, exist_ok=True)
         os.makedirs(self.queued_dir, exist_ok=True)
         
-        self.pipeline_log = open(os.path.join(self.cam_dir, "pipeline.log"), "a")
-        self.recording_log = open(os.path.join(self.cam_dir, "recording.log"), "a")
+        # Moved logs to persistent storage
+        self.pipeline_log = open(os.path.join(self.store_cam_dir, "pipeline.log"), "a")
+        self.recording_log = open(os.path.join(self.store_cam_dir, "recording.log"), "a")
 
     def write_log_header(self, log_fd, message):
         timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
