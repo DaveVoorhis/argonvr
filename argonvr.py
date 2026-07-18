@@ -112,11 +112,94 @@ async def storage_manager():
             
         await asyncio.sleep(60) # Check disk space every minute
 
+def recover_stale_staging_files():
+    """Moves orphaned .ts files from previous unclean shutdowns into the queue."""
+    for cam_id in os.listdir(BASE_DIR):
+        staging_dir = os.path.join(BASE_DIR, cam_id, 'staging')
+        queued_dir = os.path.join(BASE_DIR, cam_id, 'queued')
+        
+        if os.path.exists(staging_dir) and os.path.exists(queued_dir):
+            for f in os.listdir(staging_dir):
+                if f.endswith('.ts'):
+                    stale_file = os.path.join(staging_dir, f)
+                    target_file = os.path.join(queued_dir, f)
+                    shutil.move(stale_file, target_file)
+                    print(f"[♻️] Recovered stale capture: {f}")
+
+async def background_encoder_worker():
+    """A background worker that sequentially encodes queued .ts files into .mp4."""
+    worker_log = open(os.path.join(BASE_DIR, "encoder_worker.log"), "a")
+    print("[⚙️] Background Encoder Worker started.")
+    
+    while True:
+        task_found = False
+        
+        for cam_id in os.listdir(BASE_DIR):
+            queued_dir = os.path.join(BASE_DIR, cam_id, 'queued')
+            if not os.path.isdir(queued_dir):
+                continue
+                
+            queued_files = [f for f in os.listdir(queued_dir) if f.endswith('.ts')]
+            if queued_files:
+                # Sort to encode the oldest first
+                queued_files.sort(key=lambda x: os.path.getmtime(os.path.join(queued_dir, x)))
+                raw_filename = queued_files[0]
+                raw_filepath = os.path.join(queued_dir, raw_filename)
+                
+                base_name = os.path.splitext(raw_filename)[0]
+                final_dir = os.path.join(STORE_DIR, cam_id)
+                os.makedirs(final_dir, exist_ok=True)
+                final_filepath = os.path.join(final_dir, f"{base_name}.mp4")
+                
+                print(f"[⚙️] Encoding queue item: {raw_filename} -> {final_filepath}")
+                timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+                worker_log.write(f"\n--- [{timestamp}] ENCODING {raw_filepath} ---\n")
+                worker_log.flush()
+                
+                encode_cmd = [
+                    "ffmpeg", 
+                    "-i", raw_filepath, 
+                    "-c:v", ENCODER, 
+                    "-preset", "ultrafast", 
+                    "-an",
+                    "-movflags", "faststart", 
+                    "-y", final_filepath
+                ]
+                
+                proc = await asyncio.create_subprocess_exec(
+                    *encode_cmd, 
+                    stdin=asyncio.subprocess.PIPE, 
+                    stdout=asyncio.subprocess.DEVNULL, 
+                    stderr=worker_log
+                )
+                active_processes.append(proc)
+                await proc.wait()
+                active_processes.remove(proc)
+                
+                if proc.returncode == 0:
+                    print(f"[✅] Successfully encoded and stored: {final_filepath}")
+                    os.remove(raw_filepath)
+                    update_history_manifest()
+                else:
+                    print(f"[❌] Error encoding {raw_filename}. See encoder_worker.log")
+                    os.rename(raw_filepath, raw_filepath + ".failed")
+                
+                task_found = True
+                break # Break out of the directory loop to evaluate the global queue again
+                
+        if not task_found:
+            await asyncio.sleep(5) # No tasks, rest the CPU
+
 class CameraStream:
     def __init__(self, cam_id, rtsp_url):
         self.cam_id = cam_id
         self.rtsp_url = rtsp_url
         self.cam_dir = f"{BASE_DIR}/{self.cam_id}"
+        
+        # New Staging and Queued directories
+        self.staging_dir = os.path.join(self.cam_dir, "staging")
+        self.queued_dir = os.path.join(self.cam_dir, "queued")
+        
         self.recording = False
         self.last_motion = 0
         self.record_start_time = 0
@@ -125,6 +208,8 @@ class CameraStream:
         self.master_proc = None
         
         os.makedirs(self.cam_dir, exist_ok=True)
+        os.makedirs(self.staging_dir, exist_ok=True)
+        os.makedirs(self.queued_dir, exist_ok=True)
         
         self.pipeline_log = open(os.path.join(self.cam_dir, "pipeline.log"), "a")
         self.recording_log = open(os.path.join(self.cam_dir, "recording.log"), "a")
@@ -135,30 +220,31 @@ class CameraStream:
         log_fd.flush()
 
     async def finalize_recording(self, proc, filepath):
-        """Asynchronously finalizes an MP4 file without blocking the main event loop."""
+        """Finalizes the raw capture file and moves it to the encoding queue."""
         if proc and proc.returncode is None:
             try:
-                # 1. Send 'q' to stdin for the most reliable graceful FFmpeg exit
                 if proc.stdin:
                     proc.stdin.write(b'q\n')
                     await proc.stdin.drain()
-                    proc.stdin.close() # Close stream to signal completion
+                    proc.stdin.close()
                 else:
                     proc.terminate()
                     
-                # 2. Wait up to 60 seconds for FFmpeg to cleanly write the faststart moov atom
-                await asyncio.wait_for(proc.wait(), timeout=60.0)
-                print(f"[💾] Saved: {filepath}")
+                await asyncio.wait_for(proc.wait(), timeout=10.0)
                 
-                update_history_manifest()
+                # Move to queued directory for the background worker
+                filename = os.path.basename(filepath)
+                queued_filepath = os.path.join(self.queued_dir, filename)
+                shutil.move(filepath, queued_filepath)
+                
+                print(f"[📥] Raw capture complete. Queued for encoding: {queued_filepath}")
                 
             except asyncio.TimeoutError:
-                # 3. If it genuinely hangs, use a strict SIGKILL
-                print(f"[⚠️] FFmpeg hung while saving {filepath}. Forcing SIGKILL.")
-                self.write_log_header(self.recording_log, "RECORDING HUNG - FORCING KILL")
+                print(f"[⚠️] FFmpeg hung while capturing {filepath}. Forcing SIGKILL.")
+                self.write_log_header(self.recording_log, "CAPTURE HUNG - FORCING KILL")
                 proc.kill()
             except Exception as e: 
-                print(f"[❌] Error closing {filepath}: {type(e).__name__} {e}")
+                print(f"[❌] Error closing capture {filepath}: {type(e).__name__} {e}")
                 proc.kill()
 
     async def start_master_pipeline(self):
@@ -197,18 +283,17 @@ class CameraStream:
                 self.last_motion = time.time()
                 
                 if not self.recording:
-                    print(f"[🚨] Motion detected on {self.cam_id}! Recording.")
+                    print(f"[🚨] Motion detected on {self.cam_id}! Capturing raw stream.")
                     self.recording = True
                     self.record_start_time = time.time()
                     
-                    cam_record_dir = os.path.join(STORE_DIR, self.cam_id)
-                    os.makedirs(cam_record_dir, exist_ok=True)
+                    # Target the staging directory, not STORE_DIR
                     self.current_output_file = os.path.join(
-                        cam_record_dir, 
-                        f"{self.cam_id}_{time.strftime('%Y%m%d_%H%M%S')}.mp4"
+                        self.staging_dir, 
+                        f"{self.cam_id}_{time.strftime('%Y%m%d_%H%M%S')}.ts"
                     )
                     
-                    self.write_log_header(self.recording_log, "STARTING DEDICATED RECORDING")
+                    self.write_log_header(self.recording_log, "STARTING RAW STREAM CAPTURE")
                     
                     m3u8_path = f"{self.cam_dir}/stream.m3u8"
                     wait_time = 0
@@ -217,19 +302,18 @@ class CameraStream:
                         wait_time += 0.5
                         
                     if not os.path.exists(m3u8_path):
-                        print(f"[⚠️] Aborting record on {self.cam_id}: Master stream not ready.")
+                        print(f"[⚠️] Aborting capture on {self.cam_id}: Master stream not ready.")
                         self.write_log_header(self.recording_log, "ABORTED: m3u8 file was never created.")
                         self.recording = False
                         continue 
                     
+                    # Direct Stream Copy: Negligible CPU footprint
                     record_cmd = [
                         "ffmpeg", 
                         "-i", m3u8_path, 
                         "-map", "0:v", 
-                        "-c:v", ENCODER, 
-                        "-preset", "ultrafast", 
+                        "-c:v", "copy",  
                         "-an",
-                        "-movflags", "faststart", 
                         "-y", self.current_output_file
                     ]                   
                     self.record_proc = await asyncio.create_subprocess_exec(
@@ -254,15 +338,13 @@ class CameraStream:
                     if time_since_start >= MAX_RECORD_TIME:
                         print(f"[⏱️] Max clip length reached on {self.cam_id}. Chunking file...")
                     else:
-                        print(f"[⏱️] Motion stopped on {self.cam_id}. Finalizing file...")
+                        print(f"[⏱️] Motion stopped on {self.cam_id}. Finalizing capture...")
                         
-                    # Detach the active process and release the recording lock instantly
                     old_proc = self.record_proc
                     old_file = self.current_output_file
                     self.record_proc = None
                     self.recording = False 
                     
-                    # Spin off finalization to a background task to prevent blocking the event loop
                     if old_proc:
                         asyncio.create_task(self.finalize_recording(old_proc, old_file))
 
@@ -291,8 +373,14 @@ async def main():
     print("🚀 Initializing Engine...")
     tasks = []
     
-    # Start the background storage manager
+    # 1. Recover any orphaned .ts files from previous unclean shutdowns
+    recover_stale_staging_files()
+    
+    # 2. Start the background storage manager
     tasks.append(asyncio.create_task(storage_manager()))
+    
+    # 3. Start the singular background encoding queue worker
+    tasks.append(asyncio.create_task(background_encoder_worker()))
     
     update_history_manifest()
     
