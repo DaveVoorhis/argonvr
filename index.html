@@ -105,7 +105,7 @@
             justify-content: center;
             align-items: center;
             box-sizing: border-box;
-            cursor: pointer; /* Suggests interactivity to the user */
+            cursor: pointer; 
             transition: border-color 0.2s;
         }
         .camera-card:hover {
@@ -311,8 +311,8 @@
             resize: both;
             overflow: hidden;
             box-shadow: 0 15px 50px rgba(0,0,0,0.9);
-            min-width: 320px;
-            min-height: 240px;
+            min-width: 400px;
+            min-height: 320px;
         }
         .fw-header {
             background: #1a1a1a;
@@ -321,7 +321,7 @@
             justify-content: space-between;
             align-items: center;
             cursor: move;
-            touch-action: none; /* Prevents scroll while dragging on touch screens */
+            touch-action: none; 
             border-bottom: 1px solid #333;
             user-select: none;
         }
@@ -332,11 +332,63 @@
             flex-grow: 1;
             background: #000;
             position: relative;
+            min-height: 0;
         }
         .fw-body video {
             width: 100%;
             height: 100%;
             object-fit: contain;
+        }
+
+        /* --- Floating Window Custom Gapless Timeline Styles --- */
+        .fw-controls {
+            background: #1a1a1a;
+            padding: 8px 15px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            border-top: 1px solid #333;
+            height: 40px;
+            flex-shrink: 0;
+            user-select: none;
+        }
+        .fw-time-display {
+            font-family: monospace;
+            font-size: 1rem;
+            color: #4cd137;
+            width: 80px;
+            flex-shrink: 0;
+            text-align: center;
+        }
+        .fw-timeline-container {
+            flex-grow: 1;
+            height: 100%;
+            display: flex;
+            align-items: center;
+        }
+        .fw-timeline-region {
+            width: 100%;
+            height: 28px; 
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 4px;
+            position: relative;
+            cursor: pointer;
+            touch-action: none; 
+            border: 1px solid #333;
+            box-sizing: border-box;
+        }
+        .fw-timeline-region:hover { background: rgba(255, 255, 255, 0.12); }
+        .fw-timeline-indicator {
+            position: absolute;
+            top: 0;
+            left: 100%; 
+            width: 4px;
+            height: 100%;
+            background: #f39c12;
+            border-radius: 2px;
+            transform: translateX(-50%);
+            pointer-events: none; 
+            box-shadow: 0 0 5px rgba(0,0,0,0.8);
         }
 
         input[type=range] {
@@ -417,19 +469,14 @@
         }
 
 		@media (max-width: 800px) {
-			/* 1. Use dynamic height to account for mobile browser toolbars */
 			body {
 				height: 100dvh;
 			}
-		
-			/* 2. Force the grid to shrink when space is tight */
 			.video-grid {
 				flex-grow: 1;
 				overflow-y: auto;
 				min-height: 0; 
 			}
-		
-			/* 3. Keep the bar at the bottom and prevent it from expanding */
 			.timeline-bar {
 				height: auto;
 				padding: 5px;
@@ -439,27 +486,26 @@
 				gap: 5px;
 				justify-content: center;
 			}
-		
-			/* 4. Ensure buttons and timeline don't overflow */
 			.ctrl-btn { 
 				padding: 4px 8px; 
 				font-size: 0.75rem; 
 			}
-			
 			.timeline-viewport {
 				width: 100%;
 				order: 3;
 				flex-grow: 1;
 				height: 40px;
 			}
-		
-			/* 5. Keep zoom visible but compact */
 			.zoom-container {
 				display: flex;
 				order: 2;
 				min-width: 90px;
 				padding: 2px 5px;
 			}
+            .fw-controls {
+                padding: 6px 10px;
+                gap: 8px;
+            }
 		}
     </style>
 </head>
@@ -518,9 +564,18 @@
             <span class="fw-close" onclick="closeFloatingWindow()">✖</span>
         </div>
         <div class="fw-body">
-            <video id="fw-video" muted playsinline controls></video>
+            <video id="fw-video" muted playsinline></video>
             <div class="no-video-overlay" id="fw-overlay" style="z-index: 10;">
                 <div>No Motion Detected</div>
+            </div>
+        </div>
+        <div class="fw-controls" id="fw-controls">
+            <button class="ctrl-btn live-btn" id="fw-btn-live" onclick="fwGoLive()">Go Live</button>
+            <div class="fw-time-display" id="fw-time-label">LIVE</div>
+            <div class="fw-timeline-container">
+                <div class="fw-timeline-region" id="fw-timeline-region" title="Sweep across recorded clips">
+                    <div class="fw-timeline-indicator" id="fw-timeline-indicator"></div>
+                </div>
             </div>
         </div>
     </div>
@@ -656,7 +711,7 @@
         function secondsToTimeStr(seconds) {
             const h = Math.floor(seconds / 3600);
             const m = Math.floor((seconds % 3600) / 60);
-            const s = seconds % 60;
+            const s = Math.floor(seconds % 60);
             return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
         }
 
@@ -671,19 +726,58 @@
             return (h * 3600) + (m * 60) + s;
         }
 
+        function extractTimeFromFilename(filename) {
+            const match = filename.match(/_(\d{8})_(\d{2})(\d{2})(\d{2})\.mp4/);
+            if (!match) return null;
+            return (parseInt(match[2], 10) * 3600) + (parseInt(match[3], 10) * 60) + parseInt(match[4], 10);
+        }
+
         async function fetchManifest() {
             try {
                 const response = await fetch('./recordings/history.json', { cache: 'no-store', credentials: 'include' });
                 const newManifest = await response.json();
                 
                 Object.keys(newManifest).forEach(camId => {
-                    if (globalManifest[camId]) {
-                        newManifest[camId].forEach(newClip => {
-                            const existingClip = globalManifest[camId].find(c => c.filename === newClip.filename);
+                    const clips = newManifest[camId];
+                    
+                    // 1. Sort clips strictly by time
+                    clips.sort((a, b) => {
+                        return (extractTimeFromFilename(a.filename) || 0) - (extractTimeFromFilename(b.filename) || 0);
+                    });
+                    
+                    for (let i = 0; i < clips.length; i++) {
+                        const clip = clips[i];
+                        
+                        // 2. Preserve known exact durations from previous loads
+                        if (globalManifest[camId]) {
+                            const existingClip = globalManifest[camId].find(c => c.filename === clip.filename);
                             if (existingClip && existingClip.duration) {
-                                newClip.duration = existingClip.duration;
+                                clip.duration = existingClip.duration;
                             }
-                        });
+                        }
+                        
+                        // 3. Heuristic: calculate duration based on the gap to the next clip
+                        if (!clip.duration) {
+                            let guessedDur = 60; // Default fallback
+                            if (i < clips.length - 1) {
+                                const matchA = clip.filename.match(/_(\d{8})_/);
+                                const matchB = clips[i+1].filename.match(/_(\d{8})_/);
+                                
+                                // Ensure they are on the same day before comparing
+                                if (matchA && matchB && matchA[1] === matchB[1]) {
+                                    const aTime = extractTimeFromFilename(clip.filename);
+                                    const bTime = extractTimeFromFilename(clips[i+1].filename);
+                                    if (aTime !== null && bTime !== null) {
+                                        const delta = bTime - aTime;
+                                        // If the next clip starts within 60s, use the exact delta
+                                        if (delta > 0 && delta <= 60) {
+                                            guessedDur = delta;
+                                        }
+                                    }
+                                }
+                            }
+                            clip.duration = guessedDur;
+                        }
                     }
                 });
                 
@@ -698,7 +792,6 @@
                 });
                 
                 renderTimelineHeatmap();
-                
                 if (document.getElementById('calendar-popup').classList.contains('visible')) {
                     renderCalendar();
                 }
@@ -823,6 +916,45 @@
             return null; 
         }
 
+        // Updates Floating Window Gapless Indicator from external seconds
+        function updateFwIndicatorFromSeconds(actualSec) {
+            if (!activeModalCamId) return;
+            const clips = globalManifest[activeModalCamId] || [];
+            const dayClips = clips.filter(c => parseFilenameToSeconds(c.filename) !== null)
+                                  .sort((a,b) => parseFilenameToSeconds(a.filename) - parseFilenameToSeconds(b.filename));
+
+            if (dayClips.length === 0) return;
+            const totalDuration = dayClips.reduce((sum, c) => sum + (c.duration || 60), 0);
+            if (totalDuration === 0) return;
+
+            let accum = 0;
+            let found = false;
+            let continuousSec = 0;
+
+            for (let clip of dayClips) {
+                let startSec = parseFilenameToSeconds(clip.filename);
+                let dur = clip.duration || 60;
+                let endSec = startSec + dur;
+
+                if (actualSec >= startSec && actualSec <= endSec) {
+                    continuousSec = accum + (actualSec - startSec);
+                    found = true;
+                    break;
+                }
+                accum += dur;
+            }
+
+            if (found) {
+                const pct = continuousSec / totalDuration;
+                document.getElementById('fw-timeline-indicator').style.left = `${pct * 100}%`;
+                document.getElementById('fw-time-label').innerText = secondsToTimeStr(actualSec);
+                document.getElementById('fw-time-label').style.color = "#f39c12";
+            } else {
+                document.getElementById('fw-time-label').innerText = "NO DATA";
+                document.getElementById('fw-time-label').style.color = "#666";
+            }
+        }
+
         function updateCamerasToScrubber(targetSeconds, isManualScrub = false) {
             activeCameras.forEach(camId => {
                 const videoEl = document.getElementById(`video-${camId}`);
@@ -846,6 +978,7 @@
                             fwVideo.src = manifestRef.url;
                             fwVideo.style.display = 'block';
                             fwOverlay.style.display = 'none';
+                            updateFwIndicatorFromSeconds(targetSeconds);
                         }
                         
                         videoEl.onloadedmetadata = () => {
@@ -891,6 +1024,7 @@
                                 if (isManualScrub || drift > 3) fwVideo.currentTime = offset;
                                 if (isPlayingHistory && fwVideo.paused) fwVideo.play().catch(e=>{});
                                 else if (!isPlayingHistory && !fwVideo.paused) fwVideo.pause();
+                                updateFwIndicatorFromSeconds(targetSeconds);
                             }
                         }
                     }
@@ -902,12 +1036,169 @@
                         fwVideo.src = "";
                         fwVideo.style.display = 'block';
                         fwOverlay.style.display = 'flex';
+                        document.getElementById('fw-time-label').innerText = "NO DATA";
+                        document.getElementById('fw-time-label').style.color = "#666";
                     }
                 }
             });
         }
 
-        // --- Floating Window API ---
+        // --- Floating Window Custom Timeline Logic ---
+        const fwTimelineRegion = document.getElementById('fw-timeline-region');
+        const fwIndicator = document.getElementById('fw-timeline-indicator');
+        const fwTimeLabel = document.getElementById('fw-time-label');
+        let fwIsScrubbing = false;
+
+        function updateFwTimelineFromEvent(e) {
+            if (!activeModalCamId) return;
+
+            const rect = fwTimelineRegion.getBoundingClientRect();
+            let x = e.clientX - rect.left;
+            x = Math.max(0, Math.min(x, rect.width)); 
+            const pct = x / rect.width;
+
+            fwIndicator.style.left = `${pct * 100}%`;
+
+            const clips = globalManifest[activeModalCamId] || [];
+            const dayClips = clips.filter(c => parseFilenameToSeconds(c.filename) !== null)
+                                  .sort((a,b) => parseFilenameToSeconds(a.filename) - parseFilenameToSeconds(b.filename));
+
+            if (dayClips.length === 0) {
+                fwTimeLabel.innerText = "NO DATA";
+                fwTimeLabel.style.color = "#666";
+                return;
+            }
+
+            const totalDuration = dayClips.reduce((sum, c) => sum + (c.duration || 60), 0);
+            const targetContinuousSeconds = pct * totalDuration;
+
+            let accum = 0;
+            let selectedClip = dayClips[dayClips.length - 1]; 
+            let offsetInClip = (selectedClip.duration || 60); 
+
+            for (let clip of dayClips) {
+                let dur = clip.duration || 60;
+                if (targetContinuousSeconds <= accum + dur) {
+                    selectedClip = clip;
+                    offsetInClip = targetContinuousSeconds - accum;
+                    break;
+                }
+                accum += dur;
+            }
+
+            const realStartSec = parseFilenameToSeconds(selectedClip.filename);
+            const actualDaySec = realStartSec + offsetInClip;
+
+            fwTimeLabel.innerText = secondsToTimeStr(actualDaySec);
+            fwTimeLabel.style.color = "#f39c12";
+
+            if (fwHlsPlayer) {
+                fwHlsPlayer.destroy();
+                fwHlsPlayer = null;
+            }
+
+            const fwVideo = document.getElementById('fw-video');
+            const fwOverlay = document.getElementById('fw-overlay');
+
+            if (!fwVideo.src.includes(selectedClip.url.replace('./', ''))) {
+                fwVideo.src = selectedClip.url;
+                fwVideo.style.display = 'block';
+                fwOverlay.style.display = 'none';
+
+                fwVideo.onloadedmetadata = () => {
+                    // Instantly update with the true duration once known
+                    if (fwVideo.duration > 0 && fwVideo.duration !== Infinity) {
+                        selectedClip.duration = fwVideo.duration;
+                    }
+                    
+                    // Clamp the scrubber to the actual end of the video
+                    const safeOffset = Math.min(offsetInClip, selectedClip.duration);
+                    fwVideo.currentTime = safeOffset;
+                    
+                    if (!fwIsScrubbing && isPlayingHistory) fwVideo.play().catch(e=>{});
+                    else fwVideo.pause();
+                };
+            } else {
+                fwVideo.style.display = 'block';
+                fwOverlay.style.display = 'none';
+                const safeOffset = Math.min(offsetInClip, selectedClip.duration);
+                if (Math.abs(fwVideo.currentTime - safeOffset) > 0.5 || fwIsScrubbing) {
+                    fwVideo.currentTime = safeOffset;
+                }
+            }
+        }
+
+        fwTimelineRegion.addEventListener('pointerdown', (e) => {
+            fwIsScrubbing = true;
+            fwTimelineRegion.setPointerCapture(e.pointerId);
+            updateFwTimelineFromEvent(e);
+        });
+
+        fwTimelineRegion.addEventListener('pointermove', (e) => {
+            if (!fwIsScrubbing) return;
+            updateFwTimelineFromEvent(e);
+        });
+
+        fwTimelineRegion.addEventListener('pointerup', (e) => {
+            fwIsScrubbing = false;
+            fwTimelineRegion.releasePointerCapture(e.pointerId);
+            const fwVideo = document.getElementById('fw-video');
+            if (isPlayingHistory && fwVideo.src) {
+                fwVideo.play().catch(e=>{});
+            }
+        });
+
+        function fwGoLive() {
+            if (!activeModalCamId) return;
+            const fwVideo = document.getElementById('fw-video');
+            const fwOverlay = document.getElementById('fw-overlay');
+            
+            fwTimeLabel.innerText = "LIVE";
+            fwTimeLabel.style.color = "#4cd137";
+            fwIndicator.style.left = '100%'; 
+
+            // 1. Pause global playback if it's running so it doesn't try to overwrite this video
+            if (isPlayingHistory) {
+                document.getElementById('btn-play').click();
+            }
+
+            // 2. Destroy HLS instance
+            if (fwHlsPlayer) {
+                fwHlsPlayer.destroy();
+                fwHlsPlayer = null;
+            }
+            
+            // 3. HARD RESET the video element (The Fix)
+            fwVideo.pause();
+            fwVideo.removeAttribute('src');
+            fwVideo.currentTime = 0; // Force reset the playhead so the live stream doesn't stall
+            fwVideo.load();
+            
+            fwOverlay.style.display = 'none';
+            fwVideo.style.display = 'block';
+            const freshPlaylistUrl = `./cameras/${activeModalCamId}/stream.m3u8?t=${Date.now()}`;
+            
+            if (Hls.isSupported()) {
+                fwHlsPlayer = new Hls({ 
+                    liveDurationInfinity: true, 
+                    xhrSetup: function(xhr) { xhr.withCredentials = true; }
+                });
+                
+                // Standard, proven attach sequence
+                fwHlsPlayer.loadSource(freshPlaylistUrl);
+                fwHlsPlayer.attachMedia(fwVideo);
+                
+                // Ensure playback triggers as soon as the live manifest is ready
+                fwHlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => {
+                    fwVideo.play().catch(e => console.error("Playback failed:", e));
+                });
+            } else if (fwVideo.canPlayType('application/vnd.apple.mpegurl')) {
+                fwVideo.src = freshPlaylistUrl;
+                fwVideo.play().catch(e => {});
+            }
+        }
+
+        // --- Floating Window General API ---
         function openFloatingWindow(camId) {
             activeModalCamId = camId;
             const fw = document.getElementById('floating-window');
@@ -918,51 +1209,43 @@
             title.innerText = camId.toUpperCase();
             title.style.color = getCameraColor(camId);
             
-            // Auto-center sizing if it's currently hidden
             if (fw.style.display === 'none') {
                 fw.style.display = 'flex';
-                const startWidth = window.innerWidth <= 800 ? window.innerWidth * 0.9 : 640;
-                const startHeight = window.innerWidth <= 800 ? window.innerHeight * 0.4 : 400;
+                // Increased from 640x400 to 720x480 for a better initial layout
+                const startWidth = window.innerWidth <= 800 ? window.innerWidth * 0.9 : 720; 
+                const startHeight = window.innerWidth <= 800 ? window.innerHeight * 0.4 : 480;
                 fw.style.width = `${startWidth}px`;
                 fw.style.height = `${startHeight}px`;
                 fw.style.left = `${(window.innerWidth - startWidth) / 2}px`;
                 fw.style.top = `${(window.innerHeight - startHeight) / 2}px`;
             }
             
-            if (fwHlsPlayer) {
-                fwHlsPlayer.destroy();
-                fwHlsPlayer = null;
-            }
-            
             if (isLive) {
-                fwOverlay.style.display = 'none';
-                fwVideo.style.display = 'block';
-                const freshPlaylistUrl = `./cameras/${camId}/stream.m3u8?t=${Date.now()}`;
-                
-                if (Hls.isSupported()) {
-                    fwHlsPlayer = new Hls({ liveDurationInfinity: true, xhrSetup: function(xhr) { xhr.withCredentials = true; }});
-                    fwHlsPlayer.loadSource(freshPlaylistUrl);
-                    fwHlsPlayer.attachMedia(fwVideo);
-                    fwHlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => fwVideo.play().catch(e => {}));
-                } else if (fwVideo.canPlayType('application/vnd.apple.mpegurl')) {
-                    fwVideo.src = freshPlaylistUrl;
-                    fwVideo.play().catch(e => {});
-                }
+                fwGoLive();
             } else {
-                // If opening in History mode, inherit the exact state from the background grid
                 const gridVideo = document.getElementById(`video-${camId}`);
                 const gridOverlay = document.getElementById(`overlay-${camId}`);
+                
+                if (fwHlsPlayer) {
+                    fwHlsPlayer.destroy();
+                    fwHlsPlayer = null;
+                }
                 
                 if (gridOverlay.style.display === 'flex') {
                     fwOverlay.style.display = 'flex';
                     fwVideo.style.display = 'none';
                     fwVideo.src = "";
+                    fwTimeLabel.innerText = "NO DATA";
+                    fwTimeLabel.style.color = "#666";
                 } else {
                     fwOverlay.style.display = 'none';
                     fwVideo.style.display = 'block';
                     fwVideo.src = gridVideo.src;
                     fwVideo.currentTime = gridVideo.currentTime;
                     if (isPlayingHistory) fwVideo.play().catch(e=>{});
+                    
+                    const currentSec = parseInt(scrubber.value, 10);
+                    updateFwIndicatorFromSeconds(currentSec);
                 }
             }
         }
@@ -1018,7 +1301,6 @@
                 }
             }, 1000);
 
-            // Re-init floating window if it's open
             if (activeModalCamId) {
                 openFloatingWindow(activeModalCamId);
             }
@@ -1074,7 +1356,7 @@
 				activeCameras.forEach(camId => {
 					if (hlsPlayers[camId]) hlsPlayers[camId].detachMedia();
 				});
-				fetchManifest(); // Let this fetch silently in the background
+				fetchManifest(); 
 			}
 			const targetSeconds = parseInt(e.target.value, 10);
             timeLabel.innerText = secondsToTimeStr(targetSeconds);
@@ -1200,7 +1482,6 @@
                 </div>
             `;
             
-            // Add click listener to launch the floating window
             card.addEventListener('click', () => openFloatingWindow(camId));
             
             grid.appendChild(card);
