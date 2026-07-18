@@ -213,6 +213,7 @@ class CameraStream:
         self.current_output_file = ""
         self.record_proc = None
         self.master_proc = None
+        self.last_pipeline_output_time = time.time()
         
         os.makedirs(self.cam_dir, exist_ok=True)
         os.makedirs(self.store_cam_dir, exist_ok=True)
@@ -284,6 +285,9 @@ class CameraStream:
         while True:
             chunk = await self.master_proc.stderr.read(1024)
             if not chunk: break
+            
+            # Update the heartbeat timestamp
+            self.last_pipeline_output_time = time.time()
             
             self.pipeline_log.write(chunk.decode('utf-8', errors='ignore'))
             self.pipeline_log.flush()
@@ -357,23 +361,38 @@ class CameraStream:
                         asyncio.create_task(self.finalize_recording(old_proc, old_file))
 
     async def watchdog(self):
-        """Monitors FFmpeg health and restarts pipelines if they hang."""
+        """Monitors FFmpeg health and restarts pipelines if they hang or die."""
+        stall_timeout = 30  # Seconds without output before considering it hung
+
         while True:
-            await asyncio.sleep(30)
-            if self.master_proc and self.master_proc.returncode is not None:
-                print(f"[⚠️] Watchdog: Master process died for {self.cam_id}. Restarting...")
-                self.write_log_header(self.pipeline_log, "WATCHDOG TRIGGERED - CLEANING UP AND RESTARTING")
+            await asyncio.sleep(15) # Check every 15 seconds
+            
+            is_dead = self.master_proc and self.master_proc.returncode is not None
+            is_stalled = (
+                self.master_proc and 
+                self.master_proc.returncode is None and 
+                (time.time() - self.last_pipeline_output_time) > stall_timeout
+            )
+
+            if is_dead or is_stalled:
+                reason = "died" if is_dead else "stalled"
+                print(f"[⚠️] Watchdog: Master process {reason} for {self.cam_id}. Restarting...")
+                self.write_log_header(self.pipeline_log, f"WATCHDOG TRIGGERED ({reason.upper()}) - CLEANING UP AND RESTARTING")
                 
                 for proc in [self.master_proc, self.record_proc]:
                     if proc and proc.returncode is None:
                         try:
-                            proc.terminate()
+                            # Use kill() instead of terminate() because a hung process might ignore SIGTERM
+                            proc.kill()
                         except ProcessLookupError:
                             pass
                 
                 self.master_proc = None
                 self.record_proc = None
                 self.recording = False
+                
+                # Reset the heartbeat so it doesn't instantly trigger again
+                self.last_pipeline_output_time = time.time()
                 
                 asyncio.create_task(self.start_master_pipeline())
 
