@@ -1197,6 +1197,8 @@
                 	maxBufferSize: 150 * 1024 * 1024,
                     liveDurationInfinity: true, 
                     backBufferLength: Infinity,
+                    liveSyncDurationCount: 3,
+    				liveMaxLatencyDurationCount: 10,
                     xhrSetup: function(xhr) { xhr.withCredentials = true; }
                 });
                 
