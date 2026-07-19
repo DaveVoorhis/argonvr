@@ -15,5 +15,5 @@ This is human-written.
 
 ## Features
 
-1. Turn frontend into Progressive Web App.
+1. Turn frontend into Progressive Web App. (Work in Progress)
 1. Perhaps camera popup should be full screen?
