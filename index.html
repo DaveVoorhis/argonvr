@@ -1192,9 +1192,9 @@
             
             if (Hls.isSupported()) {
                 fwHlsPlayer = new Hls({ 
-                	maxMaxBufferLength: 600,         // Allow buffering up to 10 minutes ahead
-                	maxBufferLength: 600,            // Target forward buffer
-                	maxBufferSize: 60 * 1024 * 1024, // Allow up to 60MB in memory
+					maxMaxBufferLength: 600,         
+                	maxBufferLength: 600,            
+                	maxBufferSize: 150 * 1024 * 1024,
                     liveDurationInfinity: true, 
                     backBufferLength: Infinity,
                     xhrSetup: function(xhr) { xhr.withCredentials = true; }
@@ -1546,14 +1546,17 @@
         const fwTimelineIndicator = document.getElementById('fw-timeline-indicator');
         
         let isScrubbingPopup = false;
-        let lastSeekTime = 0; // Tracks the last time we updated the video frame
+        let lastSeekTime = 0; 
 
+        // 1. Draw the green bars reliably
         function updateBufferIndicators() {
             const duration = fwVideo.duration;
             if (!duration || !isFinite(duration) || isNaN(duration)) return;
 
+            // Remove old green bars
             document.querySelectorAll('.fw-buffered-region').forEach(el => el.remove());
             
+            // Draw new green bars
             for (let i = 0; i < fwVideo.buffered.length; i++) {
                 try {
                     const start = fwVideo.buffered.start(i);
@@ -1568,28 +1571,48 @@
                     bufferDiv.style.width = `${widthPct}%`;
                     
                     fwTimelineRegion.insertBefore(bufferDiv, fwTimelineIndicator);
-                } catch (e) {}
+                } catch (e) {} // Ignore browser parse errors
             }
         }
 
+        // Poll the buffer 4 times a second
         setInterval(updateBufferIndicators, 250);
 
-        // 'force' bypasses the throttle for exact clicks and the final release
+        // 2. Helper to check if a specific timestamp is loaded and green
+        function isTimeBuffered(timeSeconds) {
+            for (let i = 0; i < fwVideo.buffered.length; i++) {
+                // Add a small 0.5s safety margin to the edges of the buffer
+                if (timeSeconds >= fwVideo.buffered.start(i) && timeSeconds <= (fwVideo.buffered.end(i) - 0.5)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // 3. The Smart Scrubber
         function handleTimelineInteraction(e, force = false) {
             const rect = fwTimelineRegion.getBoundingClientRect();
             let x = e.clientX - rect.left;
             x = Math.max(0, Math.min(x, rect.width));
             const percent = x / rect.width;
             
-            // UI updates instantly
+            // Always move the orange scrubber UI instantly
             fwTimelineIndicator.style.left = `${percent * 100}%`;
             
-            // Video frame updates are throttled to ~20 FPS to prevent decoder lockups
             if (fwVideo.duration) {
+                const targetTime = percent * fwVideo.duration;
                 const now = Date.now();
-                if (force || now - lastSeekTime > 50) {
-                    fwVideo.currentTime = percent * fwVideo.duration;
-                    lastSeekTime = now;
+                
+                if (force) {
+                    // Always seek when the user clicks or releases the mouse
+                    fwVideo.currentTime = targetTime;
+                } else if (now - lastSeekTime > 60) { // Throttled to ~15 FPS
+                    // ONLY seek while dragging IF the data is already downloaded (green)
+                    // This prevents the HLS stream from blacking out and stalling!
+                    if (isTimeBuffered(targetTime)) {
+                        fwVideo.currentTime = targetTime;
+                        lastSeekTime = now;
+                    }
                 }
             }
         }
@@ -1597,24 +1620,24 @@
         fwTimelineRegion.addEventListener('pointerdown', (e) => {
             isScrubbingPopup = true;
             fwTimelineRegion.setPointerCapture(e.pointerId);
-            fwVideo.pause(); // Pause video while scrubbing to prioritize seeking
-            handleTimelineInteraction(e, true);
+            fwVideo.pause(); // Pause playback while interacting
+            handleTimelineInteraction(e, true); // Force initial click
         });
 
         fwTimelineRegion.addEventListener('pointermove', (e) => {
             if (isScrubbingPopup) {
-                handleTimelineInteraction(e, false);
+                handleTimelineInteraction(e, false); // Smart seek while dragging
             }
         });
 
         fwTimelineRegion.addEventListener('pointerup', (e) => {
             if (isScrubbingPopup) {
-                handleTimelineInteraction(e, true); // Ensure exact frame is caught on release
+                handleTimelineInteraction(e, true); // Force final seek on release
             }
             isScrubbingPopup = false;
             fwTimelineRegion.releasePointerCapture(e.pointerId);
         });
-        
+                
         // --- Pointer Dragging Logic for the Floating Window ---
         const fw = document.getElementById('floating-window');
         const fwHeader = document.getElementById('fw-header');
