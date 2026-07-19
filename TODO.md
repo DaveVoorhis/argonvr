@@ -10,7 +10,6 @@ This is human-written.
 ## Enhancements
 
 1. When scrubbing the camera popup, clips should load during scrub. Maybe preload and show as green in timeline bar?
-1. Saved clips are large and many. Can they be smaller and/or fewer?
 1. Motion sensitivity should be set per-camera
 1. history.json should be per-camera and per-day and include real clip length.
 

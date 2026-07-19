@@ -76,14 +76,18 @@ To ensure ArgoNVR starts automatically on boot and runs continuously in the back
 *This project is designed for local home networks and requires basic knowledge of RTSP streams.*
 
 ---
-This project is an experiment in using Google Gemini to generate useful code when prompted
-by an experienced developer. The only directly human-written content is this final
-section of this README.md and the TODO.md, plus occasional minor tweaks like changing a comment
-to be more accurate, or the config values.
+
+This project is an experiment in using Google Gemini to generate
+useful code when prompted by an experienced developer. The only
+directly human-written content is this final section of this README.md
+and the TODO.md and CHANGES.md files, plus occasional minor tweaks
+like changing a comment to be more accurate, or the config values.
 
 Everything else is Gemini output in response to my prompts.
 
-As such, the code may be flawed and comments and directions incorrect. For example, the
-text above currently states, "Developed and tested on Linux ..."
+As such, the code may be flawed and comments and directions
+incorrect. For example, the text above currently states, "Developed
+and tested on Linux ..."
 
-Actually, it was developed and tested on MacOS.
+Actually, it was developed and tested on MacOS. I use it under Linux
+on a Raspberry Pi 5.
