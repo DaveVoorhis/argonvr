@@ -1196,6 +1196,7 @@
                 	maxBufferLength: 600,            // Target forward buffer
                 	maxBufferSize: 60 * 1024 * 1024, // Allow up to 60MB in memory
                     liveDurationInfinity: true, 
+                    backBufferLength: Infinity,
                     xhrSetup: function(xhr) { xhr.withCredentials = true; }
                 });
                 
@@ -1540,22 +1541,20 @@
             if (foundCount === 0) setTimeout(discoverCameras, 2000);
         }  
         
-        // --- Real-Time Scrubbing and Buffering Logic ---
+		// --- Real-Time Scrubbing and Buffering Logic ---
         const fwVideo = document.getElementById('fw-video');
         const fwTimelineIndicator = document.getElementById('fw-timeline-indicator');
+        
         let isScrubbingPopup = false;
+        let lastSeekTime = 0; // Tracks the last time we updated the video frame
 
-		function updateBufferIndicators() {
+        function updateBufferIndicators() {
             const duration = fwVideo.duration;
-            // Guard against NaN, Infinity, or 0 before metadata is fully parsed
             if (!duration || !isFinite(duration) || isNaN(duration)) return;
 
-            // Clear out old buffer markers
             document.querySelectorAll('.fw-buffered-region').forEach(el => el.remove());
             
-            // Loop through the loaded chunks and draw green regions
             for (let i = 0; i < fwVideo.buffered.length; i++) {
-                // Add a small try-catch as Safari occasionally throws on rapid buffer access
                 try {
                     const start = fwVideo.buffered.start(i);
                     const end = fwVideo.buffered.end(i);
@@ -1569,43 +1568,49 @@
                     bufferDiv.style.width = `${widthPct}%`;
                     
                     fwTimelineRegion.insertBefore(bufferDiv, fwTimelineIndicator);
-                } catch (e) {
-                    // Ignore transient buffer read errors
-                }
+                } catch (e) {}
             }
         }
 
         setInterval(updateBufferIndicators, 250);
 
-        function handleTimelineInteraction(e) {
+        // 'force' bypasses the throttle for exact clicks and the final release
+        function handleTimelineInteraction(e, force = false) {
             const rect = fwTimelineRegion.getBoundingClientRect();
             let x = e.clientX - rect.left;
-            
-            // Clamp values between 0 and region width
             x = Math.max(0, Math.min(x, rect.width));
             const percent = x / rect.width;
             
+            // UI updates instantly
             fwTimelineIndicator.style.left = `${percent * 100}%`;
             
-            // Sync video frame real-time while dragging
+            // Video frame updates are throttled to ~20 FPS to prevent decoder lockups
             if (fwVideo.duration) {
-                fwVideo.currentTime = percent * fwVideo.duration;
+                const now = Date.now();
+                if (force || now - lastSeekTime > 50) {
+                    fwVideo.currentTime = percent * fwVideo.duration;
+                    lastSeekTime = now;
+                }
             }
         }
 
         fwTimelineRegion.addEventListener('pointerdown', (e) => {
             isScrubbingPopup = true;
             fwTimelineRegion.setPointerCapture(e.pointerId);
-            handleTimelineInteraction(e);
+            fwVideo.pause(); // Pause video while scrubbing to prioritize seeking
+            handleTimelineInteraction(e, true);
         });
 
         fwTimelineRegion.addEventListener('pointermove', (e) => {
             if (isScrubbingPopup) {
-                handleTimelineInteraction(e);
+                handleTimelineInteraction(e, false);
             }
         });
 
         fwTimelineRegion.addEventListener('pointerup', (e) => {
+            if (isScrubbingPopup) {
+                handleTimelineInteraction(e, true); // Ensure exact frame is caught on release
+            }
             isScrubbingPopup = false;
             fwTimelineRegion.releasePointerCapture(e.pointerId);
         });
