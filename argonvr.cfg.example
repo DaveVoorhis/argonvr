@@ -16,6 +16,7 @@ SSL_KEY_PATH =
 # Select the correct H264 encoder based on your platform:
 # Linux: h264_v4l2m2m
 # Mac: h264_videotoolbox
-# Software: libx264
+# Software-based video encoding for non-H264 sources: libx264
+# Software-based video copy for H264 sources: copy
 ENCODER = libx264
 LOG_HTTP_REQUESTS = False
