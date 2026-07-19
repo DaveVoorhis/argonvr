@@ -389,6 +389,18 @@
             transform: translateX(-50%);
             pointer-events: none; 
             box-shadow: 0 0 5px rgba(0,0,0,0.8);
+            z-index: 2; /* Updated Z-Index */
+        }
+
+        /* ADDED: Subtle green background loading indicator */
+        .fw-buffered-region {
+            position: absolute;
+            top: 0;
+            height: 100%;
+            background: rgba(46, 204, 113, 0.25); 
+            pointer-events: none;
+            border-radius: 4px;
+            z-index: 0;
         }
 
         input[type=range] {
@@ -564,7 +576,7 @@
             <span class="fw-close" onclick="closeFloatingWindow()">✖</span>
         </div>
         <div class="fw-body">
-            <video id="fw-video" muted playsinline></video>
+            <video id="fw-video" muted playsinline preload="auto"></video>
             <div class="no-video-overlay" id="fw-overlay" style="z-index: 10;">
                 <div>No Motion Detected</div>
             </div>
@@ -1180,6 +1192,9 @@
             
             if (Hls.isSupported()) {
                 fwHlsPlayer = new Hls({ 
+                	maxMaxBufferLength: 600,         // Allow buffering up to 10 minutes ahead
+                	maxBufferLength: 600,            // Target forward buffer
+                	maxBufferSize: 60 * 1024 * 1024, // Allow up to 60MB in memory
                     liveDurationInfinity: true, 
                     xhrSetup: function(xhr) { xhr.withCredentials = true; }
                 });
@@ -1524,6 +1539,76 @@
             }
             if (foundCount === 0) setTimeout(discoverCameras, 2000);
         }  
+        
+        // --- Real-Time Scrubbing and Buffering Logic ---
+        const fwVideo = document.getElementById('fw-video');
+        const fwTimelineIndicator = document.getElementById('fw-timeline-indicator');
+        let isScrubbingPopup = false;
+
+		function updateBufferIndicators() {
+            const duration = fwVideo.duration;
+            // Guard against NaN, Infinity, or 0 before metadata is fully parsed
+            if (!duration || !isFinite(duration) || isNaN(duration)) return;
+
+            // Clear out old buffer markers
+            document.querySelectorAll('.fw-buffered-region').forEach(el => el.remove());
+            
+            // Loop through the loaded chunks and draw green regions
+            for (let i = 0; i < fwVideo.buffered.length; i++) {
+                // Add a small try-catch as Safari occasionally throws on rapid buffer access
+                try {
+                    const start = fwVideo.buffered.start(i);
+                    const end = fwVideo.buffered.end(i);
+                    
+                    const startPct = (start / duration) * 100;
+                    const widthPct = ((end - start) / duration) * 100;
+
+                    const bufferDiv = document.createElement('div');
+                    bufferDiv.className = 'fw-buffered-region';
+                    bufferDiv.style.left = `${startPct}%`;
+                    bufferDiv.style.width = `${widthPct}%`;
+                    
+                    fwTimelineRegion.insertBefore(bufferDiv, fwTimelineIndicator);
+                } catch (e) {
+                    // Ignore transient buffer read errors
+                }
+            }
+        }
+
+        setInterval(updateBufferIndicators, 250);
+
+        function handleTimelineInteraction(e) {
+            const rect = fwTimelineRegion.getBoundingClientRect();
+            let x = e.clientX - rect.left;
+            
+            // Clamp values between 0 and region width
+            x = Math.max(0, Math.min(x, rect.width));
+            const percent = x / rect.width;
+            
+            fwTimelineIndicator.style.left = `${percent * 100}%`;
+            
+            // Sync video frame real-time while dragging
+            if (fwVideo.duration) {
+                fwVideo.currentTime = percent * fwVideo.duration;
+            }
+        }
+
+        fwTimelineRegion.addEventListener('pointerdown', (e) => {
+            isScrubbingPopup = true;
+            fwTimelineRegion.setPointerCapture(e.pointerId);
+            handleTimelineInteraction(e);
+        });
+
+        fwTimelineRegion.addEventListener('pointermove', (e) => {
+            if (isScrubbingPopup) {
+                handleTimelineInteraction(e);
+            }
+        });
+
+        fwTimelineRegion.addEventListener('pointerup', (e) => {
+            isScrubbingPopup = false;
+            fwTimelineRegion.releasePointerCapture(e.pointerId);
+        });
         
         // --- Pointer Dragging Logic for the Floating Window ---
         const fw = document.getElementById('floating-window');
