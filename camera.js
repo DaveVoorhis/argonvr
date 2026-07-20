@@ -338,7 +338,8 @@ function updateFwTimelineFromEvent(e) {
         // Capture snapshot to prevent black flash
         const snap = getSnapshotCanvas();
         try {
-            if (fwVideo.videoWidth > 0 && fwVideo.videoHeight > 0) {
+            // readyState >= 2 ensures we don't draw a blank frame if scrubbing extremely fast
+            if (fwVideo.readyState >= 2 && fwVideo.videoWidth > 0) {
                 snap.width = fwVideo.videoWidth;
                 snap.height = fwVideo.videoHeight;
                 const ctx = snap.getContext('2d');
@@ -362,11 +363,22 @@ function updateFwTimelineFromEvent(e) {
             fwVideo.currentTime = safeOffset;
         };
 
+        // --- THE FIX: Rock-solid snapshot removal ---
         const removeSnapshot = () => {
-            snap.style.display = 'none';
-            fwVideo.removeEventListener('timeupdate', removeSnapshot);
+            // Double requestAnimationFrame forces the browser to wait until 
+            // the new video frame is physically painted to the monitor.
+            requestAnimationFrame(() => {
+                requestAnimationFrame(() => {
+                    snap.style.display = 'none';
+                });
+            });
+            fwVideo.removeEventListener('seeked', removeSnapshot);
+            fwVideo.removeEventListener('playing', removeSnapshot);
         };
-        fwVideo.addEventListener('timeupdate', removeSnapshot);
+        
+        // Listen for 'seeked' instead of 'timeupdate'
+        fwVideo.addEventListener('seeked', removeSnapshot);
+        fwVideo.addEventListener('playing', removeSnapshot);
 
         if (!fwIsScrubbing) {
             fwVideo.play().catch(e=>{});
