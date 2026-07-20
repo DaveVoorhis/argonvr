@@ -13,7 +13,6 @@ function getTodayString() {
 }
 
 const currentDayString = dateParam || getTodayString();
-
 const CAMERA_COLORS = ['#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#e74c3c', '#1abc9c', '#e84393'];
 
 function getCameraColor(id) {
@@ -34,6 +33,7 @@ const fwTimeLabel = document.getElementById('fw-time-label');
 let globalManifest = {};
 let fwHlsPlayer = null;
 let fwIsScrubbing = false;
+let lastScrubUpdate = 0; // Added for throttling
 
 function secondsToTimeStr(seconds) {
     const h = Math.floor(seconds / 3600);
@@ -90,9 +90,66 @@ async function fetchManifest() {
             }
         });
         globalManifest = newManifest;
+
+        // Trigger the background cache preloader for today's clips
+        const dayClips = (globalManifest[camId] || []).filter(c => parseFilenameToSeconds(c.filename) !== null);
+        preloadDayClips(dayClips);
+
     } catch (e) {
         console.log("Could not load history manifest.");
     }
+}
+// --- Updated Preloader: Tracks Network Cache Status ---
+function preloadDayClips(clips) {
+    clips.forEach(clip => {
+        if (clip.url) {
+            // Silently fetch into network cache
+            fetch(clip.url, { mode: 'no-cors', cache: 'force-cache' })
+                .then(() => {
+                    clip.isCached = true; // Flag it as successfully downloaded
+                    drawTimelineChunks(); // Redraw the timeline to turn this chunk green
+                })
+                .catch(() => {
+                    console.log(`Failed to pre-cache: ${clip.filename}`);
+                });
+        }
+    });
+}
+
+// --- New Timeline Visualizer: Replaces updateBufferIndicators ---
+function drawTimelineChunks() {
+    // Clear old visual chunks
+    document.querySelectorAll('.fw-timeline-chunk').forEach(el => el.remove());
+
+    // Do not draw history chunks if we are actively viewing the LIVE HLS stream
+    if (fwHlsPlayer) return; 
+
+    const clips = globalManifest[camId] || [];
+    const dayClips = clips.filter(c => parseFilenameToSeconds(c.filename) !== null)
+                          .sort((a,b) => parseFilenameToSeconds(a.filename) - parseFilenameToSeconds(b.filename));
+
+    if (dayClips.length === 0) return;
+
+    const totalDuration = dayClips.reduce((sum, c) => sum + (c.duration || 60), 0);
+    let accum = 0;
+
+    dayClips.forEach(clip => {
+        const startPct = (accum / totalDuration) * 100;
+        const widthPct = ((clip.duration || 60) / totalDuration) * 100;
+
+        const chunk = document.createElement('div');
+        chunk.className = 'fw-timeline-chunk';
+        chunk.style.left = `${startPct}%`;
+        chunk.style.width = `${widthPct}%`;
+
+        // Dim white if we know the file exists on the NVR, bright green if it's cached in the browser
+        chunk.style.backgroundColor = clip.isCached ? 'rgba(46, 204, 113, 0.6)' : 'rgba(255, 255, 255, 0.15)';
+
+        // Insert just beneath the scrubber indicator
+        fwTimelineRegion.insertBefore(chunk, fwIndicator);
+
+        accum += (clip.duration || 60);
+    });
 }
 
 // --- Video Stream Logic ---
@@ -116,6 +173,7 @@ function fwGoLive() {
     
     const freshPlaylistUrl = `./cameras/${camId}/stream.m3u8?t=${Date.now()}`;
     
+    // --- FIX 3: Correct HLS.js Lifecycle Initialization ---
     if (Hls.isSupported()) {
         fwHlsPlayer = new Hls({ 
             maxMaxBufferLength: 600,         
@@ -128,85 +186,23 @@ function fwGoLive() {
             xhrSetup: function(xhr) { xhr.withCredentials = true; }
         });
         
-        fwHlsPlayer.loadSource(freshPlaylistUrl);
+        // Step 1: Attach Media
         fwHlsPlayer.attachMedia(fwVideo);
         
+        // Step 2: Load Source ONLY after media is attached
+        fwHlsPlayer.on(Hls.Events.MEDIA_ATTACHED, () => {
+            fwHlsPlayer.loadSource(freshPlaylistUrl);
+        });
+        
+        // Step 3: Play when parsed
         fwHlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => {
-            fwVideo.play().catch(e => {});
+            fwVideo.play().catch(e => console.error("Live play error:", e));
         });
     } else if (fwVideo.canPlayType('application/vnd.apple.mpegurl')) {
         fwVideo.src = freshPlaylistUrl;
         fwVideo.play().catch(e => {});
     }
 }
-
-// --- Accurate Buffer Indication ---
-function updateBufferIndicators() {
-    const duration = fwVideo.duration;
-    if (!duration || !isFinite(duration) || isNaN(duration)) return;
-
-    document.querySelectorAll('.fw-buffered-region').forEach(el => el.remove());
-    
-    // Check if we are playing historical mp4 or live HLS
-    let isHistory = !fwHlsPlayer && fwVideo.src && fwVideo.src.includes('.mp4');
-
-    if (isHistory) {
-        const clips = globalManifest[camId] || [];
-        const dayClips = clips.filter(c => parseFilenameToSeconds(c.filename) !== null)
-                              .sort((a,b) => parseFilenameToSeconds(a.filename) - parseFilenameToSeconds(b.filename));
-        
-        if (dayClips.length === 0) return;
-        
-        const totalDuration = dayClips.reduce((sum, c) => sum + (c.duration || 60), 0);
-        
-        let accum = 0;
-        let activeClipOffset = 0;
-        for (let clip of dayClips) {
-            if (fwVideo.src.includes(clip.url.replace('./', ''))) {
-                activeClipOffset = accum;
-                break;
-            }
-            accum += (clip.duration || 60);
-        }
-
-        for (let i = 0; i < fwVideo.buffered.length; i++) {
-            try {
-                const start = fwVideo.buffered.start(i);
-                const end = fwVideo.buffered.end(i);
-                
-                // Project the current clip's loaded buffers accurately onto the gapless layout
-                const startPct = ((activeClipOffset + start) / totalDuration) * 100;
-                const widthPct = ((end - start) / totalDuration) * 100;
-
-                const bufferDiv = document.createElement('div');
-                bufferDiv.className = 'fw-buffered-region';
-                bufferDiv.style.left = `${startPct}%`;
-                bufferDiv.style.width = `${widthPct}%`;
-                
-                fwTimelineRegion.insertBefore(bufferDiv, fwIndicator);
-            } catch (e) {}
-        }
-    } else {
-        // Live stream buffer layout fallback
-        for (let i = 0; i < fwVideo.buffered.length; i++) {
-            try {
-                const start = fwVideo.buffered.start(i);
-                const end = fwVideo.buffered.end(i);
-                
-                const startPct = (start / duration) * 100;
-                const widthPct = ((end - start) / duration) * 100;
-
-                const bufferDiv = document.createElement('div');
-                bufferDiv.className = 'fw-buffered-region';
-                bufferDiv.style.left = `${startPct}%`;
-                bufferDiv.style.width = `${widthPct}%`;
-                
-                fwTimelineRegion.insertBefore(bufferDiv, fwIndicator);
-            } catch (e) {}
-        }
-    }
-}
-setInterval(updateBufferIndicators, 250);
 
 // --- Smart Scrubber Logic ---
 function updateFwTimelineFromEvent(e) {
@@ -250,10 +246,10 @@ function updateFwTimelineFromEvent(e) {
     fwTimeLabel.innerText = secondsToTimeStr(actualDaySec);
     fwTimeLabel.style.color = "#f39c12";
 
-    // Unconditionally destroy live stream on timeline interaction
     if (fwHlsPlayer) {
         fwHlsPlayer.destroy();
         fwHlsPlayer = null;
+        drawTimelineChunks();
     }
 
     if (!fwVideo.src.includes(selectedClip.url.replace('./', ''))) {
@@ -268,8 +264,11 @@ function updateFwTimelineFromEvent(e) {
             const safeOffset = Math.min(offsetInClip, selectedClip.duration);
             fwVideo.currentTime = safeOffset;
             
-            if (!fwIsScrubbing) fwVideo.play().catch(e=>{});
-            else fwVideo.pause();
+            if (!fwIsScrubbing) {
+                fwVideo.play().catch(e=>{});
+            } else {
+                fwVideo.pause();
+            }
         };
     } else {
         fwVideo.style.display = 'block';
@@ -284,14 +283,18 @@ function updateFwTimelineFromEvent(e) {
 fwTimelineRegion.addEventListener('pointerdown', (e) => {
     fwIsScrubbing = true;
     fwTimelineRegion.setPointerCapture(e.pointerId);
-    
-    // Always trigger history sweep when scrubbing the timeline
     updateFwTimelineFromEvent(e);
 });
 
 fwTimelineRegion.addEventListener('pointermove', (e) => {
+    // --- FIX 2: Throttled Scrubbing ---
     if (fwIsScrubbing) {
-        updateFwTimelineFromEvent(e);
+        const now = Date.now();
+        // Only update the video decoder ~15 times a second to prevent frame freezing
+        if (now - lastScrubUpdate > 60) { 
+            updateFwTimelineFromEvent(e);
+            lastScrubUpdate = now;
+        }
     }
 });
 
@@ -308,12 +311,10 @@ fwTimelineRegion.addEventListener('pointerup', (e) => {
 document.addEventListener('DOMContentLoaded', async () => {
     await fetchManifest();
     
-    // Auto-play history if a specific non-live date was passed, otherwise default to Live
     if (dateParam && dateParam !== getTodayString()) {
         fwHlsPlayer = null; 
         fwTimeLabel.innerText = "LOADING";
         
-        // Wait briefly for manifest parsing before simulating a scrub to the start of the day's footage
         setTimeout(() => {
              const mockEvent = { clientX: fwTimelineRegion.getBoundingClientRect().left };
              updateFwTimelineFromEvent(mockEvent);

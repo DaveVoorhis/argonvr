@@ -152,3 +152,10 @@ body {
     border-radius: 4px;
     z-index: 0;
 }
+
+.fw-timeline-chunk {
+    position: absolute;
+    height: 100%;
+    pointer-events: none; /* Allows clicks to pass through to the timeline */
+    transition: background-color 0.3s ease;
+}
