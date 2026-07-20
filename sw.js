@@ -1,10 +1,5 @@
 const CACHE_NAME = 'argonvr-cache-v1';
 const ASSETS = [
-    '/',
-    '/index.html',
-    '/argonvr.cfg',
-    'script.js',
-    'style.css',
     'icon-192.png',
     'icon-512.png'
 ];

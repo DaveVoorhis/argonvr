@@ -623,54 +623,8 @@ function fwGoLive() {
 
 // --- Floating Window General API ---
 function openFloatingWindow(camId) {
-	activeModalCamId = camId;
-	const fw = document.getElementById('floating-window');
-	const title = document.getElementById('fw-title');
-	const fwVideo = document.getElementById('fw-video');
-	const fwOverlay = document.getElementById('fw-overlay');
-	
-	title.innerText = camId.toUpperCase();
-	title.style.color = getCameraColor(camId);
-	
-	if (fw.style.display === 'none') {
-		fw.style.display = 'flex';
-		// Increased from 640x400 to 720x480 for a better initial layout
-		const startWidth = window.innerWidth <= 800 ? window.innerWidth * 0.9 : 720; 
-		const startHeight = window.innerWidth <= 800 ? window.innerHeight * 0.4 : 480;
-		fw.style.width = `${startWidth}px`;
-		fw.style.height = `${startHeight}px`;
-		fw.style.left = `${(window.innerWidth - startWidth) / 2}px`;
-		fw.style.top = `${(window.innerHeight - startHeight) / 2}px`;
-	}
-	
-	if (isLive) {
-		fwGoLive();
-	} else {
-		const gridVideo = document.getElementById(`video-${camId}`);
-		const gridOverlay = document.getElementById(`overlay-${camId}`);
-		
-		if (fwHlsPlayer) {
-			fwHlsPlayer.destroy();
-			fwHlsPlayer = null;
-		}
-		
-		if (gridOverlay.style.display === 'flex') {
-			fwOverlay.style.display = 'flex';
-			fwVideo.style.display = 'none';
-			fwVideo.src = "";
-			fwTimeLabel.innerText = "NO DATA";
-			fwTimeLabel.style.color = "#666";
-		} else {
-			fwOverlay.style.display = 'none';
-			fwVideo.style.display = 'block';
-			fwVideo.src = gridVideo.src;
-			fwVideo.currentTime = gridVideo.currentTime;
-			if (isPlayingHistory) fwVideo.play().catch(e=>{});
-			
-			const currentSec = parseInt(scrubber.value, 10);
-			updateFwIndicatorFromSeconds(currentSec);
-		}
-	}
+    // Pass both the camera ID and the active calendar date
+    window.location.href = `camera.html?cam=${camId}&date=${currentDayString}`;
 }
 
 function closeFloatingWindow() {

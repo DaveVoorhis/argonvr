@@ -1,0 +1,154 @@
+body {
+    background: #000;
+    margin: 0;
+    padding: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: white;
+    height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.camera-header {
+    background: #1a1a1a;
+    padding: 10px 15px;
+    display: flex;
+    align-items: center;
+    border-bottom: 1px solid #333;
+    height: 40px;
+    flex-shrink: 0;
+    gap: 20px;
+}
+
+.back-btn {
+    background: #333;
+    border: none;
+    color: white;
+    padding: 8px 15px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+    transition: background 0.2s;
+}
+
+.back-btn:hover {
+    background: #444;
+}
+
+.cam-title {
+    font-weight: bold;
+    font-size: 1.2rem;
+    text-transform: uppercase;
+}
+
+.video-container {
+    flex-grow: 1;
+    position: relative;
+    background: #000;
+    min-height: 0;
+}
+
+.video-container video {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+.no-video-overlay {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: repeating-linear-gradient(45deg, #111, #111 10px, #1a1a1a 10px, #1a1a1a 20px);
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    color: #666;
+    z-index: 5;
+}
+
+/* Custom Gapless Timeline Styles */
+.fw-controls {
+    background: #1a1a1a;
+    padding: 8px 15px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    border-top: 1px solid #333;
+    height: 50px; /* Made slightly taller for better mobile touch targeting */
+    flex-shrink: 0;
+    user-select: none;
+}
+
+.ctrl-btn {
+    background: #333;
+    border: none;
+    color: white;
+    padding: 8px 15px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-weight: bold;
+    transition: background 0.2s;
+}
+
+.ctrl-btn.live-btn {
+    background: #e74c3c;
+    width: 90px;
+    flex-shrink: 0;
+}
+
+.ctrl-btn.live-btn:hover { background: #c0392b; }
+
+.fw-time-display {
+    font-family: monospace;
+    font-size: 1.1rem;
+    color: #4cd137;
+    width: 80px;
+    flex-shrink: 0;
+    text-align: center;
+}
+
+.fw-timeline-container {
+    flex-grow: 1;
+    height: 100%;
+    display: flex;
+    align-items: center;
+}
+
+.fw-timeline-region {
+    width: 100%;
+    height: 32px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+    position: relative;
+    cursor: pointer;
+    touch-action: none;
+    border: 1px solid #333;
+    box-sizing: border-box;
+}
+
+.fw-timeline-region:hover { background: rgba(255, 255, 255, 0.12); }
+
+.fw-timeline-indicator {
+    position: absolute;
+    top: 0;
+    left: 100%;
+    width: 4px;
+    height: 100%;
+    background: #f39c12;
+    border-radius: 2px;
+    transform: translateX(-50%);
+    pointer-events: none;
+    box-shadow: 0 0 5px rgba(0,0,0,0.8);
+    z-index: 2;
+}
+
+.fw-buffered-region {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    background: rgba(46, 204, 113, 0.25);
+    pointer-events: none;
+    border-radius: 4px;
+    z-index: 0;
+}
