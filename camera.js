@@ -34,9 +34,27 @@ let globalManifest = {};
 let fwHlsPlayer = null;
 let fwIsScrubbing = false;
 let lastScrubUpdate = 0; 
-
-// --- FIX 2: Seeking Race Condition Queue ---
 let fwPendingSeekTime = null;
+
+// --- Seamless Transition Snapshot Canvas ---
+let snapshotCanvas = null;
+function getSnapshotCanvas() {
+    if (!snapshotCanvas) {
+        snapshotCanvas = document.createElement('canvas');
+        snapshotCanvas.id = 'fw-snapshot';
+        snapshotCanvas.style.position = 'absolute';
+        snapshotCanvas.style.top = '0';
+        snapshotCanvas.style.left = '0';
+        snapshotCanvas.style.width = '100%';
+        snapshotCanvas.style.height = '100%';
+        snapshotCanvas.style.objectFit = 'contain';
+        snapshotCanvas.style.zIndex = '5';
+        snapshotCanvas.style.pointerEvents = 'none';
+        snapshotCanvas.style.display = 'none';
+        fwVideo.parentElement.appendChild(snapshotCanvas);
+    }
+    return snapshotCanvas;
+}
 
 // Only apply the next time update AFTER the browser has finished painting the current frame
 fwVideo.addEventListener('seeked', () => {
@@ -103,20 +121,20 @@ async function fetchManifest() {
         });
         globalManifest = newManifest;
 
-        // Trigger the background cache preloader for today's clips immediately
+        // Trigger background caching immediately on load
         const dayClips = (globalManifest[camId] || []).filter(c => parseFilenameToSeconds(c.filename) !== null);
         preloadDayClips(dayClips);
+        drawTimelineChunks();
 
     } catch (e) {
         console.log("Could not load history manifest.");
     }
 }
 
-// --- Updated Preloader: Corrected Caching ---
+// --- Background Caching ---
 function preloadDayClips(clips) {
     clips.forEach(clip => {
         if (clip.url) {
-            // FIX 2: Removed mode: 'no-cors' so the browser can utilize the cache for <video> byte-range requests
             fetch(clip.url, { cache: 'force-cache' })
                 .then(response => {
                     if (response.ok || response.status === 304 || response.status === 206) {
@@ -131,13 +149,9 @@ function preloadDayClips(clips) {
     });
 }
 
-// --- New Timeline Visualizer ---
+// --- Timeline Visualizer ---
 function drawTimelineChunks() {
-    // Clear old visual chunks
     document.querySelectorAll('.fw-timeline-chunk').forEach(el => el.remove());
-
-    // FIX 1: Removed the `if (fwHlsPlayer) return;` block.
-    // The timeline will now draw its history chunks immediately upon page load, even while viewing the live stream.
 
     const clips = globalManifest[camId] || [];
     const dayClips = clips.filter(c => parseFilenameToSeconds(c.filename) !== null)
@@ -156,13 +170,9 @@ function drawTimelineChunks() {
         chunk.className = 'fw-timeline-chunk';
         chunk.style.left = `${startPct}%`;
         chunk.style.width = `${widthPct}%`;
-
-        // Dim white if we know the file exists on the NVR, bright green if it's cached in the browser
         chunk.style.backgroundColor = clip.isCached ? 'rgba(46, 204, 113, 0.6)' : 'rgba(255, 255, 255, 0.15)';
 
-        // Insert just beneath the scrubber indicator
         fwTimelineRegion.insertBefore(chunk, fwIndicator);
-
         accum += (clip.duration || 60);
     });
 }
@@ -172,6 +182,8 @@ function fwGoLive() {
     fwTimeLabel.innerText = "LIVE";
     fwTimeLabel.style.color = "#4cd137";
     fwIndicator.style.left = '100%'; 
+
+    if (snapshotCanvas) snapshotCanvas.style.display = 'none';
 
     if (fwHlsPlayer) {
         fwHlsPlayer.destroy();
@@ -260,10 +272,24 @@ function updateFwTimelineFromEvent(e) {
     if (fwHlsPlayer) {
         fwHlsPlayer.destroy();
         fwHlsPlayer = null;
+        drawTimelineChunks();
     }
 
     if (!fwVideo.src.includes(selectedClip.url.replace('./', ''))) {
-        // Clearing pending seeks because we are switching files entirely
+        // Capture snapshot to prevent black flash
+        const snap = getSnapshotCanvas();
+        try {
+            if (fwVideo.videoWidth > 0 && fwVideo.videoHeight > 0) {
+                snap.width = fwVideo.videoWidth;
+                snap.height = fwVideo.videoHeight;
+                const ctx = snap.getContext('2d');
+                ctx.drawImage(fwVideo, 0, 0, snap.width, snap.height);
+                snap.style.display = 'block';
+            }
+        } catch (err) {
+            snap.style.display = 'none';
+        }
+
         fwPendingSeekTime = null; 
         fwVideo.src = selectedClip.url;
         fwVideo.style.display = 'block';
@@ -275,20 +301,25 @@ function updateFwTimelineFromEvent(e) {
             }
             const safeOffset = Math.min(offsetInClip, selectedClip.duration);
             fwVideo.currentTime = safeOffset;
-            
-            if (!fwIsScrubbing) {
-                fwVideo.play().catch(e=>{});
-            } else {
-                fwVideo.pause();
-            }
         };
+
+        const removeSnapshot = () => {
+            snap.style.display = 'none';
+            fwVideo.removeEventListener('timeupdate', removeSnapshot);
+        };
+        fwVideo.addEventListener('timeupdate', removeSnapshot);
+
+        if (!fwIsScrubbing) {
+            fwVideo.play().catch(e=>{});
+        } else {
+            fwVideo.pause();
+        }
     } else {
         fwVideo.style.display = 'block';
         fwOverlay.style.display = 'none';
         const safeOffset = Math.min(offsetInClip, selectedClip.duration);
         
         if (Math.abs(fwVideo.currentTime - safeOffset) > 0.5 || fwIsScrubbing) {
-            // FIX 2: If the browser is busy rendering a frame, queue the request. If it's free, render immediately.
             if (fwVideo.seeking) {
                 fwPendingSeekTime = safeOffset;
             } else {
@@ -317,6 +348,8 @@ fwTimelineRegion.addEventListener('pointermove', (e) => {
 fwTimelineRegion.addEventListener('pointerup', (e) => {
     fwIsScrubbing = false;
     fwTimelineRegion.releasePointerCapture(e.pointerId);
+    
+    if (snapshotCanvas) snapshotCanvas.style.display = 'none';
     
     if (!fwHlsPlayer && fwVideo.src) {
         fwVideo.play().catch(e=>{});
