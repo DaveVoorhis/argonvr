@@ -33,7 +33,19 @@ const fwTimeLabel = document.getElementById('fw-time-label');
 let globalManifest = {};
 let fwHlsPlayer = null;
 let fwIsScrubbing = false;
-let lastScrubUpdate = 0; // Added for throttling
+let lastScrubUpdate = 0; 
+
+// --- FIX 2: Seeking Race Condition Queue ---
+let fwPendingSeekTime = null;
+
+// Only apply the next time update AFTER the browser has finished painting the current frame
+fwVideo.addEventListener('seeked', () => {
+    if (fwPendingSeekTime !== null) {
+        const timeToSeek = fwPendingSeekTime;
+        fwPendingSeekTime = null;
+        fwVideo.currentTime = timeToSeek;
+    }
+});
 
 function secondsToTimeStr(seconds) {
     const h = Math.floor(seconds / 3600);
@@ -91,7 +103,7 @@ async function fetchManifest() {
         });
         globalManifest = newManifest;
 
-        // Trigger the background cache preloader for today's clips
+        // Trigger the background cache preloader for today's clips immediately
         const dayClips = (globalManifest[camId] || []).filter(c => parseFilenameToSeconds(c.filename) !== null);
         preloadDayClips(dayClips);
 
@@ -99,15 +111,18 @@ async function fetchManifest() {
         console.log("Could not load history manifest.");
     }
 }
-// --- Updated Preloader: Tracks Network Cache Status ---
+
+// --- Updated Preloader: Corrected Caching ---
 function preloadDayClips(clips) {
     clips.forEach(clip => {
         if (clip.url) {
-            // Silently fetch into network cache
-            fetch(clip.url, { mode: 'no-cors', cache: 'force-cache' })
-                .then(() => {
-                    clip.isCached = true; // Flag it as successfully downloaded
-                    drawTimelineChunks(); // Redraw the timeline to turn this chunk green
+            // FIX 2: Removed mode: 'no-cors' so the browser can utilize the cache for <video> byte-range requests
+            fetch(clip.url, { cache: 'force-cache' })
+                .then(response => {
+                    if (response.ok || response.status === 304 || response.status === 206) {
+                        clip.isCached = true;
+                        drawTimelineChunks(); 
+                    }
                 })
                 .catch(() => {
                     console.log(`Failed to pre-cache: ${clip.filename}`);
@@ -116,13 +131,13 @@ function preloadDayClips(clips) {
     });
 }
 
-// --- New Timeline Visualizer: Replaces updateBufferIndicators ---
+// --- New Timeline Visualizer ---
 function drawTimelineChunks() {
     // Clear old visual chunks
     document.querySelectorAll('.fw-timeline-chunk').forEach(el => el.remove());
 
-    // Do not draw history chunks if we are actively viewing the LIVE HLS stream
-    if (fwHlsPlayer) return; 
+    // FIX 1: Removed the `if (fwHlsPlayer) return;` block.
+    // The timeline will now draw its history chunks immediately upon page load, even while viewing the live stream.
 
     const clips = globalManifest[camId] || [];
     const dayClips = clips.filter(c => parseFilenameToSeconds(c.filename) !== null)
@@ -173,7 +188,6 @@ function fwGoLive() {
     
     const freshPlaylistUrl = `./cameras/${camId}/stream.m3u8?t=${Date.now()}`;
     
-    // --- FIX 3: Correct HLS.js Lifecycle Initialization ---
     if (Hls.isSupported()) {
         fwHlsPlayer = new Hls({ 
             maxMaxBufferLength: 600,         
@@ -186,15 +200,12 @@ function fwGoLive() {
             xhrSetup: function(xhr) { xhr.withCredentials = true; }
         });
         
-        // Step 1: Attach Media
         fwHlsPlayer.attachMedia(fwVideo);
         
-        // Step 2: Load Source ONLY after media is attached
         fwHlsPlayer.on(Hls.Events.MEDIA_ATTACHED, () => {
             fwHlsPlayer.loadSource(freshPlaylistUrl);
         });
         
-        // Step 3: Play when parsed
         fwHlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => {
             fwVideo.play().catch(e => console.error("Live play error:", e));
         });
@@ -249,10 +260,11 @@ function updateFwTimelineFromEvent(e) {
     if (fwHlsPlayer) {
         fwHlsPlayer.destroy();
         fwHlsPlayer = null;
-        drawTimelineChunks();
     }
 
     if (!fwVideo.src.includes(selectedClip.url.replace('./', ''))) {
+        // Clearing pending seeks because we are switching files entirely
+        fwPendingSeekTime = null; 
         fwVideo.src = selectedClip.url;
         fwVideo.style.display = 'block';
         fwOverlay.style.display = 'none';
@@ -274,8 +286,14 @@ function updateFwTimelineFromEvent(e) {
         fwVideo.style.display = 'block';
         fwOverlay.style.display = 'none';
         const safeOffset = Math.min(offsetInClip, selectedClip.duration);
+        
         if (Math.abs(fwVideo.currentTime - safeOffset) > 0.5 || fwIsScrubbing) {
-            fwVideo.currentTime = safeOffset;
+            // FIX 2: If the browser is busy rendering a frame, queue the request. If it's free, render immediately.
+            if (fwVideo.seeking) {
+                fwPendingSeekTime = safeOffset;
+            } else {
+                fwVideo.currentTime = safeOffset;
+            }
         }
     }
 }
@@ -287,10 +305,8 @@ fwTimelineRegion.addEventListener('pointerdown', (e) => {
 });
 
 fwTimelineRegion.addEventListener('pointermove', (e) => {
-    // --- FIX 2: Throttled Scrubbing ---
     if (fwIsScrubbing) {
         const now = Date.now();
-        // Only update the video decoder ~15 times a second to prevent frame freezing
         if (now - lastScrubUpdate > 60) { 
             updateFwTimelineFromEvent(e);
             lastScrubUpdate = now;
