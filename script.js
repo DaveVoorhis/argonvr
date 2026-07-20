@@ -31,10 +31,6 @@ let currentDayString = "";
 let availableDates = new Set();
 let calViewDate = new Date(); 
 
-// Floating Window State
-let fwHlsPlayer = null;
-let activeModalCamId = null;
-
 const scrubber = document.getElementById('scrubber');
 const timeLabel = document.getElementById('time-label');
 const playBtn = document.getElementById('btn-play');
@@ -157,7 +153,6 @@ async function fetchManifest() {
 		Object.keys(newManifest).forEach(camId => {
 			const clips = newManifest[camId];
 			
-			// 1. Sort clips strictly by time
 			clips.sort((a, b) => {
 				return (extractTimeFromFilename(a.filename) || 0) - (extractTimeFromFilename(b.filename) || 0);
 			});
@@ -165,7 +160,6 @@ async function fetchManifest() {
 			for (let i = 0; i < clips.length; i++) {
 				const clip = clips[i];
 				
-				// 2. Preserve known exact durations from previous loads
 				if (globalManifest[camId]) {
 					const existingClip = globalManifest[camId].find(c => c.filename === clip.filename);
 					if (existingClip && existingClip.duration) {
@@ -173,20 +167,17 @@ async function fetchManifest() {
 					}
 				}
 				
-				// 3. Heuristic: calculate duration based on the gap to the next clip
 				if (!clip.duration) {
-					let guessedDur = 60; // Default fallback
+					let guessedDur = 60; 
 					if (i < clips.length - 1) {
 						const matchA = clip.filename.match(/_(\d{8})_/);
 						const matchB = clips[i+1].filename.match(/_(\d{8})_/);
 						
-						// Ensure they are on the same day before comparing
 						if (matchA && matchB && matchA[1] === matchB[1]) {
 							const aTime = extractTimeFromFilename(clip.filename);
 							const bTime = extractTimeFromFilename(clips[i+1].filename);
 							if (aTime !== null && bTime !== null) {
 								const delta = bTime - aTime;
-								// If the next clip starts within 60s, use the exact delta
 								if (delta > 0 && delta <= 60) {
 									guessedDur = delta;
 								}
@@ -333,54 +324,11 @@ function findClipForCamera(camId, targetSeconds) {
 	return null; 
 }
 
-// Updates Floating Window Gapless Indicator from external seconds
-function updateFwIndicatorFromSeconds(actualSec) {
-	if (!activeModalCamId) return;
-	const clips = globalManifest[activeModalCamId] || [];
-	const dayClips = clips.filter(c => parseFilenameToSeconds(c.filename) !== null)
-						  .sort((a,b) => parseFilenameToSeconds(a.filename) - parseFilenameToSeconds(b.filename));
-
-	if (dayClips.length === 0) return;
-	const totalDuration = dayClips.reduce((sum, c) => sum + (c.duration || 60), 0);
-	if (totalDuration === 0) return;
-
-	let accum = 0;
-	let found = false;
-	let continuousSec = 0;
-
-	for (let clip of dayClips) {
-		let startSec = parseFilenameToSeconds(clip.filename);
-		let dur = clip.duration || 60;
-		let endSec = startSec + dur;
-
-		if (actualSec >= startSec && actualSec <= endSec) {
-			continuousSec = accum + (actualSec - startSec);
-			found = true;
-			break;
-		}
-		accum += dur;
-	}
-
-	if (found) {
-		const pct = continuousSec / totalDuration;
-		document.getElementById('fw-timeline-indicator').style.left = `${pct * 100}%`;
-		document.getElementById('fw-time-label').innerText = secondsToTimeStr(actualSec);
-		document.getElementById('fw-time-label').style.color = "#f39c12";
-	} else {
-		document.getElementById('fw-time-label').innerText = "NO DATA";
-		document.getElementById('fw-time-label').style.color = "#666";
-	}
-}
-
 function updateCamerasToScrubber(targetSeconds, isManualScrub = false) {
 	activeCameras.forEach(camId => {
 		const videoEl = document.getElementById(`video-${camId}`);
 		const overlay = document.getElementById(`overlay-${camId}`);
 		const matchData = findClipForCamera(camId, targetSeconds);
-		
-		const isModal = (activeModalCamId === camId);
-		const fwVideo = isModal ? document.getElementById('fw-video') : null;
-		const fwOverlay = isModal ? document.getElementById('fw-overlay') : null;
 
 		if (matchData) {
 			const manifestRef = matchData.manifestRef;
@@ -391,13 +339,6 @@ function updateCamerasToScrubber(targetSeconds, isManualScrub = false) {
 				videoEl.style.display = 'block';
 				overlay.style.display = 'none';
 				
-				if (isModal) {
-					fwVideo.src = manifestRef.url;
-					fwVideo.style.display = 'block';
-					fwOverlay.style.display = 'none';
-					updateFwIndicatorFromSeconds(targetSeconds);
-				}
-				
 				videoEl.onloadedmetadata = () => {
 					if (!manifestRef.duration && videoEl.duration > 0 && videoEl.duration !== Infinity) {
 						manifestRef.duration = videoEl.duration;
@@ -406,20 +347,11 @@ function updateCamerasToScrubber(targetSeconds, isManualScrub = false) {
 					
 					videoEl.currentTime = offset;
 					if (isPlayingHistory) videoEl.play().catch(e => {});
-					
-					if (isModal) {
-						fwVideo.currentTime = offset;
-						if (isPlayingHistory) fwVideo.play().catch(e=>{});
-					}
 				};
 			} else {
 				if (videoEl.readyState > 0 && offset > videoEl.duration) {
 					videoEl.style.display = 'none';
 					overlay.style.display = 'flex';
-					if (isModal) {
-						fwVideo.style.display = 'none';
-						fwOverlay.style.display = 'flex';
-					}
 				} else {
 					videoEl.style.display = 'block';
 					overlay.style.display = 'none';
@@ -434,209 +366,18 @@ function updateCamerasToScrubber(targetSeconds, isManualScrub = false) {
 					} else if (!isPlayingHistory && !videoEl.paused) {
 						videoEl.pause();
 					}
-					
-					if (isModal) {
-						fwVideo.style.display = 'block';
-						fwOverlay.style.display = 'none';
-						if (isManualScrub || drift > 3) fwVideo.currentTime = offset;
-						if (isPlayingHistory && fwVideo.paused) fwVideo.play().catch(e=>{});
-						else if (!isPlayingHistory && !fwVideo.paused) fwVideo.pause();
-						updateFwIndicatorFromSeconds(targetSeconds);
-					}
 				}
 			}
 		} else {
 			videoEl.src = "";
 			videoEl.style.display = 'block'; 
 			overlay.style.display = 'flex';
-			if (isModal) {
-				fwVideo.src = "";
-				fwVideo.style.display = 'block';
-				fwOverlay.style.display = 'flex';
-				document.getElementById('fw-time-label').innerText = "NO DATA";
-				document.getElementById('fw-time-label').style.color = "#666";
-			}
 		}
 	});
 }
 
-// --- Floating Window Custom Timeline Logic ---
-const fwTimelineRegion = document.getElementById('fw-timeline-region');
-const fwIndicator = document.getElementById('fw-timeline-indicator');
-const fwTimeLabel = document.getElementById('fw-time-label');
-let fwIsScrubbing = false;
-
-function updateFwTimelineFromEvent(e) {
-	if (!activeModalCamId) return;
-
-	const rect = fwTimelineRegion.getBoundingClientRect();
-	let x = e.clientX - rect.left;
-	x = Math.max(0, Math.min(x, rect.width)); 
-	const pct = x / rect.width;
-
-	fwIndicator.style.left = `${pct * 100}%`;
-
-	const clips = globalManifest[activeModalCamId] || [];
-	const dayClips = clips.filter(c => parseFilenameToSeconds(c.filename) !== null)
-						  .sort((a,b) => parseFilenameToSeconds(a.filename) - parseFilenameToSeconds(b.filename));
-
-	if (dayClips.length === 0) {
-		fwTimeLabel.innerText = "NO DATA";
-		fwTimeLabel.style.color = "#666";
-		return;
-	}
-
-	const totalDuration = dayClips.reduce((sum, c) => sum + (c.duration || 60), 0);
-	const targetContinuousSeconds = pct * totalDuration;
-
-	let accum = 0;
-	let selectedClip = dayClips[dayClips.length - 1]; 
-	let offsetInClip = (selectedClip.duration || 60); 
-
-	for (let clip of dayClips) {
-		let dur = clip.duration || 60;
-		if (targetContinuousSeconds <= accum + dur) {
-			selectedClip = clip;
-			offsetInClip = targetContinuousSeconds - accum;
-			break;
-		}
-		accum += dur;
-	}
-
-	const realStartSec = parseFilenameToSeconds(selectedClip.filename);
-	const actualDaySec = realStartSec + offsetInClip;
-
-	fwTimeLabel.innerText = secondsToTimeStr(actualDaySec);
-	fwTimeLabel.style.color = "#f39c12";
-
-	if (fwHlsPlayer) {
-		fwHlsPlayer.destroy();
-		fwHlsPlayer = null;
-	}
-
-	const fwVideo = document.getElementById('fw-video');
-	const fwOverlay = document.getElementById('fw-overlay');
-
-	if (!fwVideo.src.includes(selectedClip.url.replace('./', ''))) {
-		fwVideo.src = selectedClip.url;
-		fwVideo.style.display = 'block';
-		fwOverlay.style.display = 'none';
-
-		fwVideo.onloadedmetadata = () => {
-			// Instantly update with the true duration once known
-			if (fwVideo.duration > 0 && fwVideo.duration !== Infinity) {
-				selectedClip.duration = fwVideo.duration;
-			}
-			
-			// Clamp the scrubber to the actual end of the video
-			const safeOffset = Math.min(offsetInClip, selectedClip.duration);
-			fwVideo.currentTime = safeOffset;
-			
-			if (!fwIsScrubbing && isPlayingHistory) fwVideo.play().catch(e=>{});
-			else fwVideo.pause();
-		};
-	} else {
-		fwVideo.style.display = 'block';
-		fwOverlay.style.display = 'none';
-		const safeOffset = Math.min(offsetInClip, selectedClip.duration);
-		if (Math.abs(fwVideo.currentTime - safeOffset) > 0.5 || fwIsScrubbing) {
-			fwVideo.currentTime = safeOffset;
-		}
-	}
-}
-
-fwTimelineRegion.addEventListener('pointerdown', (e) => {
-	fwIsScrubbing = true;
-	fwTimelineRegion.setPointerCapture(e.pointerId);
-	updateFwTimelineFromEvent(e);
-});
-
-fwTimelineRegion.addEventListener('pointermove', (e) => {
-	if (!fwIsScrubbing) return;
-	updateFwTimelineFromEvent(e);
-});
-
-fwTimelineRegion.addEventListener('pointerup', (e) => {
-	fwIsScrubbing = false;
-	fwTimelineRegion.releasePointerCapture(e.pointerId);
-	const fwVideo = document.getElementById('fw-video');
-	if (isPlayingHistory && fwVideo.src) {
-		fwVideo.play().catch(e=>{});
-	}
-});
-
-function fwGoLive() {
-	if (!activeModalCamId) return;
-	const fwVideo = document.getElementById('fw-video');
-	const fwOverlay = document.getElementById('fw-overlay');
-	
-	fwTimeLabel.innerText = "LIVE";
-	fwTimeLabel.style.color = "#4cd137";
-	fwIndicator.style.left = '100%'; 
-
-	// 1. Pause global playback if it's running so it doesn't try to overwrite this video
-	if (isPlayingHistory) {
-		document.getElementById('btn-play').click();
-	}
-
-	// 2. Destroy HLS instance
-	if (fwHlsPlayer) {
-		fwHlsPlayer.destroy();
-		fwHlsPlayer = null;
-	}
-	
-	// 3. HARD RESET the video element (The Fix)
-	fwVideo.pause();
-	fwVideo.removeAttribute('src');
-	fwVideo.currentTime = 0; // Force reset the playhead so the live stream doesn't stall
-	fwVideo.load();
-	
-	fwOverlay.style.display = 'none';
-	fwVideo.style.display = 'block';
-	const freshPlaylistUrl = `./cameras/${activeModalCamId}/stream.m3u8?t=${Date.now()}`;
-	
-	if (Hls.isSupported()) {
-		fwHlsPlayer = new Hls({ 
-			maxMaxBufferLength: 600,         
-			maxBufferLength: 600,            
-			maxBufferSize: 150 * 1024 * 1024,
-			liveDurationInfinity: true, 
-			backBufferLength: Infinity,
-			liveSyncDurationCount: 3,
-			liveMaxLatencyDurationCount: 10,
-			xhrSetup: function(xhr) { xhr.withCredentials = true; }
-		});
-		
-		// Standard, proven attach sequence
-		fwHlsPlayer.loadSource(freshPlaylistUrl);
-		fwHlsPlayer.attachMedia(fwVideo);
-		
-		// Ensure playback triggers as soon as the live manifest is ready
-		fwHlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => {
-			fwVideo.play().catch(e => console.error("Playback failed:", e));
-		});
-	} else if (fwVideo.canPlayType('application/vnd.apple.mpegurl')) {
-		fwVideo.src = freshPlaylistUrl;
-		fwVideo.play().catch(e => {});
-	}
-}
-
-// --- Floating Window General API ---
-function openFloatingWindow(camId) {
-    // Pass both the camera ID and the active calendar date
+function openCameraPage(camId) {
     window.location.href = `camera.html?cam=${camId}&date=${currentDayString}`;
-}
-
-function closeFloatingWindow() {
-	activeModalCamId = null;
-	document.getElementById('floating-window').style.display = 'none';
-	const fwVideo = document.getElementById('fw-video');
-	fwVideo.pause();
-	fwVideo.removeAttribute('src');
-	if (fwHlsPlayer) {
-		fwHlsPlayer.destroy();
-		fwHlsPlayer = null;
-	}
 }
 
 function returnToLive() {
@@ -677,10 +418,6 @@ function returnToLive() {
 			timelineViewport.scrollLeft = scrubberX - timelineViewport.clientWidth / 2;
 		}
 	}, 1000);
-
-	if (activeModalCamId) {
-		openFloatingWindow(activeModalCamId);
-	}
 
 	if (currentDayString !== getTodayString()) {
 		setDate(new Date());
@@ -779,9 +516,6 @@ playBtn.addEventListener('click', () => {
 		activeCameras.forEach(camId => {
 			document.getElementById(`video-${camId}`).pause();
 		});
-		if (activeModalCamId) {
-			document.getElementById('fw-video').pause();
-		}
 	}
 });
 
@@ -859,7 +593,7 @@ function createCameraDOM(camId, streamPath) {
 		</div>
 	`;
 	
-	card.addEventListener('click', () => openFloatingWindow(camId));
+	card.addEventListener('click', () => openCameraPage(camId));
 	
 	grid.appendChild(card);
 	activeCameras.push(camId);
@@ -902,134 +636,7 @@ async function discoverCameras() {
 	if (foundCount === 0) setTimeout(discoverCameras, 2000);
 }  
 
-// --- Real-Time Scrubbing and Buffering Logic ---
-const fwVideo = document.getElementById('fw-video');
-const fwTimelineIndicator = document.getElementById('fw-timeline-indicator');
-
-let isScrubbingPopup = false;
-let lastSeekTime = 0; 
-
-// 1. Draw the green bars reliably
-function updateBufferIndicators() {
-	const duration = fwVideo.duration;
-	if (!duration || !isFinite(duration) || isNaN(duration)) return;
-
-	// Remove old green bars
-	document.querySelectorAll('.fw-buffered-region').forEach(el => el.remove());
-	
-	// Draw new green bars
-	for (let i = 0; i < fwVideo.buffered.length; i++) {
-		try {
-			const start = fwVideo.buffered.start(i);
-			const end = fwVideo.buffered.end(i);
-			
-			const startPct = (start / duration) * 100;
-			const widthPct = ((end - start) / duration) * 100;
-
-			const bufferDiv = document.createElement('div');
-			bufferDiv.className = 'fw-buffered-region';
-			bufferDiv.style.left = `${startPct}%`;
-			bufferDiv.style.width = `${widthPct}%`;
-			
-			fwTimelineRegion.insertBefore(bufferDiv, fwTimelineIndicator);
-		} catch (e) {} // Ignore browser parse errors
-	}
-}
-
-// Poll the buffer 4 times a second
-setInterval(updateBufferIndicators, 250);
-
-// 2. Helper to check if a specific timestamp is loaded and green
-function isTimeBuffered(timeSeconds) {
-	for (let i = 0; i < fwVideo.buffered.length; i++) {
-		// Add a small 0.5s safety margin to the edges of the buffer
-		if (timeSeconds >= fwVideo.buffered.start(i) && timeSeconds <= (fwVideo.buffered.end(i) - 0.5)) {
-			return true;
-		}
-	}
-	return false;
-}
-
-// 3. The Smart Scrubber
-function handleTimelineInteraction(e, force = false) {
-	const rect = fwTimelineRegion.getBoundingClientRect();
-	let x = e.clientX - rect.left;
-	x = Math.max(0, Math.min(x, rect.width));
-	const percent = x / rect.width;
-	
-	// Always move the orange scrubber UI instantly
-	fwTimelineIndicator.style.left = `${percent * 100}%`;
-	
-	if (fwVideo.duration) {
-		const targetTime = percent * fwVideo.duration;
-		const now = Date.now();
-		
-		if (force) {
-			// Always seek when the user clicks or releases the mouse
-			fwVideo.currentTime = targetTime;
-		} else if (now - lastSeekTime > 60) { // Throttled to ~15 FPS
-			// ONLY seek while dragging IF the data is already downloaded (green)
-			// This prevents the HLS stream from blacking out and stalling!
-			if (isTimeBuffered(targetTime)) {
-				fwVideo.currentTime = targetTime;
-				lastSeekTime = now;
-			}
-		}
-	}
-}
-
-fwTimelineRegion.addEventListener('pointerdown', (e) => {
-	isScrubbingPopup = true;
-	fwTimelineRegion.setPointerCapture(e.pointerId);
-	fwVideo.pause(); // Pause playback while interacting
-	handleTimelineInteraction(e, true); // Force initial click
-});
-
-fwTimelineRegion.addEventListener('pointermove', (e) => {
-	if (isScrubbingPopup) {
-		handleTimelineInteraction(e, false); // Smart seek while dragging
-	}
-});
-
-fwTimelineRegion.addEventListener('pointerup', (e) => {
-	if (isScrubbingPopup) {
-		handleTimelineInteraction(e, true); // Force final seek on release
-	}
-	isScrubbingPopup = false;
-	fwTimelineRegion.releasePointerCapture(e.pointerId);
-});
-		
-// --- Pointer Dragging Logic for the Floating Window ---
-const fw = document.getElementById('floating-window');
-const fwHeader = document.getElementById('fw-header');
-let isDragging = false, dragStartX, dragStartY, initialLeft, initialTop;
-
-fwHeader.addEventListener('pointerdown', (e) => {
-	if (e.target.classList.contains('fw-close')) return; 
-	isDragging = true;
-	dragStartX = e.clientX;
-	dragStartY = e.clientY;
-	initialLeft = fw.offsetLeft;
-	initialTop = fw.offsetTop;
-	fwHeader.setPointerCapture(e.pointerId);
-	document.body.style.userSelect = 'none';
-});
-
-fwHeader.addEventListener('pointermove', (e) => {
-	if (!isDragging) return;
-	fw.style.left = `${initialLeft + (e.clientX - dragStartX)}px`;
-	fw.style.top = `${initialTop + (e.clientY - dragStartY)}px`;
-});
-
-fwHeader.addEventListener('pointerup', (e) => {
-	isDragging = false;
-	fwHeader.releasePointerCapture(e.pointerId);
-	document.body.style.userSelect = '';
-});
-
-// --- Initial Setup and Event Listeners ---
 document.addEventListener('DOMContentLoaded', () => {
-    // Initialize App
     renderTimelineRuler();
     returnToLive(); 
     fetchManifest(); 

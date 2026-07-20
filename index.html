@@ -54,27 +54,6 @@
         <button class="ctrl-btn live-btn" id="btn-live">🔄 Reset</button>
     </div>
 
-    <div id="floating-window" class="floating-window" style="display: none;">
-        <div class="fw-header" id="fw-header">
-            <span id="fw-title" class="fw-title">CAM</span>
-            <span class="fw-close" onclick="closeFloatingWindow()">✖</span>
-        </div>
-        <div class="fw-body">
-            <video id="fw-video" muted playsinline preload="auto"></video>
-            <div class="no-video-overlay" id="fw-overlay" style="z-index: 10;">
-                <div>No Motion Detected</div>
-            </div>
-        </div>
-        <div class="fw-controls" id="fw-controls">
-            <button class="ctrl-btn live-btn" id="fw-btn-live" onclick="fwGoLive()">Go Live</button>
-            <div class="fw-time-display" id="fw-time-label">LIVE</div>
-            <div class="fw-timeline-container">
-                <div class="fw-timeline-region" id="fw-timeline-region" title="Sweep across recorded clips">
-                    <div class="fw-timeline-indicator" id="fw-timeline-indicator"></div>
-                </div>
-            </div>
-        </div>
-    </div>
     <script src="script.js"></script>
     <script>
     if ('serviceWorker' in navigator) {

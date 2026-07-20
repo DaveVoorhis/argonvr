@@ -13,9 +13,3 @@ This is human-written.
 ## Features
 
 1. Turn frontend into Progressive Web App. (Work in Progress)
-
-## Tech debt
-
-1. Clean up unused popup CSS in style.css based on index.html
-1. Clean up unused popup HTML in index.html.
-1. Clean up unused popup Javascript in script.js based on index.html and style.css.
