@@ -11,6 +11,7 @@ This is human-written.
 1. Motion sensitivity should be set per-camera
 1. history.json should be per-camera and per-day and include real clip length.
 1. Single camera view should be able to scrub over loaded clips whilst others are still loading.
+1. Possibly load clips in an even distribution so preview can happen earlier.
 
 ## Features
 

@@ -121,32 +121,91 @@ async function fetchManifest() {
         });
         globalManifest = newManifest;
 
-        // Trigger background caching immediately on load
         const dayClips = (globalManifest[camId] || []).filter(c => parseFilenameToSeconds(c.filename) !== null);
-        preloadDayClips(dayClips);
+        
+        // Draw timeline immediately so the user sees the grey track structure
         drawTimelineChunks();
+
+        // Delay background preloading by 2.5 seconds so HLS can connect without contention
+        setTimeout(() => {
+            startDistributedPreload(dayClips);
+        }, 2500);
 
     } catch (e) {
         console.log("Could not load history manifest.");
     }
 }
 
-// --- Background Caching ---
-function preloadDayClips(clips) {
-    clips.forEach(clip => {
-        if (clip.url) {
-            fetch(clip.url, { cache: 'force-cache' })
-                .then(response => {
-                    if (response.ok || response.status === 304 || response.status === 206) {
-                        clip.isCached = true;
-                        drawTimelineChunks(); 
-                    }
-                })
-                .catch(() => {
-                    console.log(`Failed to pre-cache: ${clip.filename}`);
-                });
+// --- Background Caching Manager ---
+let preloadQueue = [];
+let isPreloading = false;
+
+// Bisection algorithm to generate an evenly distributed sequence of indices
+function getDistributedIndices(length) {
+    if (length <= 0) return [];
+    if (length === 1) return [0];
+    
+    const indices = [0, length - 1];
+    const queue = [{start: 0, end: length - 1}];
+    
+    while(queue.length > 0) {
+        const {start, end} = queue.shift();
+        if (end - start > 1) {
+            const mid = Math.floor((start + end) / 2);
+            if (!indices.includes(mid)) {
+                indices.push(mid);
+                // Queue up the two new subdivisions (halves -> quarters -> eighths)
+                queue.push({start: start, end: mid});
+                queue.push({start: mid, end: end});
+            }
         }
-    });
+    }
+    return indices;
+}
+
+function startDistributedPreload(clips) {
+    // Only queue clips that aren't already cached
+    const toPreload = clips.filter(c => c.url && !c.isCached);
+    if (toPreload.length === 0) return;
+    
+    const distribution = getDistributedIndices(toPreload.length);
+    preloadQueue = distribution.map(i => toPreload[i]);
+    
+    if (!isPreloading) {
+        processPreloadQueue();
+    }
+}
+
+async function processPreloadQueue() {
+    if (preloadQueue.length === 0) {
+        isPreloading = false;
+        return;
+    }
+    
+    isPreloading = true;
+    const clip = preloadQueue.shift();
+    
+    // Check again in case native scrubbing cached it while it was waiting in the queue
+    if (!clip.isCached) {
+        try {
+            // Fetch one at a time. The 'priority: low' flag tells modern browsers 
+            // to yield this connection if user-initiated media requests occur.
+            const response = await fetch(clip.url, { 
+                cache: 'force-cache',
+                priority: 'low' 
+            });
+            
+            if (response.ok || response.status === 304 || response.status === 206) {
+                clip.isCached = true;
+                drawTimelineChunks(); 
+            }
+        } catch (e) {
+            console.log(`Failed to pre-cache: ${clip.filename}`);
+        }
+    }
+    
+    // 500ms delay to let the browser connection pool breathe
+    setTimeout(processPreloadQueue, 500); 
 }
 
 // --- Timeline Visualizer ---
