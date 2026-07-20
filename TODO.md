@@ -8,6 +8,7 @@ This is human-written.
 ## Enhancements
 
 1. Motion sensitivity should be set per-camera
+1. Camera colour should be set per-camera
 1. history.json should be per-camera and per-day and include real clip length.
 
 ## Features
