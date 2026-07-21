@@ -4,6 +4,7 @@ This is human-written.
 
 1. Popup camera did not default to Live display when main display is Live.
 1. Pressing "Go Live" on Live display sometimes does not show Live display.
+1. History now obtained via endpoint rather than explicit path, to avoid deviating from config.
 
 ## Enhancements
 
