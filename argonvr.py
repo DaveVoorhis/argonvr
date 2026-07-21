@@ -63,7 +63,7 @@ def update_history_manifest():
                 if f.endswith('.mp4'):
                     files.append({
                         "filename": f,
-                        "url": f"./recordings/{cam_id}/{f}"
+                        "url": f"./{os.path.basename(STORE_DIR)}/{cam_id}/{f}"
                     })
             files.sort(key=lambda x: x['filename'], reverse=True)
             manifest[cam_id] = files
