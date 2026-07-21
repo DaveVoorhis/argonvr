@@ -4,8 +4,6 @@ This is human-written.
 
 1. Popup camera did not default to Live display when main display is Live.
 2. Pressing "Go Live" on Live display sometimes does not show Live display.
-3. History now obtained via endpoint rather than explicit path, to avoid deviating from config.
-4. Count of cameras now obtained via endpoint rather than polled until error.
 
 ## Enhancements
 
@@ -15,5 +13,7 @@ This is human-written.
 4. Single camera view shows live camera whilst clips are loading.
 5. Single camera view can scrub over loaded clips whilst others are still loading.
 6. Preloads clips in an even distribution so preview can happen earlier.
+7. History now obtained via endpoint rather than explicit path, to avoid deviating from config.
+8. Count of cameras now obtained via endpoint rather than polled until error.
 
 ## Features
