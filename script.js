@@ -408,6 +408,12 @@ function returnToLive() {
 
 	liveSyncInterval = setInterval(() => {
 		if (!isLive) return;
+
+		if (currentDayString !== "" && currentDayString !== getTodayString()) {
+			setDate(new Date());
+			return;
+		}
+
 		const curSec = setScrubberToNow();
 
 		const scrubberX = (curSec / 86400) * timelineContent.clientWidth;
@@ -631,11 +637,9 @@ async function discoverCameras() {
 				createCameraDOM(camId, streamPath);
 			}
 		} else {
-			// Retry on non-OK status (e.g. auth pending)
 			setTimeout(discoverCameras, 2000);
 		}
 	} catch (error) {
-		// Retry if fetch fails
 		setTimeout(discoverCameras, 2000);
 	}
 }
@@ -646,5 +650,4 @@ document.addEventListener('DOMContentLoaded', () => {
 	fetchManifest();
 	setInterval(fetchManifest, 30000);
 	discoverCameras();
-	setInterval(runEasterEgg, 10000);
 });
