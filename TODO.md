@@ -2,7 +2,6 @@ This is human-written.
 
 ## Bugs
 
-1. When passing midnight, refresh the timeline to clear yesterday's heatmap items.
 1. After the frontend has run for a while, refreshing or Reset causes some cameras to sometimes load slowly. Some cleanup not happening?
 
 ## Enhancements
