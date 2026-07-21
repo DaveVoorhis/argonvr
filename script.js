@@ -620,20 +620,24 @@ function createCameraDOM(camId, streamPath) {
 }
 
 async function discoverCameras() {
-	const maxCameras = 10;
-	let foundCount = 0;
-	for (let index = 1; index <= maxCameras; index++) {
-		const camId = `cam${index}`;
-		const streamPath = `./cameras/${camId}/stream.m3u8`;
-		try {
-			const response = await fetch(streamPath, { method: 'HEAD', cache: 'no-store', credentials: 'include' });
-			if (response.ok) {
+	try {
+		const response = await fetch('/cameracount', { cache: 'no-store', credentials: 'include' });
+		if (response.ok) {
+			const data = await response.json();
+			const count = data.count || 1;
+			for (let index = 1; index <= count; index++) {
+				const camId = `cam${index}`;
+				const streamPath = `./cameras/${camId}/stream.m3u8`;
 				createCameraDOM(camId, streamPath);
-				foundCount++;
 			}
-		} catch (error) {}
+		} else {
+			// Retry on non-OK status (e.g. auth pending)
+			setTimeout(discoverCameras, 2000);
+		}
+	} catch (error) {
+		// Retry if fetch fails
+		setTimeout(discoverCameras, 2000);
 	}
-	if (foundCount === 0) setTimeout(discoverCameras, 2000);
 }
 
 document.addEventListener('DOMContentLoaded', () => {

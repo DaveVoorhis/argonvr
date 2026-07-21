@@ -4,6 +4,7 @@ import base64
 import os
 import configparser
 import ssl
+import json
 
 # Add ThreadingMixIn to enable concurrent request handling
 from socketserver import ThreadingMixIn
@@ -16,6 +17,13 @@ PASSWORD = config['SETTINGS'].get('WEB_PASS', 'secret')
 STORE_DIR = config['SETTINGS'].get('STORE_DIR', './recordings')
 
 PORT = int(config['SETTINGS'].get('PORT', '8000'))
+
+# Dynamically count the number of cameras defined in the config
+if config.has_section('CAMERAS'):
+    CAMERA_COUNT = len(config.items('CAMERAS'))
+else:
+    CAMERA_COUNT = 0
+
 SSL_CERT = config['SETTINGS'].get('SSL_CERT_PATH')
 SSL_KEY = config['SETTINGS'].get('SSL_KEY_PATH')
 LOG_HTTP_REQUESTS = config.getboolean('SETTINGS', 'LOG_HTTP_REQUESTS', fallback=False)
@@ -135,6 +143,16 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                             self.wfile.write(b"{}")
                         return
 
+                    # Intercept the /cameracount endpoint
+                    if path_no_query == '/cameracount':
+                        data = json.dumps({"count": CAMERA_COUNT}).encode('utf-8')
+                        self.send_response(200)
+                        self.send_header('Content-Type', 'application/json')
+                        self.send_header('Content-Length', str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                        return
+
                     range_header = self.headers.get('Range')
                     if path_no_query.endswith('.mp4') and range_header:
                         self.serve_range(filepath, range_header)
@@ -158,4 +176,5 @@ if __name__ == "__main__":
             print(f"🔓 ArgoNVR server running on port {PORT} (No SSL configured)")
 
         print(f"📂 Storage mapped to: {STORE_DIR}")
+        print(f"📷 Cameras discovered from config: {CAMERA_COUNT}")
         httpd.serve_forever()
