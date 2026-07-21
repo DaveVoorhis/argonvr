@@ -33,7 +33,7 @@ const fwTimeLabel = document.getElementById('fw-time-label');
 let globalManifest = {};
 let fwHlsPlayer = null;
 let fwIsScrubbing = false;
-let lastScrubUpdate = 0; 
+let lastScrubUpdate = 0;
 let fwPendingSeekTime = null;
 
 // --- Seamless Transition Snapshot Canvas ---
@@ -75,7 +75,7 @@ function secondsToTimeStr(seconds) {
 function parseFilenameToSeconds(filename) {
     const match = filename.match(/_(\d{8})_(\d{2})(\d{2})(\d{2})\.mp4/);
     if (!match) return null;
-    if (match[1] !== currentDayString) return null; 
+    if (match[1] !== currentDayString) return null;
 
     const h = parseInt(match[2], 10);
     const m = parseInt(match[3], 10);
@@ -92,13 +92,13 @@ function extractTimeFromFilename(filename) {
 // --- Manifest Logic ---
 async function fetchManifest() {
     try {
-        const response = await fetch('./recordings/history.json', { cache: 'no-store', credentials: 'include' });
+        const response = await fetch('/history', { cache: 'no-store', credentials: 'include' });
         const newManifest = await response.json();
-        
+
         Object.keys(newManifest).forEach(id => {
             const clips = newManifest[id];
             clips.sort((a, b) => (extractTimeFromFilename(a.filename) || 0) - (extractTimeFromFilename(b.filename) || 0));
-            
+
             for (let i = 0; i < clips.length; i++) {
                 const clip = clips[i];
                 if (!clip.duration) {
@@ -122,7 +122,7 @@ async function fetchManifest() {
         globalManifest = newManifest;
 
         const dayClips = (globalManifest[camId] || []).filter(c => parseFilenameToSeconds(c.filename) !== null);
-        
+
         // Draw timeline immediately so the user sees the grey track structure
         drawTimelineChunks();
 
@@ -144,10 +144,10 @@ let isPreloading = false;
 function getDistributedIndices(length) {
     if (length <= 0) return [];
     if (length === 1) return [0];
-    
+
     const indices = [0, length - 1];
     const queue = [{start: 0, end: length - 1}];
-    
+
     while(queue.length > 0) {
         const {start, end} = queue.shift();
         if (end - start > 1) {
@@ -167,10 +167,10 @@ function startDistributedPreload(clips) {
     // Only queue clips that aren't already cached
     const toPreload = clips.filter(c => c.url && !c.isCached);
     if (toPreload.length === 0) return;
-    
+
     const distribution = getDistributedIndices(toPreload.length);
     preloadQueue = distribution.map(i => toPreload[i]);
-    
+
     if (!isPreloading) {
         processPreloadQueue();
     }
@@ -181,31 +181,31 @@ async function processPreloadQueue() {
         isPreloading = false;
         return;
     }
-    
+
     isPreloading = true;
     const clip = preloadQueue.shift();
-    
+
     // Check again in case native scrubbing cached it while it was waiting in the queue
     if (!clip.isCached) {
         try {
             // Fetch one at a time. The 'priority: low' flag tells modern browsers 
             // to yield this connection if user-initiated media requests occur.
-            const response = await fetch(clip.url, { 
+            const response = await fetch(clip.url, {
                 cache: 'force-cache',
-                priority: 'low' 
+                priority: 'low'
             });
-            
+
             if (response.ok || response.status === 304 || response.status === 206) {
                 clip.isCached = true;
-                drawTimelineChunks(); 
+                drawTimelineChunks();
             }
         } catch (e) {
             console.log(`Failed to pre-cache: ${clip.filename}`);
         }
     }
-    
+
     // 500ms delay to let the browser connection pool breathe
-    setTimeout(processPreloadQueue, 500); 
+    setTimeout(processPreloadQueue, 500);
 }
 
 // --- Timeline Visualizer ---
@@ -214,7 +214,7 @@ function drawTimelineChunks() {
 
     const clips = globalManifest[camId] || [];
     const dayClips = clips.filter(c => parseFilenameToSeconds(c.filename) !== null)
-                          .sort((a,b) => parseFilenameToSeconds(a.filename) - parseFilenameToSeconds(b.filename));
+        .sort((a,b) => parseFilenameToSeconds(a.filename) - parseFilenameToSeconds(b.filename));
 
     if (dayClips.length === 0) return;
 
@@ -240,7 +240,7 @@ function drawTimelineChunks() {
 function fwGoLive() {
     fwTimeLabel.innerText = "LIVE";
     fwTimeLabel.style.color = "#4cd137";
-    fwIndicator.style.left = '100%'; 
+    fwIndicator.style.left = '100%';
 
     if (snapshotCanvas) snapshotCanvas.style.display = 'none';
 
@@ -248,35 +248,35 @@ function fwGoLive() {
         fwHlsPlayer.destroy();
         fwHlsPlayer = null;
     }
-    
+
     fwVideo.pause();
     fwVideo.removeAttribute('src');
-    fwVideo.currentTime = 0; 
+    fwVideo.currentTime = 0;
     fwVideo.load();
-    
+
     fwOverlay.style.display = 'none';
     fwVideo.style.display = 'block';
-    
+
     const freshPlaylistUrl = `./cameras/${camId}/stream.m3u8?t=${Date.now()}`;
-    
+
     if (Hls.isSupported()) {
-        fwHlsPlayer = new Hls({ 
-            maxMaxBufferLength: 600,         
-            maxBufferLength: 600,            
+        fwHlsPlayer = new Hls({
+            maxMaxBufferLength: 600,
+            maxBufferLength: 600,
             maxBufferSize: 150 * 1024 * 1024,
-            liveDurationInfinity: true, 
+            liveDurationInfinity: true,
             backBufferLength: Infinity,
             liveSyncDurationCount: 3,
             liveMaxLatencyDurationCount: 10,
             xhrSetup: function(xhr) { xhr.withCredentials = true; }
         });
-        
+
         fwHlsPlayer.attachMedia(fwVideo);
-        
+
         fwHlsPlayer.on(Hls.Events.MEDIA_ATTACHED, () => {
             fwHlsPlayer.loadSource(freshPlaylistUrl);
         });
-        
+
         fwHlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => {
             fwVideo.play().catch(e => console.error("Live play error:", e));
         });
@@ -290,14 +290,14 @@ function fwGoLive() {
 function updateFwTimelineFromEvent(e) {
     const rect = fwTimelineRegion.getBoundingClientRect();
     let x = e.clientX - rect.left;
-    x = Math.max(0, Math.min(x, rect.width)); 
+    x = Math.max(0, Math.min(x, rect.width));
     const pct = x / rect.width;
 
     fwIndicator.style.left = `${pct * 100}%`;
 
     const clips = globalManifest[camId] || [];
     const dayClips = clips.filter(c => parseFilenameToSeconds(c.filename) !== null)
-                          .sort((a,b) => parseFilenameToSeconds(a.filename) - parseFilenameToSeconds(b.filename));
+        .sort((a,b) => parseFilenameToSeconds(a.filename) - parseFilenameToSeconds(b.filename));
 
     if (dayClips.length === 0) {
         fwTimeLabel.innerText = "NO DATA";
@@ -309,8 +309,8 @@ function updateFwTimelineFromEvent(e) {
     const targetContinuousSeconds = pct * totalDuration;
 
     let accum = 0;
-    let selectedClip = dayClips[dayClips.length - 1]; 
-    let offsetInClip = (selectedClip.duration || 60); 
+    let selectedClip = dayClips[dayClips.length - 1];
+    let offsetInClip = (selectedClip.duration || 60);
 
     for (let clip of dayClips) {
         let dur = clip.duration || 60;
@@ -350,7 +350,7 @@ function updateFwTimelineFromEvent(e) {
             snap.style.display = 'none';
         }
 
-        fwPendingSeekTime = null; 
+        fwPendingSeekTime = null;
         fwVideo.src = selectedClip.url;
         fwVideo.style.display = 'block';
         fwOverlay.style.display = 'none';
@@ -375,7 +375,7 @@ function updateFwTimelineFromEvent(e) {
             fwVideo.removeEventListener('seeked', removeSnapshot);
             fwVideo.removeEventListener('playing', removeSnapshot);
         };
-        
+
         // Listen for 'seeked' instead of 'timeupdate'
         fwVideo.addEventListener('seeked', removeSnapshot);
         fwVideo.addEventListener('playing', removeSnapshot);
@@ -389,7 +389,7 @@ function updateFwTimelineFromEvent(e) {
         fwVideo.style.display = 'block';
         fwOverlay.style.display = 'none';
         const safeOffset = Math.min(offsetInClip, selectedClip.duration);
-        
+
         if (Math.abs(fwVideo.currentTime - safeOffset) > 0.5 || fwIsScrubbing) {
             if (fwVideo.seeking) {
                 fwPendingSeekTime = safeOffset;
@@ -409,7 +409,7 @@ fwTimelineRegion.addEventListener('pointerdown', (e) => {
 fwTimelineRegion.addEventListener('pointermove', (e) => {
     if (fwIsScrubbing) {
         const now = Date.now();
-        if (now - lastScrubUpdate > 60) { 
+        if (now - lastScrubUpdate > 60) {
             updateFwTimelineFromEvent(e);
             lastScrubUpdate = now;
         }
@@ -419,9 +419,9 @@ fwTimelineRegion.addEventListener('pointermove', (e) => {
 fwTimelineRegion.addEventListener('pointerup', (e) => {
     fwIsScrubbing = false;
     fwTimelineRegion.releasePointerCapture(e.pointerId);
-    
+
     if (snapshotCanvas) snapshotCanvas.style.display = 'none';
-    
+
     if (!fwHlsPlayer && fwVideo.src) {
         fwVideo.play().catch(e=>{});
     }
@@ -430,14 +430,14 @@ fwTimelineRegion.addEventListener('pointerup', (e) => {
 // Start up
 document.addEventListener('DOMContentLoaded', async () => {
     await fetchManifest();
-    
+
     if (dateParam && dateParam !== getTodayString()) {
-        fwHlsPlayer = null; 
+        fwHlsPlayer = null;
         fwTimeLabel.innerText = "LOADING";
-        
+
         setTimeout(() => {
-             const mockEvent = { clientX: fwTimelineRegion.getBoundingClientRect().left };
-             updateFwTimelineFromEvent(mockEvent);
+            const mockEvent = { clientX: fwTimelineRegion.getBoundingClientRect().left };
+            updateFwTimelineFromEvent(mockEvent);
         }, 300);
     } else {
         fwGoLive();

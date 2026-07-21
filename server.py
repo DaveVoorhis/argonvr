@@ -41,7 +41,7 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
             pass
         except Exception as e:
             print(f"Unexpected error: {e}")
-            
+
     def log_message(self, format, *args):
         request_path = getattr(self, 'path', '')
         quiet_extensions = ['.ts', '.m3u8', '.mp4', '.json']
@@ -66,15 +66,15 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
             with open(filepath, 'rb') as f:
                 fs = os.fstat(f.fileno())
                 file_len = fs.st_size
-                
+
                 byte_range = range_header.split('=')[1].split('-')
                 start = int(byte_range[0])
                 end = int(byte_range[1]) if byte_range[1] else file_len - 1
-                
+
                 if start >= file_len:
                     self.send_error(416, "Requested Range Not Satisfiable")
                     return
-                    
+
                 length = end - start + 1
                 self.send_response(206)
                 self.send_header('Content-Type', 'video/mp4')
@@ -82,7 +82,7 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_header('Content-Range', f'bytes {start}-{end}/{file_len}')
                 self.send_header('Content-Length', str(length))
                 self.end_headers()
-                
+
                 f.seek(start)
                 # Increased buffer size to 64KB for better throughput
                 while True:
@@ -96,7 +96,7 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         path_no_query = self.path.split('?')[0]
         filepath = self.translate_path(path_no_query)
-            
+
         if path_no_query.endswith(('.m3u8', '.ts', '.mp4')):
             if not os.path.exists(filepath):
                 self.send_error(404)
@@ -107,14 +107,34 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
             self.do_AUTHHEAD()
             self.wfile.write(b"Authentication required.")
             return
-        
+
         try:
             auth_type, encoded_credentials = auth_header.split(' ', 1)
             if auth_type.lower() == 'basic':
                 decoded_credentials = base64.b64decode(encoded_credentials).decode('utf-8')
                 username, password = decoded_credentials.split(':', 1)
-                
+
                 if username == USERNAME and password == PASSWORD:
+
+                    # Intercept the /history endpoint dynamically using STORE_DIR
+                    if path_no_query == '/history':
+                        history_path = os.path.join(STORE_DIR, 'history.json')
+                        if os.path.exists(history_path):
+                            with open(history_path, 'rb') as f:
+                                data = f.read()
+                            self.send_response(200)
+                            self.send_header('Content-Type', 'application/json')
+                            self.send_header('Content-Length', str(len(data)))
+                            self.end_headers()
+                            self.wfile.write(data)
+                        else:
+                            # Return empty JSON object if file doesn't exist yet
+                            self.send_response(200)
+                            self.send_header('Content-Type', 'application/json')
+                            self.end_headers()
+                            self.wfile.write(b"{}")
+                        return
+
                     range_header = self.headers.get('Range')
                     if path_no_query.endswith('.mp4') and range_header:
                         self.serve_range(filepath, range_header)
@@ -122,7 +142,7 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                     super().do_GET()
                     return
         except Exception:
-            pass 
+            pass
         self.do_AUTHHEAD()
         self.wfile.write(b"Invalid username or password.")
 
@@ -136,6 +156,6 @@ if __name__ == "__main__":
             print(f"🔒 Secure HTTPS ArgoNVR server running on port {PORT}")
         else:
             print(f"🔓 ArgoNVR server running on port {PORT} (No SSL configured)")
-            
+
         print(f"📂 Storage mapped to: {STORE_DIR}")
         httpd.serve_forever()

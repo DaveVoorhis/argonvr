@@ -25,11 +25,11 @@ const activeCameras = [];
 let isLive = true;
 let isPlayingHistory = false;
 let playbackInterval = null;
-let liveSyncInterval = null; 
-let currentDayString = ""; 
+let liveSyncInterval = null;
+let currentDayString = "";
 
 let availableDates = new Set();
-let calViewDate = new Date(); 
+let calViewDate = new Date();
 
 const scrubber = document.getElementById('scrubber');
 const timeLabel = document.getElementById('time-label');
@@ -51,16 +51,16 @@ function adjustZoom(direction) {
 
 function renderTimelineRuler() {
 	const ruler = document.getElementById('timeline-ruler');
-	ruler.innerHTML = ''; 
-	
+	ruler.innerHTML = '';
+
 	for (let sec = 0; sec <= 86400; sec += 300) {
 		const isHour = (sec % 3600 === 0);
 		const leftPct = (sec / 86400) * 100;
-		
+
 		const tick = document.createElement('div');
 		tick.className = `ruler-tick ${isHour ? 'hour' : 'five-min'}`;
 		tick.style.left = `${leftPct}%`;
-		
+
 		ruler.appendChild(tick);
 	}
 }
@@ -92,13 +92,13 @@ function setDate(dateObj) {
 	const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
 	const dd = String(dateObj.getDate()).padStart(2, '0');
 	currentDayString = `${yyyy}${mm}${dd}`;
-	dateDisplay.innerHTML = `<span>${dd}/${mm}/${yyyy}</span> 📅`; 
-	
+	dateDisplay.innerHTML = `<span>${dd}/${mm}/${yyyy}</span> 📅`;
+
 	renderTimelineHeatmap();
-	
+
 	if (activeCameras.length > 0) {
 		if (isPlayingHistory) playBtn.click();
-		
+
 		if (currentDayString === getTodayString()) {
 			returnToLive();
 		} else {
@@ -112,8 +112,8 @@ function setDate(dateObj) {
 			activeCameras.forEach(camId => {
 				if (hlsPlayers[camId]) hlsPlayers[camId].detachMedia();
 			});
-			
-			scrubber.value = 43200; 
+
+			scrubber.value = 43200;
 			timeLabel.innerText = secondsToTimeStr(43200);
 			updateCamerasToScrubber(43200, true);
 			setTimeout(centerViewportOnScrubber, 50);
@@ -131,7 +131,7 @@ function secondsToTimeStr(seconds) {
 function parseFilenameToSeconds(filename) {
 	const match = filename.match(/_(\d{8})_(\d{2})(\d{2})(\d{2})\.mp4/);
 	if (!match) return null;
-	if (match[1] !== currentDayString) return null; 
+	if (match[1] !== currentDayString) return null;
 
 	const h = parseInt(match[2], 10);
 	const m = parseInt(match[3], 10);
@@ -147,32 +147,32 @@ function extractTimeFromFilename(filename) {
 
 async function fetchManifest() {
 	try {
-		const response = await fetch('./recordings/history.json', { cache: 'no-store', credentials: 'include' });
+		const response = await fetch('/history', { cache: 'no-store', credentials: 'include' });
 		const newManifest = await response.json();
-		
+
 		Object.keys(newManifest).forEach(camId => {
 			const clips = newManifest[camId];
-			
+
 			clips.sort((a, b) => {
 				return (extractTimeFromFilename(a.filename) || 0) - (extractTimeFromFilename(b.filename) || 0);
 			});
-			
+
 			for (let i = 0; i < clips.length; i++) {
 				const clip = clips[i];
-				
+
 				if (globalManifest[camId]) {
 					const existingClip = globalManifest[camId].find(c => c.filename === clip.filename);
 					if (existingClip && existingClip.duration) {
 						clip.duration = existingClip.duration;
 					}
 				}
-				
+
 				if (!clip.duration) {
-					let guessedDur = 60; 
+					let guessedDur = 60;
 					if (i < clips.length - 1) {
 						const matchA = clip.filename.match(/_(\d{8})_/);
 						const matchB = clips[i+1].filename.match(/_(\d{8})_/);
-						
+
 						if (matchA && matchB && matchA[1] === matchB[1]) {
 							const aTime = extractTimeFromFilename(clip.filename);
 							const bTime = extractTimeFromFilename(clips[i+1].filename);
@@ -188,9 +188,9 @@ async function fetchManifest() {
 				}
 			}
 		});
-		
+
 		globalManifest = newManifest;
-		
+
 		availableDates.clear();
 		Object.values(globalManifest).forEach(clips => {
 			clips.forEach(clip => {
@@ -198,7 +198,7 @@ async function fetchManifest() {
 				if (match) availableDates.add(match[1]);
 			});
 		});
-		
+
 		renderTimelineHeatmap();
 		if (document.getElementById('calendar-popup').classList.contains('visible')) {
 			renderCalendar();
@@ -210,7 +210,7 @@ async function fetchManifest() {
 
 function renderTimelineHeatmap() {
 	const heatmap = document.getElementById('heatmap');
-	heatmap.innerHTML = ''; 
+	heatmap.innerHTML = '';
 
 	const cams = Object.keys(globalManifest);
 	const numCams = cams.length || 1;
@@ -221,12 +221,12 @@ function renderTimelineHeatmap() {
 
 		clips.forEach(clip => {
 			const startSec = parseFilenameToSeconds(clip.filename);
-			if (startSec === null) return; 
-			
-			const clipDuration = clip.duration || 60; 
-			
+			if (startSec === null) return;
+
+			const clipDuration = clip.duration || 60;
+
 			const leftPct = (startSec / 86400) * 100;
-			const widthPct = (clipDuration / 86400) * 100; 
+			const widthPct = (clipDuration / 86400) * 100;
 
 			const tick = document.createElement('div');
 			tick.className = 'heatmap-tick';
@@ -262,32 +262,32 @@ function changeMonth(delta) {
 function renderCalendar() {
 	const label = document.getElementById('cal-month-label');
 	const grid = document.getElementById('cal-grid');
-	
+
 	label.innerText = calViewDate.toLocaleString('default', { month: 'long', year: 'numeric' });
-	
+
 	const year = calViewDate.getFullYear();
 	const month = calViewDate.getMonth();
-	const firstDay = new Date(year, month, 1).getDay(); 
+	const firstDay = new Date(year, month, 1).getDay();
 	const daysInMonth = new Date(year, month + 1, 0).getDate();
-	
+
 	let html = `
 		<div class="cal-day-header">Su</div><div class="cal-day-header">Mo</div><div class="cal-day-header">Tu</div>
 		<div class="cal-day-header">We</div><div class="cal-day-header">Th</div><div class="cal-day-header">Fr</div><div class="cal-day-header">Sa</div>
 	`;
-	
+
 	for (let i = 0; i < firstDay; i++) {
 		html += `<div class="cal-day empty"></div>`;
 	}
-	
+
 	for (let day = 1; day <= daysInMonth; day++) {
 		const dateStr = `${year}${String(month + 1).padStart(2, '0')}${String(day).padStart(2, '0')}`;
 		const hasVideo = availableDates.has(dateStr);
 		const isActive = (dateStr === currentDayString);
-		
+
 		let classes = "cal-day";
 		if (hasVideo) classes += " has-video";
 		if (isActive) classes += " active-day";
-		
+
 		html += `<div class="${classes}" onclick="selectDateFromCalendar('${dateStr}')">${day}</div>`;
 	}
 	grid.innerHTML = html;
@@ -298,30 +298,30 @@ function selectDateFromCalendar(dateStr) {
 	const m = parseInt(dateStr.substring(4,6)) - 1;
 	const d = parseInt(dateStr.substring(6,8));
 	setDate(new Date(y, m, d));
-	toggleCalendar(); 
+	toggleCalendar();
 }
 
 function selectQuickDate(keyword) {
 	const d = new Date();
 	if (keyword === 'yesterday') d.setDate(d.getDate() - 1);
 	setDate(d);
-	toggleCalendar(); 
+	toggleCalendar();
 }
 
 function findClipForCamera(camId, targetSeconds) {
 	const clips = globalManifest[camId] || [];
 	for (let clipRef of clips) {
 		const startSec = parseFilenameToSeconds(clipRef.filename);
-		if (startSec === null) continue; 
-		
-		const clipDuration = clipRef.duration || 60; 
-		const endSec = startSec + clipDuration; 
-		
+		if (startSec === null) continue;
+
+		const clipDuration = clipRef.duration || 60;
+		const endSec = startSec + clipDuration;
+
 		if (targetSeconds >= startSec && targetSeconds <= endSec) {
 			return { manifestRef: clipRef, offset: targetSeconds - startSec };
 		}
 	}
-	return null; 
+	return null;
 }
 
 function updateCamerasToScrubber(targetSeconds, isManualScrub = false) {
@@ -338,13 +338,13 @@ function updateCamerasToScrubber(targetSeconds, isManualScrub = false) {
 				videoEl.src = manifestRef.url;
 				videoEl.style.display = 'block';
 				overlay.style.display = 'none';
-				
+
 				videoEl.onloadedmetadata = () => {
 					if (!manifestRef.duration && videoEl.duration > 0 && videoEl.duration !== Infinity) {
 						manifestRef.duration = videoEl.duration;
-						renderTimelineHeatmap(); 
+						renderTimelineHeatmap();
 					}
-					
+
 					videoEl.currentTime = offset;
 					if (isPlayingHistory) videoEl.play().catch(e => {});
 				};
@@ -355,12 +355,12 @@ function updateCamerasToScrubber(targetSeconds, isManualScrub = false) {
 				} else {
 					videoEl.style.display = 'block';
 					overlay.style.display = 'none';
-					
+
 					const drift = Math.abs(videoEl.currentTime - offset);
 					if (isManualScrub || drift > 3) {
-						 videoEl.currentTime = offset;
+						videoEl.currentTime = offset;
 					}
-					
+
 					if (isPlayingHistory && videoEl.paused) {
 						videoEl.play().catch(e => {});
 					} else if (!isPlayingHistory && !videoEl.paused) {
@@ -370,14 +370,14 @@ function updateCamerasToScrubber(targetSeconds, isManualScrub = false) {
 			}
 		} else {
 			videoEl.src = "";
-			videoEl.style.display = 'block'; 
+			videoEl.style.display = 'block';
 			overlay.style.display = 'flex';
 		}
 	});
 }
 
 function openCameraPage(camId) {
-    window.location.href = `camera.html?cam=${camId}&date=${currentDayString}`;
+	window.location.href = `camera.html?cam=${camId}&date=${currentDayString}`;
 }
 
 function returnToLive() {
@@ -386,7 +386,7 @@ function returnToLive() {
 	isLive = true;
 	isPlayingHistory = false;
 	if (playbackInterval) clearInterval(playbackInterval);
-	
+
 	playBtn.innerText = "▶ Play";
 	playBtn.disabled = true;
 
@@ -402,7 +402,7 @@ function returnToLive() {
 		scrubber.value = curSec;
 		return curSec;
 	};
-	
+
 	setScrubberToNow();
 	setTimeout(centerViewportOnScrubber, 50);
 
@@ -413,7 +413,7 @@ function returnToLive() {
 		const scrubberX = (curSec / 86400) * timelineContent.clientWidth;
 		const viewLeft = timelineViewport.scrollLeft;
 		const viewRight = viewLeft + timelineViewport.clientWidth;
-		
+
 		if (scrubberX > viewRight - 50 || scrubberX < viewLeft) {
 			timelineViewport.scrollLeft = scrubberX - timelineViewport.clientWidth / 2;
 		}
@@ -427,21 +427,21 @@ function returnToLive() {
 	activeCameras.forEach(camId => {
 		const videoEl = document.getElementById(`video-${camId}`);
 		const overlay = document.getElementById(`overlay-${camId}`);
-		
+
 		videoEl.style.display = 'block';
 		overlay.style.display = 'none';
-		
+
 		videoEl.pause();
-		videoEl.removeAttribute('src'); 
+		videoEl.removeAttribute('src');
 		videoEl.load();
-		
-		if (hlsPlayers[camId]) hlsPlayers[camId].destroy(); 
-		
+
+		if (hlsPlayers[camId]) hlsPlayers[camId].destroy();
+
 		const freshPlaylistUrl = `./cameras/${camId}/stream.m3u8?t=${Date.now()}`;
-		
+
 		if (Hls.isSupported()) {
-			const hls = new Hls({ 
-				liveDurationInfinity: true, 
+			const hls = new Hls({
+				liveDurationInfinity: true,
 				manifestLoadingMaxRetry: 5,
 				xhrSetup: function(xhr) {
 					xhr.withCredentials = true;
@@ -470,16 +470,16 @@ scrubber.addEventListener('input', (e) => {
 		activeCameras.forEach(camId => {
 			if (hlsPlayers[camId]) hlsPlayers[camId].detachMedia();
 		});
-		fetchManifest(); 
+		fetchManifest();
 	}
 	const targetSeconds = parseInt(e.target.value, 10);
 	timeLabel.innerText = secondsToTimeStr(targetSeconds);
-	if (isPlayingHistory) playBtn.click(); 
-	
-	updateCamerasToScrubber(targetSeconds, true); 
+	if (isPlayingHistory) playBtn.click();
+
+	updateCamerasToScrubber(targetSeconds, true);
 
 	const scrubberX = (targetSeconds / 86400) * timelineContent.clientWidth;
-	const buffer = 50; 
+	const buffer = 50;
 	if (scrubberX < timelineViewport.scrollLeft + buffer) {
 		timelineViewport.scrollLeft = scrubberX - buffer;
 	} else if (scrubberX > timelineViewport.scrollLeft + timelineViewport.clientWidth - buffer) {
@@ -488,7 +488,7 @@ scrubber.addEventListener('input', (e) => {
 });
 
 playBtn.addEventListener('click', () => {
-	if (isLive) return; 
+	if (isLive) return;
 
 	isPlayingHistory = !isPlayingHistory;
 	if (isPlayingHistory) {
@@ -498,18 +498,18 @@ playBtn.addEventListener('click', () => {
 			if (currentVal >= 86399) {
 				returnToLive();
 			} else {
-				currentVal += 1; 
+				currentVal += 1;
 				scrubber.value = currentVal;
 				timeLabel.innerText = secondsToTimeStr(currentVal);
-				
-				updateCamerasToScrubber(currentVal, false); 
-				
+
+				updateCamerasToScrubber(currentVal, false);
+
 				const scrubberX = (currentVal / 86400) * timelineContent.clientWidth;
 				if (scrubberX < timelineViewport.scrollLeft || scrubberX > timelineViewport.scrollLeft + timelineViewport.clientWidth) {
 					timelineViewport.scrollLeft = scrubberX - timelineViewport.clientWidth / 2;
 				}
 			}
-		}, 1000); 
+		}, 1000);
 	} else {
 		playBtn.innerText = "▶ Play";
 		clearInterval(playbackInterval);
@@ -521,7 +521,7 @@ playBtn.addEventListener('click', () => {
 
 liveBtn.addEventListener('click', () => {
 	if (isLive) {
-		returnToLive(); 
+		returnToLive();
 	} else {
 		returnToLive();
 	}
@@ -552,12 +552,12 @@ function adjustGridLayout() {
 
 	if (window.innerWidth <= 800) {
 		grid.style.gridTemplateColumns = '1fr';
-		grid.style.gridTemplateRows = `repeat(${count}, 250px)`; 
+		grid.style.gridTemplateRows = `repeat(${count}, 250px)`;
 		grid.style.overflowY = 'auto';
 		return;
 	}
 
-	grid.style.overflowY = 'hidden'; 
+	grid.style.overflowY = 'hidden';
 	let cols, rows;
 	if (count === 1) { cols = 1; rows = 1; }
 	else if (count === 2) { cols = 2; rows = 1; }
@@ -565,9 +565,9 @@ function adjustGridLayout() {
 	else if (count <= 6) { cols = 3; rows = 2; }
 	else if (count <= 9) { cols = 3; rows = 3; }
 	else if (count <= 12) { cols = 4; rows = 3; }
-	else { 
-		cols = Math.ceil(Math.sqrt(count)); 
-		rows = Math.ceil(count / cols); 
+	else {
+		cols = Math.ceil(Math.sqrt(count));
+		rows = Math.ceil(count / cols);
 	}
 	grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
 	grid.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
@@ -579,10 +579,10 @@ function createCameraDOM(camId, streamPath) {
 	const grid = document.getElementById('grid');
 	const card = document.createElement('div');
 	card.className = 'camera-card';
-	
+
 	const camColor = getCameraColor(camId);
 	card.style.borderTop = `4px solid ${camColor}`;
-	
+
 	card.innerHTML = `
 		<div class="camera-header">
 			<span class="camera-title" style="color: ${camColor}; text-shadow: 1px 1px 2px black;">${camId}</span>
@@ -592,9 +592,9 @@ function createCameraDOM(camId, streamPath) {
 			<div>No Motion Detected</div>
 		</div>
 	`;
-	
+
 	card.addEventListener('click', () => openCameraPage(camId));
-	
+
 	grid.appendChild(card);
 	activeCameras.push(camId);
 	adjustGridLayout();
@@ -602,12 +602,12 @@ function createCameraDOM(camId, streamPath) {
 	const videoElement = document.getElementById(`video-${camId}`);
 
 	if (Hls.isSupported()) {
-		const hls = new Hls({ 
-			liveDurationInfinity: true, 
+		const hls = new Hls({
+			liveDurationInfinity: true,
 			manifestLoadingMaxRetry: 5,
 			xhrSetup: function(xhr) {
 				xhr.withCredentials = true;
-			} 
+			}
 		});
 		hlsPlayers[camId] = hls;
 		hls.loadSource(streamPath);
@@ -634,13 +634,13 @@ async function discoverCameras() {
 		} catch (error) {}
 	}
 	if (foundCount === 0) setTimeout(discoverCameras, 2000);
-}  
+}
 
 document.addEventListener('DOMContentLoaded', () => {
-    renderTimelineRuler();
-    returnToLive(); 
-    fetchManifest(); 
-    setInterval(fetchManifest, 30000); 
-    discoverCameras();
-    setInterval(runEasterEgg, 10000);
+	renderTimelineRuler();
+	returnToLive();
+	fetchManifest();
+	setInterval(fetchManifest, 30000);
+	discoverCameras();
+	setInterval(runEasterEgg, 10000);
 });
