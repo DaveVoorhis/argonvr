@@ -13,3 +13,4 @@ __pycache__/
 # Ignore local dev environment cruft
 .DS_Store
 argonvr.cfg~
+/.idea/
