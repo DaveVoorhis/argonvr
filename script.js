@@ -145,60 +145,68 @@ function extractTimeFromFilename(filename) {
 	return (parseInt(match[2], 10) * 3600) + (parseInt(match[3], 10) * 60) + parseInt(match[4], 10);
 }
 
-async function fetchManifest() {
+async function fetchManifest(camId) {
 	try {
-		const url = `/history?date=${currentDayString}&cam=all`;
+		const url = `/history?date=${currentDayString}&cam=${camId}`;
 
 		const response = await fetch(url, { cache: 'no-store', credentials: 'include' });
-		const newManifest = await response.json();
+		const allData = await response.json();
 
-		Object.keys(newManifest).forEach(camId => {
-			const clips = newManifest[camId];
+		let rawClips = allData[camId] || [];
 
-			clips.sort((a, b) => {
-				return (extractTimeFromFilename(a.filename) || 0) - (extractTimeFromFilename(b.filename) || 0);
-			});
+		// Locally filter for just the specific camera and requested date.
+		// This is temporary until the /history endpoint does it for us.
+		let clips = rawClips.filter(clip => {
+			const match = clip.filename.match(/_(\d{8})_/);
+			return match && match[1] === currentDayString;
+		});
 
-			for (let i = 0; i < clips.length; i++) {
-				const clip = clips[i];
+		clips.sort((a, b) => {
+			return (extractTimeFromFilename(a.filename) || 0) - (extractTimeFromFilename(b.filename) || 0);
+		});
 
-				if (globalManifest[camId]) {
-					const existingClip = globalManifest[camId].find(c => c.filename === clip.filename);
-					if (existingClip && existingClip.duration) {
-						clip.duration = existingClip.duration;
-					}
+		for (let i = 0; i < clips.length; i++) {
+			const clip = clips[i];
+
+			if (globalManifest[camId]) {
+				const existingClip = globalManifest[camId].find(c => c.filename === clip.filename);
+				if (existingClip && existingClip.duration) {
+					clip.duration = existingClip.duration;
 				}
+			}
 
-				if (!clip.duration) {
-					let guessedDur = 60;
-					if (i < clips.length - 1) {
-						const matchA = clip.filename.match(/_(\d{8})_/);
-						const matchB = clips[i+1].filename.match(/_(\d{8})_/);
+			if (!clip.duration) {
+				let guessedDur = 60;
+				if (i < clips.length - 1) {
+					const matchA = clip.filename.match(/_(\d{8})_/);
+					const matchB = clips[i+1].filename.match(/_(\d{8})_/);
 
-						if (matchA && matchB && matchA[1] === matchB[1]) {
-							const aTime = extractTimeFromFilename(clip.filename);
-							const bTime = extractTimeFromFilename(clips[i+1].filename);
-							if (aTime !== null && bTime !== null) {
-								const delta = bTime - aTime;
-								if (delta > 0 && delta <= 60) {
-									guessedDur = delta;
-								}
+					if (matchA && matchB && matchA[1] === matchB[1]) {
+						const aTime = extractTimeFromFilename(clip.filename);
+						const bTime = extractTimeFromFilename(clips[i+1].filename);
+						if (aTime !== null && bTime !== null) {
+							const delta = bTime - aTime;
+							if (delta > 0 && delta <= 60) {
+								guessedDur = delta;
 							}
 						}
 					}
-					clip.duration = guessedDur;
 				}
+				clip.duration = guessedDur;
 			}
-		});
+		}
 
-		globalManifest = newManifest;
+		// Save filtered clips just for this specific camera
+		globalManifest[camId] = clips;
 
 		availableDates.clear();
-		Object.values(globalManifest).forEach(clips => {
-			clips.forEach(clip => {
-				const match = clip.filename.match(/_(\d{8})_/);
-				if (match) availableDates.add(match[1]);
-			});
+		Object.values(allData).forEach(allClips => {
+			if (Array.isArray(allClips)) {
+				allClips.forEach(clip => {
+					const match = clip.filename.match(/_(\d{8})_/);
+					if (match) availableDates.add(match[1]);
+				});
+			}
 		});
 
 		renderTimelineHeatmap();
@@ -206,7 +214,7 @@ async function fetchManifest() {
 			renderCalendar();
 		}
 	} catch (e) {
-		console.log("Could not load history manifest. Likely an auth issue.");
+		console.log(`Could not load history manifest for ${camId}. Likely an auth issue.`);
 	}
 }
 
@@ -478,7 +486,8 @@ scrubber.addEventListener('input', (e) => {
 		activeCameras.forEach(camId => {
 			if (hlsPlayers[camId]) hlsPlayers[camId].detachMedia();
 		});
-		fetchManifest();
+
+		activeCameras.forEach(camId => fetchManifest(camId));
 	}
 	const targetSeconds = parseInt(e.target.value, 10);
 	timeLabel.innerText = secondsToTimeStr(targetSeconds);
@@ -540,7 +549,7 @@ document.addEventListener("visibilitychange", () => {
 		if (isLive) {
 			returnToLive();
 		} else {
-			fetchManifest();
+			activeCameras.forEach(camId => fetchManifest(camId));
 		}
 	}
 });
@@ -637,6 +646,7 @@ async function discoverCameras() {
 				const camId = `cam${index}`;
 				const streamPath = `./cameras/${camId}/stream.m3u8`;
 				createCameraDOM(camId, streamPath);
+				fetchManifest(camId);
 			}
 		} else {
 			setTimeout(discoverCameras, 2000);
@@ -649,7 +659,10 @@ async function discoverCameras() {
 document.addEventListener('DOMContentLoaded', () => {
 	renderTimelineRuler();
 	returnToLive();
-	fetchManifest();
-	setInterval(fetchManifest, 30000);
+
+	setInterval(() => {
+		activeCameras.forEach(camId => fetchManifest(camId));
+	}, 30000);
+
 	discoverCameras();
 });
