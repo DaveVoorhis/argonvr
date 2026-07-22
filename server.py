@@ -17,6 +17,7 @@ config.read('argonvr.cfg')
 USERNAME = config['SETTINGS'].get('WEB_USER', 'admin')
 PASSWORD = config['SETTINGS'].get('WEB_PASS', 'secret')
 STORE_DIR = config['SETTINGS'].get('STORE_DIR', './recordings')
+BASE_DIR = config['SETTINGS'].get('BASE_DIR', './cameras')
 
 PORT = int(config['SETTINGS'].get('PORT', '8000'))
 
@@ -163,6 +164,16 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                     # Intercept the /cameracount endpoint
                     if path_no_query == '/cameracount':
                         data = json.dumps({"count": CAMERA_COUNT}).encode('utf-8')
+                        self.send_response(200)
+                        self.send_header('Content-Type', 'application/json')
+                        self.send_header('Content-Length', str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                        return
+
+                    # Intercept the /basedir endpoint
+                    if path_no_query == '/basedir':
+                        data = json.dumps({"baseDir": BASE_DIR}).encode('utf-8')
                         self.send_response(200)
                         self.send_header('Content-Type', 'application/json')
                         self.send_header('Content-Length', str(len(data)))

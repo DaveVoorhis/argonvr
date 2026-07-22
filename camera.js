@@ -3,6 +3,8 @@ const urlParams = new URLSearchParams(window.location.search);
 const camId = urlParams.get('cam') || 'cam1';
 const dateParam = urlParams.get('date');
 
+let baseDir = './cameras';
+
 // --- Helper Functions ---
 function getTodayString() {
     const now = new Date();
@@ -232,7 +234,7 @@ function fwGoLive() {
     fwOverlay.style.display = 'none';
     fwVideo.style.display = 'block';
 
-    const freshPlaylistUrl = `./cameras/${camId}/stream.m3u8?t=${Date.now()}`;
+    const freshPlaylistUrl = `${baseDir}/${camId}/stream.m3u8?t=${Date.now()}`;
 
     if (Hls.isSupported()) {
         fwHlsPlayer = new Hls({
@@ -337,7 +339,7 @@ function updateFwTimelineFromEvent(e) {
 
         // --- THE FIX: Rock-solid snapshot removal ---
         const removeSnapshot = () => {
-            // Double requestAnimationFrame forces the browser to wait until 
+            // Double requestAnimationFrame forces the browser to wait until
             // the new video frame is physically painted to the monitor.
             requestAnimationFrame(() => {
                 requestAnimationFrame(() => {
@@ -401,6 +403,16 @@ fwTimelineRegion.addEventListener('pointerup', (e) => {
 
 // Start up
 document.addEventListener('DOMContentLoaded', async () => {
+    try {
+        const response = await fetch('/basedir', { credentials: 'include' });
+        if (response.ok) {
+            const data = await response.json();
+            baseDir = data.baseDir || './cameras';
+        }
+    } catch (e) {
+        console.error("Failed to load base configuration:", e);
+    }
+
     await fetchManifest();
 
     if (dateParam && dateParam !== getTodayString()) {

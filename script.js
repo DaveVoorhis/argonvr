@@ -20,6 +20,8 @@ let globalManifest = {};
 const hlsPlayers = {};
 const activeCameras = [];
 
+let baseDir = './cameras';
+
 let isLive = true;
 let isPlayingHistory = false;
 let playbackInterval = null;
@@ -400,7 +402,7 @@ function returnToLive() {
 
 		if (hlsPlayers[camId]) hlsPlayers[camId].destroy();
 
-		const freshPlaylistUrl = `./cameras/${camId}/stream.m3u8?t=${Date.now()}`;
+		const freshPlaylistUrl = `${baseDir}/${camId}/stream.m3u8?t=${Date.now()}`;
 
 		if (Hls.isSupported()) {
 			const hls = new Hls({
@@ -599,7 +601,7 @@ async function discoverCameras() {
 
 			for (let index = 1; index <= count; index++) {
 				const camId = `cam${index}`;
-				const streamPath = `./cameras/${camId}/stream.m3u8`;
+				const streamPath = `${baseDir}/${camId}/stream.m3u8`;
 				createCameraDOM(camId, streamPath);
 				fetchManifest(camId);
 			}
@@ -611,7 +613,17 @@ async function discoverCameras() {
 	}
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
+	try {
+		const response = await fetch('/basedir', { credentials: 'include' });
+		if (response.ok) {
+			const data = await response.json();
+			baseDir = data.baseDir || './cameras';
+		}
+	} catch (e) {
+		console.error("Failed to load base configuration:", e);
+	}
+
 	renderTimelineRuler();
 	returnToLive();
 
