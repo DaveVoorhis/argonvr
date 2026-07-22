@@ -6,6 +6,7 @@ import configparser
 import ssl
 import json
 import socket
+from urllib.parse import urlparse, parse_qs
 
 # Add ThreadingMixIn to enable concurrent request handling
 from socketserver import ThreadingMixIn
@@ -106,7 +107,10 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
             self.send_error(500, f"Server Error: {e}")
 
     def do_GET(self):
-        path_no_query = self.path.split('?')[0]
+        parsed_url = urlparse(self.path)
+        path_no_query = parsed_url.path
+        query_params = parse_qs(parsed_url.query)
+
         filepath = self.translate_path(path_no_query)
 
         if path_no_query.endswith(('.m3u8', '.ts', '.mp4')):
@@ -127,9 +131,12 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                 username, password = decoded_credentials.split(':', 1)
 
                 if username == USERNAME and password == PASSWORD:
-
-                    # Intercept the /history endpoint dynamically using STORE_DIR
                     if path_no_query == '/history':
+                        req_date = query_params.get('date', [None])[0]
+                        req_cam = query_params.get('cam', [None])[0]
+
+                        # You now have req_date (e.g., "20260722") and req_cam (e.g., "cam1")
+
                         history_path = os.path.join(STORE_DIR, 'history.json')
                         if os.path.exists(history_path):
                             with open(history_path, 'rb') as f:
@@ -169,7 +176,6 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(b"Invalid username or password.")
 
 if __name__ == "__main__":
-    # Swapped TCPServer for ThreadedHTTPServer
     with ThreadedHTTPServer(("", PORT), SecureAuthHandler) as httpd:
         if SSL_CERT and SSL_KEY and os.path.exists(SSL_CERT) and os.path.exists(SSL_KEY):
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

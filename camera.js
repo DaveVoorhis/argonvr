@@ -92,7 +92,9 @@ function extractTimeFromFilename(filename) {
 // --- Manifest Logic ---
 async function fetchManifest() {
     try {
-        const response = await fetch('/history', { cache: 'no-store', credentials: 'include' });
+        const url = `/history?date=${currentDayString}&cam=${camId}`;
+
+        const response = await fetch(url, { cache: 'no-store', credentials: 'include' });
         const newManifest = await response.json();
 
         Object.keys(newManifest).forEach(id => {
