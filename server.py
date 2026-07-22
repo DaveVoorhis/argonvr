@@ -5,6 +5,7 @@ import os
 import configparser
 import ssl
 import json
+import socket
 
 # Add ThreadingMixIn to enable concurrent request handling
 from socketserver import ThreadingMixIn
@@ -36,6 +37,9 @@ class ThreadedHTTPServer(ThreadingMixIn, socketserver.TCPServer):
 
 class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
 
+    # Kills zombie threads if the client hangs for 10 seconds
+    timeout = 10
+
     def address_string(self):
         """Prevents reverse DNS lookups that cause initial connection lag."""
         return self.client_address[0]
@@ -43,7 +47,7 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
     def handle(self):
         try:
             super().handle()
-        except (ConnectionResetError, BrokenPipeError):
+        except (ConnectionResetError, BrokenPipeError, socket.timeout): # Added socket.timeout here as well
             pass
         except ssl.SSLError:
             pass
