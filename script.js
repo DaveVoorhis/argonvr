@@ -9,9 +9,7 @@ function runEasterEgg() {
 }
 setInterval(runEasterEgg, 10000);
 
-const CAMERA_COLORS = [
-	'#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#e74c3c', '#1abc9c', '#e84393'
-];
+let CAMERA_COLORS = ['#3498db']; // Fallback color
 
 function getCameraColor(camId) {
 	const num = parseInt(camId.replace(/\D/g, '')) || 1;
@@ -591,6 +589,14 @@ async function discoverCameras() {
 		if (response.ok) {
 			const data = await response.json();
 			const count = data.count || 1;
+
+			// Dynamic color generation across the HSL spectrum (0 = Red to 270 = Violet)
+			CAMERA_COLORS = [];
+			for (let i = 0; i < count; i++) {
+				const hue = count === 1 ? 0 : Math.floor((270 * i) / (count - 1));
+				CAMERA_COLORS.push(`hsl(${hue}, 80%, 55%)`);
+			}
+
 			for (let index = 1; index <= count; index++) {
 				const camId = `cam${index}`;
 				const streamPath = `./cameras/${camId}/stream.m3u8`;

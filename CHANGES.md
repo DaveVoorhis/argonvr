@@ -17,5 +17,7 @@ This is human-written.
 6. Preloads clips in an even distribution so preview can happen earlier.
 7. History now obtained via endpoint rather than explicit path, to avoid deviating from config.
 8. Count of cameras now obtained via endpoint rather than polled until error.
+9. History returned by /history is per-camera and per-day and include real clip length.
+10. Camera colour now set as an even spectrum of colours going from red (1st camera) to violet (last camera).
 
 ## Features
