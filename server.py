@@ -135,23 +135,29 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                         req_date = query_params.get('date', [None])[0]
                         req_cam = query_params.get('cam', [None])[0]
 
-                        # You now have req_date (e.g., "20260722") and req_cam (e.g., "cam1")
+                        if not req_date or not req_cam:
+                            self.send_error(400, "Missing 'date' or 'cam' parameters")
+                            return
 
-                        history_path = os.path.join(STORE_DIR, 'history.json')
+                        history_path = os.path.join(STORE_DIR, req_cam, f'history_{req_date}.json')
+                        cam_history = []
+
                         if os.path.exists(history_path):
-                            with open(history_path, 'rb') as f:
-                                data = f.read()
-                            self.send_response(200)
-                            self.send_header('Content-Type', 'application/json')
-                            self.send_header('Content-Length', str(len(data)))
-                            self.end_headers()
-                            self.wfile.write(data)
-                        else:
-                            # Return empty JSON object if file doesn't exist yet
-                            self.send_response(200)
-                            self.send_header('Content-Type', 'application/json')
-                            self.end_headers()
-                            self.wfile.write(b"{}")
+                            try:
+                                with open(history_path, 'r') as f:
+                                    cam_history = json.load(f)
+                            except Exception as e:
+                                print(f"Error reading {history_path}: {e}")
+
+                        # Maintain original {"cam_id": [{clip}]} payload structure
+                        response_data = {req_cam: cam_history}
+                        data = json.dumps(response_data).encode('utf-8')
+
+                        self.send_response(200)
+                        self.send_header('Content-Type', 'application/json')
+                        self.send_header('Content-Length', str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
                         return
 
                     # Intercept the /cameracount endpoint

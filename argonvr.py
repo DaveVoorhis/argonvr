@@ -6,6 +6,7 @@ import sys
 import json
 import configparser
 import shutil
+import subprocess
 
 config = configparser.ConfigParser()
 config.read('argonvr.cfg')
@@ -49,27 +50,87 @@ def cleanup_processes():
 
 atexit.register(cleanup_processes)
 
-def update_history_manifest():
-    """Scans the recordings directory and generates a JSON manifest for the UI."""
-    manifest = {}
+def get_video_duration(filepath):
+    """Uses ffprobe to extract the duration of a video file."""
+    try:
+        cmd = [
+            "ffprobe", "-v", "error", "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1", filepath
+        ]
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=5)
+        return round(float(proc.stdout.strip()), 2)
+    except Exception:
+        return 0.0
+
+def update_history_manifest(target_cam_id=None):
+    """Scans the recordings directory and generates daily JSON manifests per camera."""
     if not os.path.exists(STORE_DIR):
         return
 
-    for cam_id in os.listdir(STORE_DIR):
-        cam_path = os.path.join(STORE_DIR, cam_id)
-        if os.path.isdir(cam_path):
-            files = []
-            for f in os.listdir(cam_path):
-                if f.endswith('.mp4'):
-                    files.append({
-                        "filename": f,
-                        "url": f"./{os.path.basename(STORE_DIR)}/{cam_id}/{f}"
-                    })
-            files.sort(key=lambda x: x['filename'], reverse=True)
-            manifest[cam_id] = files
+    cam_dirs = [target_cam_id] if target_cam_id else os.listdir(STORE_DIR)
 
-    with open(os.path.join(STORE_DIR, 'history.json'), 'w') as f:
-        json.dump(manifest, f)
+    for cam_id in cam_dirs:
+        cam_path = os.path.join(STORE_DIR, cam_id)
+        if not os.path.isdir(cam_path):
+            continue
+
+        # Group files by date
+        daily_files = {}
+        for f in os.listdir(cam_path):
+            if f.endswith('.mp4'):
+                try:
+                    # Extract date from filename, e.g., cam1_20260722_153000.mp4 -> 20260722
+                    parts = f.split('_')
+                    if len(parts) >= 2:
+                        date_str = parts[1]
+                        if date_str not in daily_files:
+                            daily_files[date_str] = []
+                        daily_files[date_str].append(f)
+                except IndexError:
+                    continue
+
+        # Generate or update manifest for each active date
+        active_dates = set()
+        for date_str, files in daily_files.items():
+            manifest_name = f"history_{date_str}.json"
+            active_dates.add(manifest_name)
+            manifest_path = os.path.join(cam_path, manifest_name)
+
+            existing_data = {}
+            if os.path.exists(manifest_path):
+                try:
+                    with open(manifest_path, 'r') as mf:
+                        old_manifest = json.load(mf)
+                        for item in old_manifest:
+                            existing_data[item['filename']] = item
+                except Exception:
+                    pass
+
+            manifest_data = []
+            for f in files:
+                # Use cached data if available to avoid ffprobe overhead
+                if f in existing_data:
+                    manifest_data.append(existing_data[f])
+                else:
+                    filepath = os.path.join(cam_path, f)
+                    manifest_data.append({
+                        "filename": f,
+                        "url": f"./{os.path.basename(STORE_DIR)}/{cam_id}/{f}",
+                        "duration": get_video_duration(filepath)
+                    })
+
+            manifest_data.sort(key=lambda x: x['filename'], reverse=True)
+
+            with open(manifest_path, 'w') as mf:
+                json.dump(manifest_data, mf)
+
+        # Clean up orphaned history files (e.g., if storage manager deleted all clips for a specific day)
+        for f in os.listdir(cam_path):
+            if f.startswith('history_') and f.endswith('.json') and f not in active_dates:
+                try:
+                    os.remove(os.path.join(cam_path, f))
+                except OSError:
+                    pass
 
 def get_free_space_pct(path):
     try:
@@ -105,7 +166,7 @@ async def storage_manager():
                         pass
 
                 if deleted_count > 0:
-                    print(f"[🧹] Purged {deleted_count} files. Updating history manifest.")
+                    print(f"[🧹] Purged {deleted_count} files. Updating history manifests.")
                     update_history_manifest()
         except Exception as e:
             print(f"[⚠️] Storage Manager error: {e}")
@@ -183,7 +244,7 @@ async def background_encoder_worker():
                     if proc.returncode == 0:
                         print(f"[✅] Successfully encoded and stored: {final_filepath}")
                         os.remove(raw_filepath)
-                        update_history_manifest()
+                        update_history_manifest(cam_id)
                     else:
                         print(f"[❌] Error encoding {raw_filename}. See encoder_worker.log")
                         os.rename(raw_filepath, raw_filepath + ".failed")
