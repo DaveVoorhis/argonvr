@@ -5,6 +5,7 @@ This is human-written.
 1. Popup camera did not default to Live display when main display is Live.
 2. Pressing "Go Live" on Live display sometimes does not show Live display.
 3. When passing midnight, refresh the timeline to clear yesterday's heatmap items.
+4. Improved server.py to avoid resource starvation due to connection breakage.
 
 ## Enhancements
 
