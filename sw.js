@@ -1,4 +1,4 @@
-const CACHE_NAME = 'argonvr-cache-v1';
+const CACHE_NAME = 'argonvr-cache-v2';
 const ASSETS = [
     'icon-192.png',
     'icon-512.png'
