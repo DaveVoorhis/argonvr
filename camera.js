@@ -75,18 +75,11 @@ function secondsToTimeStr(seconds) {
 function parseFilenameToSeconds(filename) {
     const match = filename.match(/_(\d{8})_(\d{2})(\d{2})(\d{2})\.mp4/);
     if (!match) return null;
-    if (match[1] !== currentDayString) return null;
 
     const h = parseInt(match[2], 10);
     const m = parseInt(match[3], 10);
     const s = parseInt(match[4], 10);
     return (h * 3600) + (m * 60) + s;
-}
-
-function extractTimeFromFilename(filename) {
-    const match = filename.match(/_(\d{8})_(\d{2})(\d{2})(\d{2})\.mp4/);
-    if (!match) return null;
-    return (parseInt(match[2], 10) * 3600) + (parseInt(match[3], 10) * 60) + parseInt(match[4], 10);
 }
 
 // --- Manifest Logic ---
@@ -99,27 +92,7 @@ async function fetchManifest() {
 
         Object.keys(newManifest).forEach(id => {
             const clips = newManifest[id];
-            clips.sort((a, b) => (extractTimeFromFilename(a.filename) || 0) - (extractTimeFromFilename(b.filename) || 0));
-
-            for (let i = 0; i < clips.length; i++) {
-                const clip = clips[i];
-                if (!clip.duration) {
-                    let guessedDur = 60;
-                    if (i < clips.length - 1) {
-                        const matchA = clip.filename.match(/_(\d{8})_/);
-                        const matchB = clips[i+1].filename.match(/_(\d{8})_/);
-                        if (matchA && matchB && matchA[1] === matchB[1]) {
-                            const aTime = extractTimeFromFilename(clip.filename);
-                            const bTime = extractTimeFromFilename(clips[i+1].filename);
-                            if (aTime !== null && bTime !== null) {
-                                const delta = bTime - aTime;
-                                if (delta > 0 && delta <= 60) guessedDur = delta;
-                            }
-                        }
-                    }
-                    clip.duration = guessedDur;
-                }
-            }
+            clips.sort((a, b) => (parseFilenameToSeconds(a.filename) || 0) - (parseFilenameToSeconds(b.filename) || 0));
         });
         globalManifest = newManifest;
 
@@ -190,7 +163,7 @@ async function processPreloadQueue() {
     // Check again in case native scrubbing cached it while it was waiting in the queue
     if (!clip.isCached) {
         try {
-            // Fetch one at a time. The 'priority: low' flag tells modern browsers 
+            // Fetch one at a time. The 'priority: low' flag tells modern browsers
             // to yield this connection if user-initiated media requests occur.
             const response = await fetch(clip.url, {
                 cache: 'force-cache',
@@ -220,12 +193,12 @@ function drawTimelineChunks() {
 
     if (dayClips.length === 0) return;
 
-    const totalDuration = dayClips.reduce((sum, c) => sum + (c.duration || 60), 0);
+    const totalDuration = dayClips.reduce((sum, c) => sum + c.duration, 0);
     let accum = 0;
 
     dayClips.forEach(clip => {
         const startPct = (accum / totalDuration) * 100;
-        const widthPct = ((clip.duration || 60) / totalDuration) * 100;
+        const widthPct = (clip.duration / totalDuration) * 100;
 
         const chunk = document.createElement('div');
         chunk.className = 'fw-timeline-chunk';
@@ -234,7 +207,7 @@ function drawTimelineChunks() {
         chunk.style.backgroundColor = clip.isCached ? 'rgba(46, 204, 113, 0.6)' : 'rgba(255, 255, 255, 0.15)';
 
         fwTimelineRegion.insertBefore(chunk, fwIndicator);
-        accum += (clip.duration || 60);
+        accum += clip.duration;
     });
 }
 
@@ -307,15 +280,15 @@ function updateFwTimelineFromEvent(e) {
         return;
     }
 
-    const totalDuration = dayClips.reduce((sum, c) => sum + (c.duration || 60), 0);
+    const totalDuration = dayClips.reduce((sum, c) => sum + c.duration, 0);
     const targetContinuousSeconds = pct * totalDuration;
 
     let accum = 0;
     let selectedClip = dayClips[dayClips.length - 1];
-    let offsetInClip = (selectedClip.duration || 60);
+    let offsetInClip = selectedClip.duration;
 
     for (let clip of dayClips) {
-        let dur = clip.duration || 60;
+        let dur = clip.duration;
         if (targetContinuousSeconds <= accum + dur) {
             selectedClip = clip;
             offsetInClip = targetContinuousSeconds - accum;
@@ -358,9 +331,6 @@ function updateFwTimelineFromEvent(e) {
         fwOverlay.style.display = 'none';
 
         fwVideo.onloadedmetadata = () => {
-            if (fwVideo.duration > 0 && fwVideo.duration !== Infinity) {
-                selectedClip.duration = fwVideo.duration;
-            }
             const safeOffset = Math.min(offsetInClip, selectedClip.duration);
             fwVideo.currentTime = safeOffset;
         };

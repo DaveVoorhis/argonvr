@@ -131,18 +131,11 @@ function secondsToTimeStr(seconds) {
 function parseFilenameToSeconds(filename) {
 	const match = filename.match(/_(\d{8})_(\d{2})(\d{2})(\d{2})\.mp4/);
 	if (!match) return null;
-	if (match[1] !== currentDayString) return null;
 
 	const h = parseInt(match[2], 10);
 	const m = parseInt(match[3], 10);
 	const s = parseInt(match[4], 10);
 	return (h * 3600) + (m * 60) + s;
-}
-
-function extractTimeFromFilename(filename) {
-	const match = filename.match(/_(\d{8})_(\d{2})(\d{2})(\d{2})\.mp4/);
-	if (!match) return null;
-	return (parseInt(match[2], 10) * 3600) + (parseInt(match[3], 10) * 60) + parseInt(match[4], 10);
 }
 
 async function fetchManifest(camId) {
@@ -152,51 +145,12 @@ async function fetchManifest(camId) {
 		const response = await fetch(url, { cache: 'no-store', credentials: 'include' });
 		const allData = await response.json();
 
-		let rawClips = allData[camId] || [];
-
-		// Locally filter for just the specific camera and requested date.
-		// This is temporary until the /history endpoint does it for us.
-		let clips = rawClips.filter(clip => {
-			const match = clip.filename.match(/_(\d{8})_/);
-			return match && match[1] === currentDayString;
-		});
+		let clips = allData[camId] || [];
 
 		clips.sort((a, b) => {
-			return (extractTimeFromFilename(a.filename) || 0) - (extractTimeFromFilename(b.filename) || 0);
+			return (parseFilenameToSeconds(a.filename) || 0) - (parseFilenameToSeconds(b.filename) || 0);
 		});
 
-		for (let i = 0; i < clips.length; i++) {
-			const clip = clips[i];
-
-			if (globalManifest[camId]) {
-				const existingClip = globalManifest[camId].find(c => c.filename === clip.filename);
-				if (existingClip && existingClip.duration) {
-					clip.duration = existingClip.duration;
-				}
-			}
-
-			if (!clip.duration) {
-				let guessedDur = 60;
-				if (i < clips.length - 1) {
-					const matchA = clip.filename.match(/_(\d{8})_/);
-					const matchB = clips[i+1].filename.match(/_(\d{8})_/);
-
-					if (matchA && matchB && matchA[1] === matchB[1]) {
-						const aTime = extractTimeFromFilename(clip.filename);
-						const bTime = extractTimeFromFilename(clips[i+1].filename);
-						if (aTime !== null && bTime !== null) {
-							const delta = bTime - aTime;
-							if (delta > 0 && delta <= 60) {
-								guessedDur = delta;
-							}
-						}
-					}
-				}
-				clip.duration = guessedDur;
-			}
-		}
-
-		// Save filtered clips just for this specific camera
 		globalManifest[camId] = clips;
 
 		availableDates.clear();
@@ -233,7 +187,7 @@ function renderTimelineHeatmap() {
 			const startSec = parseFilenameToSeconds(clip.filename);
 			if (startSec === null) return;
 
-			const clipDuration = clip.duration || 60;
+			const clipDuration = clip.duration;
 
 			const leftPct = (startSec / 86400) * 100;
 			const widthPct = (clipDuration / 86400) * 100;
@@ -324,7 +278,7 @@ function findClipForCamera(camId, targetSeconds) {
 		const startSec = parseFilenameToSeconds(clipRef.filename);
 		if (startSec === null) continue;
 
-		const clipDuration = clipRef.duration || 60;
+		const clipDuration = clipRef.duration;
 		const endSec = startSec + clipDuration;
 
 		if (targetSeconds >= startSec && targetSeconds <= endSec) {
@@ -350,11 +304,6 @@ function updateCamerasToScrubber(targetSeconds, isManualScrub = false) {
 				overlay.style.display = 'none';
 
 				videoEl.onloadedmetadata = () => {
-					if (!manifestRef.duration && videoEl.duration > 0 && videoEl.duration !== Infinity) {
-						manifestRef.duration = videoEl.duration;
-						renderTimelineHeatmap();
-					}
-
 					videoEl.currentTime = offset;
 					if (isPlayingHistory) videoEl.play().catch(e => {});
 				};
