@@ -459,7 +459,9 @@ function returnToLive() {
 			hlsPlayers[camId] = hls;
 			hls.loadSource(freshPlaylistUrl);
 			hls.attachMedia(videoEl);
-			hls.on(Hls.Events.MANIFEST_PARSED, () => videoElement.play().catch(e => {}));
+
+			// FIXED BUG HERE
+			hls.on(Hls.Events.MANIFEST_PARSED, () => videoEl.play().catch(e => {}));
 
 			// Fallback for unexpected stream deaths
 			hls.on(Hls.Events.ERROR, (event, data) => {
@@ -468,10 +470,11 @@ function returnToLive() {
 				}
 			});
 
-		} else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
-			videoElement.src = freshPlaylistUrl;
-			videoElement.play().catch(e => {});
-			videoElement.onerror = () => handleStreamError(null);
+			// FIXED BUG HERE
+		} else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+			videoEl.src = freshPlaylistUrl;
+			videoEl.play().catch(e => {});
+			videoEl.onerror = () => handleStreamError(null);
 		}
 	});
 }
