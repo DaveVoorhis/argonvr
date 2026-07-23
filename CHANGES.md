@@ -23,5 +23,6 @@ This is human-written.
 9. History returned by /history is per-camera and per-day and include real clip length.
 10. Camera colour now set as an even spectrum of colours going from red (1st camera) to violet (last camera).
 11. Frontend detects connection failure and resets to allow for server reboots, connection outage etc.
+12. Improved rapid-load single-camera timeline scrubbing.
 
 ## Features

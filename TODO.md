@@ -7,7 +7,7 @@ This is human-written.
 ## Enhancements
 
 1. Motion sensitivity should be set per-camera
-1. Consider dynamically appending motion to a per-camera "all day" .mp4 for review in the single-camera view presumably with non-motion periods stretched from the end of the last motion clip, or at least coalescing multiple short clips into one longer one. Not sure what effect this will have on time display, though...
+2. Should single-camera caching load from the current scrubber position outward?
 
 ## Features
 
