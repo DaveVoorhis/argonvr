@@ -11,6 +11,17 @@ setInterval(runEasterEgg, 10000);
 
 let CAMERA_COLORS = ['#3498db']; // Fallback color
 
+function hslToHex(h, s, l) {
+	l /= 100;
+	const a = (s * Math.min(l, 1 - l)) / 100;
+	const f = n => {
+		const k = (n + h / 30) % 12;
+		const color = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+		return Math.abs(Math.round(255 * color)).toString(16).padStart(2, '0');
+	};
+	return `${f(0)}${f(8)}${f(4)}`;
+}
+
 function getCameraColor(camId) {
 	const num = parseInt(camId.replace(/\D/g, '')) || 1;
 	return CAMERA_COLORS[(num - 1) % CAMERA_COLORS.length];
@@ -368,7 +379,8 @@ function updateCamerasToScrubber(targetSeconds, isManualScrub = false) {
 }
 
 function openCameraPage(camId) {
-	window.location.href = `camera.html?cam=${camId}&date=${currentDayString}`;
+	const hexColor = getCameraColor(camId).replace('#', '');
+	window.location.href = `camera.html?cam=${camId}&date=${currentDayString}&color=${hexColor}`;
 }
 
 function returnToLive() {
@@ -447,7 +459,7 @@ function returnToLive() {
 			hlsPlayers[camId] = hls;
 			hls.loadSource(freshPlaylistUrl);
 			hls.attachMedia(videoEl);
-			hls.on(Hls.Events.MANIFEST_PARSED, () => videoEl.play().catch(e => {}));
+			hls.on(Hls.Events.MANIFEST_PARSED, () => videoElement.play().catch(e => {}));
 
 			// Fallback for unexpected stream deaths
 			hls.on(Hls.Events.ERROR, (event, data) => {
@@ -456,10 +468,10 @@ function returnToLive() {
 				}
 			});
 
-		} else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-			videoEl.src = freshPlaylistUrl;
-			videoEl.play().catch(e => {});
-			videoEl.onerror = () => handleStreamError(null);
+		} else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
+			videoElement.src = freshPlaylistUrl;
+			videoElement.play().catch(e => {});
+			videoElement.onerror = () => handleStreamError(null);
 		}
 	});
 }
@@ -645,7 +657,7 @@ async function discoverCameras() {
 			CAMERA_COLORS = [];
 			for (let i = 0; i < count; i++) {
 				const hue = count === 1 ? 0 : Math.floor((270 * i) / (count - 1));
-				CAMERA_COLORS.push(`hsl(${hue}, 80%, 55%)`);
+				CAMERA_COLORS.push(`#${hslToHex(hue, 80, 55)}`);
 			}
 
 			for (let index = 1; index <= count; index++) {

@@ -1,6 +1,7 @@
 const urlParams = new URLSearchParams(window.location.search);
 const camId = urlParams.get('cam') || 'cam1';
 const dateParam = urlParams.get('date');
+const colorParam = urlParams.get('color');
 let baseDir = './cameras';
 
 // --- Helper Functions ---
@@ -13,16 +14,14 @@ function getTodayString() {
 }
 
 const currentDayString = dateParam || getTodayString();
-const CAMERA_COLORS = ['#3498db', '#2ecc71', '#f39c12', '#9b59b6', '#e74c3c', '#1abc9c', '#e84393'];
 
-function getCameraColor(id) {
-    const num = parseInt(id.replace(/\D/g, '')) || 1;
-    return CAMERA_COLORS[(num - 1) % CAMERA_COLORS.length];
+function getCameraColor() {
+    return colorParam ? '#' + colorParam : '#3498db';
 }
 
 // UI Initialization
 document.getElementById('cam-title').innerText = camId.toUpperCase();
-document.getElementById('cam-title').style.color = getCameraColor(camId);
+document.getElementById('cam-title').style.color = getCameraColor();
 
 const fwVideo = document.getElementById('fw-video');
 const snapshotCanvas = document.getElementById('snapshot-canvas');
