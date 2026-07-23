@@ -3,6 +3,8 @@ This is human-written.
 ## Bugs
 
 1. After the frontend has run for a while, refreshing or Reset causes some cameras to sometimes load slowly. Some cleanup not happening?
+2. After server.py has run for 12 hours or so, it locks up.
+3. Calendar popup only indicates there are clips for current day and doesn't immediately update timeline when day is changed.
 
 ## Enhancements
 
