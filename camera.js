@@ -40,6 +40,7 @@ let preloadQueue = [];
 let isPreloading = false;
 let abortController = new AbortController();
 let scrubDebounceTimer = null;
+let scrubMoveQueueTimer = null;
 
 function secondsToTimeStr(seconds) {
     const h = Math.floor(seconds / 3600);
@@ -93,6 +94,9 @@ fwVideo.addEventListener('ended', () => {
         currentClipUrl = nextClip.url;
         fwVideo.src = nextClip.url;
         fwVideo.play().catch(e=>{});
+
+        // Re-center preloading around the newly playing clip
+        recenterPreload();
     }
 });
 
@@ -105,6 +109,16 @@ async function fetchManifest() {
 
         Object.keys(newManifest).forEach(id => {
             newManifest[id].sort((a, b) => (parseFilenameToSeconds(a.filename) || 0) - (parseFilenameToSeconds(b.filename) || 0));
+
+            // Preserve existing cached states across manifest updates
+            if (globalManifest[id]) {
+                const oldClipMap = new Map(globalManifest[id].map(c => [c.url, c.isCached]));
+                newManifest[id].forEach(c => {
+                    if (oldClipMap.get(c.url)) {
+                        c.isCached = true;
+                    }
+                });
+            }
         });
         globalManifest = newManifest;
 
@@ -118,13 +132,18 @@ async function fetchManifest() {
 function getCurrentClipIndex(dayClips) {
     if (dayClips.length === 0) return 0;
 
-    // Determine position based on the visual indicator style left percentage
+    // Prioritize scrubber visual indicator position if available
     const indicatorLeft = fwIndicator.style.left;
-    let pct = 1.0; // Default to rightmost if unset
+    let pct = null;
 
     if (indicatorLeft && indicatorLeft.includes('%')) {
         pct = parseFloat(indicatorLeft) / 100;
+    } else if (currentClipUrl) {
+        const idx = dayClips.findIndex(c => c.url === currentClipUrl);
+        if (idx !== -1) return idx;
     }
+
+    if (pct === null) return 0;
 
     const totalDuration = dayClips.reduce((sum, c) => sum + c.duration, 0);
     const targetSeconds = pct * totalDuration;
@@ -165,11 +184,19 @@ function startSequentialPreload() {
         offset++;
     }
 
+    // Filter out already cached clips so we don't re-download them,
+    // but keep existing cached clips intact on the timeline.
     preloadQueue = orderedIndices
         .map(i => dayClips[i])
         .filter(c => c && c.url && !c.isCached);
 
     if (!isPreloading) processPreloadQueue();
+}
+
+function recenterPreload() {
+    abortController.abort();
+    abortController = new AbortController();
+    startSequentialPreload();
 }
 
 async function processPreloadQueue() {
@@ -180,8 +207,13 @@ async function processPreloadQueue() {
     isPreloading = true;
     const clip = preloadQueue.shift();
 
+    // Skip if already cached in the meantime
+    if (clip.isCached) {
+        processPreloadQueue();
+        return;
+    }
+
     try {
-        // We pass the abort signal so we can kill this request instantly if the user scrubs
         const response = await fetch(clip.url, {
             cache: 'force-cache',
             priority: 'low',
@@ -192,7 +224,7 @@ async function processPreloadQueue() {
             drawTimelineChunks();
         }
     } catch (e) {
-        // Ignore AbortError, it's intentional
+        // Ignore AbortError, it's intentional when shifting focus
     }
 
     // Pause briefly to let the main video breathe, then continue
@@ -311,19 +343,23 @@ function updateFwTimelineFromEvent(e) {
 
 fwTimelineRegion.addEventListener('pointerdown', (e) => {
     fwIsScrubbing = true;
-
-    // INSTANTLY kill any background caching to free up network bandwidth for scrubbing
-    abortController.abort();
-    abortController = new AbortController();
-
     fwVideo.pause();
     fwTimelineRegion.setPointerCapture(e.pointerId);
     updateFwTimelineFromEvent(e);
+    recenterPreload();
 });
 
 fwTimelineRegion.addEventListener('pointermove', (e) => {
     if (fwIsScrubbing) {
         updateFwTimelineFromEvent(e);
+
+        // Dynamically re-center preloading as the scrubber drags, throttled to prevent thrashing
+        if (!scrubMoveQueueTimer) {
+            scrubMoveQueueTimer = setTimeout(() => {
+                recenterPreload();
+                scrubMoveQueueTimer = null;
+            }, 200);
+        }
     }
 });
 
@@ -331,11 +367,14 @@ fwTimelineRegion.addEventListener('pointerup', (e) => {
     fwIsScrubbing = false;
     fwTimelineRegion.releasePointerCapture(e.pointerId);
 
+    if (scrubMoveQueueTimer) {
+        clearTimeout(scrubMoveQueueTimer);
+        scrubMoveQueueTimer = null;
+    }
+    recenterPreload();
+
     if (!fwHlsPlayer && fwVideo.src) {
         fwVideo.play().catch(e=>{});
-
-        // Restart caching operations safely in the background
-        setTimeout(() => startSequentialPreload(), 1500);
     }
 });
 
