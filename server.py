@@ -7,6 +7,7 @@ import ssl
 import json
 import socket
 from urllib.parse import urlparse, parse_qs
+import sdnotify
 
 # Add ThreadingMixIn to enable concurrent request handling
 from socketserver import ThreadingMixIn
@@ -114,7 +115,14 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
 
         filepath = self.translate_path(path_no_query)
 
-        if path_no_query.endswith(('.m3u8', '.ts', '.mp4')):
+        if path_no_query == '/health':
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b"OK")
+            return
+
+        if path_no_query.endswith(('.m3u8', '.ts', '.mp4', '.json')):
             if not os.path.exists(filepath):
                 self.send_error(404)
                 return
@@ -204,4 +212,13 @@ if __name__ == "__main__":
 
         print(f"📂 Storage mapped to: {STORE_DIR}")
         print(f"📷 Cameras discovered from config: {CAMERA_COUNT}")
+
+        # Notify systemd that the boot process is complete
+        try:
+            notifier = sdnotify.SystemdNotifier()
+            notifier.notify("READY=1")
+            print("Systemd notified: READY=1")
+        except Exception as e:
+            print(f"Warning: Could not notify systemd ({e})")
+
         httpd.serve_forever()

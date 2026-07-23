@@ -3,15 +3,17 @@ Description=ArgoNVR Engine and Web Server
 After=network.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=all
 User=root
 WorkingDirectory=/home/dave/argonvr
 # Execute launch.sh directly
-ExecStart=/bin/bash /home/dave/argonvr/launch.sh
+ExecStart=/bin/bash -c '/usr/bin/python3 /home/dave/argonvr/server.py & /usr/bin/python3 /home/dave/argonvr/watchdog.py & wait -n'
 
 # Automatically restart if the script crashes
 Restart=always
 RestartSec=5
+WatchdogSec=60s
 
 # Ensure Python output is not buffered so it shows up in logs instantly
 Environment=PYTHONUNBUFFERED=1
