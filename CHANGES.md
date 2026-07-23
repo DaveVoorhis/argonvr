@@ -6,6 +6,8 @@ This is human-written.
 2. Pressing "Go Live" on Live display sometimes does not show Live display.
 3. When passing midnight, refresh the timeline to clear yesterday's heatmap items.
 4. Improved server.py to avoid resource starvation due to connection breakage.
+5. After server.py has run for 12 hours or so, it locks up. Server watchdog added to address this.
+6. Calendar popup only indicates there are clips for current day and doesn't immediately update timeline when day is changed. Fixed.
 
 ## Enhancements
 
@@ -19,5 +21,6 @@ This is human-written.
 8. Count of cameras now obtained via endpoint rather than polled until error.
 9. History returned by /history is per-camera and per-day and include real clip length.
 10. Camera colour now set as an even spectrum of colours going from red (1st camera) to violet (last camera).
+11. Frontend detects connection failure and resets to allow for server reboots, connection outage etc.
 
 ## Features

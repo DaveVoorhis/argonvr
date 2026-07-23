@@ -7,7 +7,10 @@ import ssl
 import json
 import socket
 from urllib.parse import urlparse, parse_qs
-import sdnotify
+try:
+    import sdnotify
+except ImportError:
+    sdnotify = None
 
 # Add ThreadingMixIn to enable concurrent request handling
 from socketserver import ThreadingMixIn
@@ -50,7 +53,7 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
     def handle(self):
         try:
             super().handle()
-        except (ConnectionResetError, BrokenPipeError, socket.timeout): # Added socket.timeout here as well
+        except (ConnectionResetError, BrokenPipeError, socket.timeout):
             pass
         except ssl.SSLError:
             pass
@@ -162,6 +165,30 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                         response_data = {req_cam: cam_history}
                         data = json.dumps(response_data).encode('utf-8')
 
+                        self.send_response(200)
+                        self.send_header('Content-Type', 'application/json')
+                        self.send_header('Content-Length', str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                        return
+
+                    # Intercept the /available_dates endpoint
+                    if path_no_query == '/available_dates':
+                        dates = set()
+                        try:
+                            if os.path.exists(STORE_DIR):
+                                for cam_dir in os.listdir(STORE_DIR):
+                                    cam_path = os.path.join(STORE_DIR, cam_dir)
+                                    if os.path.isdir(cam_path):
+                                        for file in os.listdir(cam_path):
+                                            if file.startswith('history_') and file.endswith('.json'):
+                                                # Extract YYYYMMDD from history_YYYYMMDD.json
+                                                date_str = file[8:16]
+                                                dates.add(date_str)
+                        except Exception as e:
+                            print(f"Error reading available dates: {e}")
+
+                        data = json.dumps(list(dates)).encode('utf-8')
                         self.send_response(200)
                         self.send_header('Content-Type', 'application/json')
                         self.send_header('Content-Length', str(len(data)))

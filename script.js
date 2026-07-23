@@ -30,6 +30,7 @@ let currentDayString = "";
 
 let availableDates = new Set();
 let calViewDate = new Date();
+let reconnectTimer = null;
 
 const scrubber = document.getElementById('scrubber');
 const timeLabel = document.getElementById('time-label');
@@ -39,6 +40,35 @@ const dateDisplay = document.getElementById('global-date');
 const zoomSlider = document.getElementById('zoom-slider');
 const timelineContent = document.getElementById('timeline-content');
 const timelineViewport = document.getElementById('timeline-viewport');
+
+// Handle fatal network errors to re-init live streams
+function handleStreamError(hlsInstance) {
+	if (hlsInstance) hlsInstance.destroy();
+
+	if (isLive && !reconnectTimer) {
+		console.warn("Connection lost. ArgoNVR backend may have rebooted. Retrying in 5s...");
+		reconnectTimer = setTimeout(() => {
+			reconnectTimer = null;
+			if (isLive) returnToLive();
+		}, 5000);
+	}
+}
+
+async function fetchAvailableDates() {
+	try {
+		const response = await fetch('/available_dates', { credentials: 'include' });
+		if (response.ok) {
+			const dates = await response.json();
+			dates.forEach(d => availableDates.add(d));
+			const popup = document.getElementById('calendar-popup');
+			if (popup && popup.classList.contains('visible')) {
+				renderCalendar();
+			}
+		}
+	} catch (e) {
+		console.error("Could not load global calendar dates.");
+	}
+}
 
 function adjustZoom(direction) {
 	const currentVal = parseInt(zoomSlider.value, 10);
@@ -94,7 +124,10 @@ function setDate(dateObj) {
 	currentDayString = `${yyyy}${mm}${dd}`;
 	dateDisplay.innerHTML = `<span>${dd}/${mm}/${yyyy}</span> 📅`;
 
+	globalManifest = {};
 	renderTimelineHeatmap();
+
+	activeCameras.forEach(camId => fetchManifest(camId));
 
 	if (activeCameras.length > 0) {
 		if (isPlayingHistory) playBtn.click();
@@ -153,7 +186,6 @@ async function fetchManifest(camId) {
 
 		globalManifest[camId] = clips;
 
-		availableDates.clear();
 		Object.values(allData).forEach(allClips => {
 			if (Array.isArray(allClips)) {
 				allClips.forEach(clip => {
@@ -416,9 +448,18 @@ function returnToLive() {
 			hls.loadSource(freshPlaylistUrl);
 			hls.attachMedia(videoEl);
 			hls.on(Hls.Events.MANIFEST_PARSED, () => videoEl.play().catch(e => {}));
+
+			// Fallback for unexpected stream deaths
+			hls.on(Hls.Events.ERROR, (event, data) => {
+				if (data.fatal && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+					handleStreamError(hls);
+				}
+			});
+
 		} else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
 			videoEl.src = freshPlaylistUrl;
 			videoEl.play().catch(e => {});
+			videoEl.onerror = () => handleStreamError(null);
 		}
 	});
 }
@@ -579,9 +620,18 @@ function createCameraDOM(camId, streamPath) {
 		hls.loadSource(streamPath);
 		hls.attachMedia(videoElement);
 		hls.on(Hls.Events.MANIFEST_PARSED, () => videoElement.play().catch(e => {}));
+
+		// Fallback for unexpected stream deaths
+		hls.on(Hls.Events.ERROR, (event, data) => {
+			if (data.fatal && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+				handleStreamError(hls);
+			}
+		});
+
 	} else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
 		videoElement.src = streamPath;
 		videoElement.addEventListener('loadedmetadata', () => videoElement.play().catch(e => {}));
+		videoElement.onerror = () => handleStreamError(null);
 	}
 }
 
@@ -592,7 +642,6 @@ async function discoverCameras() {
 			const data = await response.json();
 			const count = data.count || 1;
 
-			// Dynamic color generation across the HSL spectrum (0 = Red to 270 = Violet)
 			CAMERA_COLORS = [];
 			for (let i = 0; i < count; i++) {
 				const hue = count === 1 ? 0 : Math.floor((270 * i) / (count - 1));
@@ -623,6 +672,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 	} catch (e) {
 		console.error("Failed to load base configuration:", e);
 	}
+
+	fetchAvailableDates();
 
 	renderTimelineRuler();
 	returnToLive();
