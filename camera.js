@@ -115,9 +115,60 @@ async function fetchManifest() {
     }
 }
 
+function getCurrentClipIndex(dayClips) {
+    if (dayClips.length === 0) return 0;
+
+    // Determine position based on the visual indicator style left percentage
+    const indicatorLeft = fwIndicator.style.left;
+    let pct = 1.0; // Default to rightmost if unset
+
+    if (indicatorLeft && indicatorLeft.includes('%')) {
+        pct = parseFloat(indicatorLeft) / 100;
+    }
+
+    const totalDuration = dayClips.reduce((sum, c) => sum + c.duration, 0);
+    const targetSeconds = pct * totalDuration;
+
+    let accum = 0;
+    for (let i = 0; i < dayClips.length; i++) {
+        const clip = dayClips[i];
+        if (targetSeconds <= accum + clip.duration) {
+            return i;
+        }
+        accum += clip.duration;
+    }
+    return dayClips.length - 1;
+}
+
 function startSequentialPreload() {
     const dayClips = getDayClips();
-    preloadQueue = dayClips.filter(c => c.url && !c.isCached);
+    if (dayClips.length === 0) return;
+
+    const centerIdx = getCurrentClipIndex(dayClips);
+    const orderedIndices = [];
+    const maxLen = dayClips.length;
+
+    // Add center first, then radiate outward (right, left, right, left...)
+    orderedIndices.push(centerIdx);
+    let offset = 1;
+
+    while (orderedIndices.length < maxLen) {
+        const right = centerIdx + offset;
+        const left = centerIdx - offset;
+
+        if (right < maxLen) {
+            orderedIndices.push(right);
+        }
+        if (left >= 0) {
+            orderedIndices.push(left);
+        }
+        offset++;
+    }
+
+    preloadQueue = orderedIndices
+        .map(i => dayClips[i])
+        .filter(c => c && c.url && !c.isCached);
+
     if (!isPreloading) processPreloadQueue();
 }
 
