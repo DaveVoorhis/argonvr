@@ -32,9 +32,7 @@ body {
     transition: background 0.2s;
 }
 
-.back-btn:hover {
-    background: #444;
-}
+.back-btn:hover { background: #444; }
 
 .cam-title {
     font-weight: bold;
@@ -49,10 +47,19 @@ body {
     min-height: 0;
 }
 
-.video-container video {
+.video-container video,
+.snapshot-canvas {
+    position: absolute;
+    top: 0;
+    left: 0;
     width: 100%;
     height: 100%;
     object-fit: contain;
+}
+
+.snapshot-canvas {
+    z-index: 5;
+    display: none;
 }
 
 .no-video-overlay {
@@ -64,10 +71,9 @@ body {
     justify-content: center;
     align-items: center;
     color: #666;
-    z-index: 5;
+    z-index: 8;
 }
 
-/* Custom Gapless Timeline Styles */
 .fw-controls {
     background: #1a1a1a;
     padding: 8px 15px;
@@ -75,13 +81,11 @@ body {
     align-items: center;
     gap: 12px;
     border-top: 1px solid #333;
-    height: 50px; /* Made slightly taller for better mobile touch targeting */
-    flex-shrink: 0;
-    user-select: none;
+    height: 50px;
 }
 
 .ctrl-btn {
-    background: #333;
+    background: #444;
     border: none;
     color: white;
     padding: 8px 15px;
@@ -131,31 +135,22 @@ body {
 
 .fw-timeline-indicator {
     position: absolute;
-    top: 0;
-    left: 100%;
+    top: -4px;
+    bottom: -4px;
     width: 4px;
-    height: 100%;
     background: #f39c12;
     border-radius: 2px;
+    left: 100%;
     transform: translateX(-50%);
     pointer-events: none;
-    box-shadow: 0 0 5px rgba(0,0,0,0.8);
-    z-index: 2;
-}
-
-.fw-buffered-region {
-    position: absolute;
-    top: 0;
-    height: 100%;
-    background: rgba(46, 204, 113, 0.25);
-    pointer-events: none;
-    border-radius: 4px;
-    z-index: 0;
+    z-index: 3;
+    box-shadow: 0 0 5px rgba(0,0,0,0.5);
 }
 
 .fw-timeline-chunk {
     position: absolute;
-    height: 100%;
-    pointer-events: none; /* Allows clicks to pass through to the timeline */
-    transition: background-color 0.3s ease;
+    top: 0;
+    bottom: 0;
+    border-right: 1px solid rgba(0,0,0,0.3);
+    z-index: 1;
 }

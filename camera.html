@@ -9,28 +9,30 @@
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
 </head>
 <body>
-    <div class="camera-header">
-        <button class="back-btn" onclick="window.location.href='index.html'">◀ Back</button>
-        <span id="cam-title" class="cam-title">CAM</span>
-    </div>
-    
-    <div class="video-container">
-        <video id="fw-video" muted playsinline preload="auto"></video>
-        <div class="no-video-overlay" id="fw-overlay" style="z-index: 10;">
-            <div>No Motion Detected / Stream Offline</div>
-        </div>
-    </div>
-    
-    <div class="fw-controls" id="fw-controls">
-        <button class="ctrl-btn live-btn" id="fw-btn-live" onclick="fwGoLive()">Go Live</button>
-        <div class="fw-time-display" id="fw-time-label">LIVE</div>
-        <div class="fw-timeline-container">
-            <div class="fw-timeline-region" id="fw-timeline-region" title="Sweep across recorded clips">
-                <div class="fw-timeline-indicator" id="fw-timeline-indicator"></div>
-            </div>
-        </div>
-    </div>
+<div class="camera-header">
+    <button class="back-btn" onclick="window.location.href='index.html'">◀ Back</button>
+    <span id="cam-title" class="cam-title">CAM</span>
+</div>
 
-    <script src="camera.js"></script>
+<div class="video-container">
+    <canvas id="snapshot-canvas" class="snapshot-canvas"></canvas>
+    <video id="fw-video" muted playsinline preload="auto"></video>
+
+    <div class="no-video-overlay" id="fw-overlay" style="z-index: 10;">
+        <div>No Motion Detected / Stream Offline</div>
+    </div>
+</div>
+
+<div class="fw-controls" id="fw-controls">
+    <button class="ctrl-btn live-btn" id="fw-btn-live" onclick="fwGoLive()">Go Live</button>
+    <div class="fw-time-display" id="fw-time-label">LIVE</div>
+    <div class="fw-timeline-container">
+        <div class="fw-timeline-region" id="fw-timeline-region" title="Sweep across recorded clips">
+            <div class="fw-timeline-indicator" id="fw-timeline-indicator"></div>
+        </div>
+    </div>
+</div>
+
+<script src="camera.js"></script>
 </body>
 </html>

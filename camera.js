@@ -1,8 +1,6 @@
-// Extract target camera and date from URL
 const urlParams = new URLSearchParams(window.location.search);
 const camId = urlParams.get('cam') || 'cam1';
 const dateParam = urlParams.get('date');
-
 let baseDir = './cameras';
 
 // --- Helper Functions ---
@@ -27,6 +25,7 @@ document.getElementById('cam-title').innerText = camId.toUpperCase();
 document.getElementById('cam-title').style.color = getCameraColor(camId);
 
 const fwVideo = document.getElementById('fw-video');
+const snapshotCanvas = document.getElementById('snapshot-canvas');
 const fwOverlay = document.getElementById('fw-overlay');
 const fwTimelineRegion = document.getElementById('fw-timeline-region');
 const fwIndicator = document.getElementById('fw-timeline-indicator');
@@ -35,37 +34,13 @@ const fwTimeLabel = document.getElementById('fw-time-label');
 let globalManifest = {};
 let fwHlsPlayer = null;
 let fwIsScrubbing = false;
-let lastScrubUpdate = 0;
-let fwPendingSeekTime = null;
+let currentClipUrl = null;
 
-// --- Seamless Transition Snapshot Canvas ---
-let snapshotCanvas = null;
-function getSnapshotCanvas() {
-    if (!snapshotCanvas) {
-        snapshotCanvas = document.createElement('canvas');
-        snapshotCanvas.id = 'fw-snapshot';
-        snapshotCanvas.style.position = 'absolute';
-        snapshotCanvas.style.top = '0';
-        snapshotCanvas.style.left = '0';
-        snapshotCanvas.style.width = '100%';
-        snapshotCanvas.style.height = '100%';
-        snapshotCanvas.style.objectFit = 'contain';
-        snapshotCanvas.style.zIndex = '5';
-        snapshotCanvas.style.pointerEvents = 'none';
-        snapshotCanvas.style.display = 'none';
-        fwVideo.parentElement.appendChild(snapshotCanvas);
-    }
-    return snapshotCanvas;
-}
-
-// Only apply the next time update AFTER the browser has finished painting the current frame
-fwVideo.addEventListener('seeked', () => {
-    if (fwPendingSeekTime !== null) {
-        const timeToSeek = fwPendingSeekTime;
-        fwPendingSeekTime = null;
-        fwVideo.currentTime = timeToSeek;
-    }
-});
+// --- Network Management ---
+let preloadQueue = [];
+let isPreloading = false;
+let abortController = new AbortController();
+let scrubDebounceTimer = null;
 
 function secondsToTimeStr(seconds) {
     const h = Math.floor(seconds / 3600);
@@ -77,80 +52,74 @@ function secondsToTimeStr(seconds) {
 function parseFilenameToSeconds(filename) {
     const match = filename.match(/_(\d{8})_(\d{2})(\d{2})(\d{2})\.mp4/);
     if (!match) return null;
-
     const h = parseInt(match[2], 10);
     const m = parseInt(match[3], 10);
     const s = parseInt(match[4], 10);
     return (h * 3600) + (m * 60) + s;
 }
 
-// --- Manifest Logic ---
+function getDayClips() {
+    const clips = globalManifest[camId] || [];
+    return clips.filter(c => parseFilenameToSeconds(c.filename) !== null)
+        .sort((a,b) => parseFilenameToSeconds(a.filename) - parseFilenameToSeconds(b.filename));
+}
+
+// --- Canvas Snapshot Logic ---
+function snapToCanvas() {
+    if (!fwVideo.videoWidth) return;
+    snapshotCanvas.width = fwVideo.videoWidth;
+    snapshotCanvas.height = fwVideo.videoHeight;
+    const ctx = snapshotCanvas.getContext('2d');
+    ctx.drawImage(fwVideo, 0, 0, snapshotCanvas.width, snapshotCanvas.height);
+    snapshotCanvas.style.display = 'block';
+}
+
+fwVideo.addEventListener('seeked', () => {
+    // If scrubbing, keep updating the canvas to create a smooth visual scrubbing effect
+    if (fwIsScrubbing) snapToCanvas();
+});
+
+fwVideo.addEventListener('canplay', () => {
+    // Once the new clip is actually loaded and ready to show frames, drop the canvas
+    if (!fwIsScrubbing) {
+        snapshotCanvas.style.display = 'none';
+    }
+});
+
+fwVideo.addEventListener('ended', () => {
+    const dayClips = getDayClips();
+    const currentIndex = dayClips.findIndex(c => c.url === currentClipUrl);
+    if (currentIndex >= 0 && currentIndex < dayClips.length - 1) {
+        const nextClip = dayClips[currentIndex + 1];
+        currentClipUrl = nextClip.url;
+        fwVideo.src = nextClip.url;
+        fwVideo.play().catch(e=>{});
+    }
+});
+
+// --- Manifest & Preloading Logic ---
 async function fetchManifest() {
     try {
         const url = `/history?date=${currentDayString}&cam=${camId}`;
-
         const response = await fetch(url, { cache: 'no-store', credentials: 'include' });
         const newManifest = await response.json();
 
         Object.keys(newManifest).forEach(id => {
-            const clips = newManifest[id];
-            clips.sort((a, b) => (parseFilenameToSeconds(a.filename) || 0) - (parseFilenameToSeconds(b.filename) || 0));
+            newManifest[id].sort((a, b) => (parseFilenameToSeconds(a.filename) || 0) - (parseFilenameToSeconds(b.filename) || 0));
         });
         globalManifest = newManifest;
 
-        const dayClips = (globalManifest[camId] || []).filter(c => parseFilenameToSeconds(c.filename) !== null);
-
-        // Draw timeline immediately so the user sees the grey track structure
         drawTimelineChunks();
-
-        // Delay background preloading by 2.5 seconds so HLS can connect without contention
-        setTimeout(() => {
-            startDistributedPreload(dayClips);
-        }, 2500);
-
+        setTimeout(() => startSequentialPreload(), 1500);
     } catch (e) {
         console.log("Could not load history manifest.");
     }
 }
 
-// --- Background Caching Manager ---
-let preloadQueue = [];
-let isPreloading = false;
-
-// Bisection algorithm to generate an evenly distributed sequence of indices
-function getDistributedIndices(length) {
-    if (length <= 0) return [];
-    if (length === 1) return [0];
-
-    const indices = [0, length - 1];
-    const queue = [{start: 0, end: length - 1}];
-
-    while(queue.length > 0) {
-        const {start, end} = queue.shift();
-        if (end - start > 1) {
-            const mid = Math.floor((start + end) / 2);
-            if (!indices.includes(mid)) {
-                indices.push(mid);
-                // Queue up the two new subdivisions (halves -> quarters -> eighths)
-                queue.push({start: start, end: mid});
-                queue.push({start: mid, end: end});
-            }
-        }
-    }
-    return indices;
-}
-
-function startDistributedPreload(clips) {
-    // Only queue clips that aren't already cached
-    const toPreload = clips.filter(c => c.url && !c.isCached);
-    if (toPreload.length === 0) return;
-
-    const distribution = getDistributedIndices(toPreload.length);
-    preloadQueue = distribution.map(i => toPreload[i]);
-
-    if (!isPreloading) {
-        processPreloadQueue();
-    }
+function startSequentialPreload() {
+    const dayClips = getDayClips();
+    preloadQueue = dayClips.filter(c => c.url && !c.isCached);
+    if (!isPreloading) processPreloadQueue();
 }
 
 async function processPreloadQueue() {
@@ -158,41 +127,32 @@ async function processPreloadQueue() {
         isPreloading = false;
         return;
     }
-
     isPreloading = true;
     const clip = preloadQueue.shift();
 
-    // Check again in case native scrubbing cached it while it was waiting in the queue
-    if (!clip.isCached) {
-        try {
-            // Fetch one at a time. The 'priority: low' flag tells modern browsers
-            // to yield this connection if user-initiated media requests occur.
-            const response = await fetch(clip.url, {
-                cache: 'force-cache',
-                priority: 'low'
-            });
-
-            if (response.ok || response.status === 304 || response.status === 206) {
-                clip.isCached = true;
-                drawTimelineChunks();
-            }
-        } catch (e) {
-            console.log(`Failed to pre-cache: ${clip.filename}`);
+    try {
+        // We pass the abort signal so we can kill this request instantly if the user scrubs
+        const response = await fetch(clip.url, {
+            cache: 'force-cache',
+            priority: 'low',
+            signal: abortController.signal
+        });
+        if (response.ok || response.status === 206) {
+            clip.isCached = true;
+            drawTimelineChunks();
         }
+    } catch (e) {
+        // Ignore AbortError, it's intentional
     }
 
-    // 500ms delay to let the browser connection pool breathe
-    setTimeout(processPreloadQueue, 500);
+    // Pause briefly to let the main video breathe, then continue
+    setTimeout(processPreloadQueue, 300);
 }
 
 // --- Timeline Visualizer ---
 function drawTimelineChunks() {
     document.querySelectorAll('.fw-timeline-chunk').forEach(el => el.remove());
-
-    const clips = globalManifest[camId] || [];
-    const dayClips = clips.filter(c => parseFilenameToSeconds(c.filename) !== null)
-        .sort((a,b) => parseFilenameToSeconds(a.filename) - parseFilenameToSeconds(b.filename));
-
+    const dayClips = getDayClips();
     if (dayClips.length === 0) return;
 
     const totalDuration = dayClips.reduce((sum, c) => sum + c.duration, 0);
@@ -213,180 +173,107 @@ function drawTimelineChunks() {
     });
 }
 
-// --- Video Stream Logic ---
+// --- Live Stream Logic ---
 function fwGoLive() {
     fwTimeLabel.innerText = "LIVE";
     fwTimeLabel.style.color = "#4cd137";
     fwIndicator.style.left = '100%';
-
-    if (snapshotCanvas) snapshotCanvas.style.display = 'none';
 
     if (fwHlsPlayer) {
         fwHlsPlayer.destroy();
         fwHlsPlayer = null;
     }
 
+    currentClipUrl = null;
     fwVideo.pause();
     fwVideo.removeAttribute('src');
-    fwVideo.currentTime = 0;
     fwVideo.load();
-
     fwOverlay.style.display = 'none';
-    fwVideo.style.display = 'block';
+    snapshotCanvas.style.display = 'none';
 
     const freshPlaylistUrl = `${baseDir}/${camId}/stream.m3u8?t=${Date.now()}`;
 
     if (Hls.isSupported()) {
-        fwHlsPlayer = new Hls({
-            maxMaxBufferLength: 600,
-            maxBufferLength: 600,
-            maxBufferSize: 150 * 1024 * 1024,
-            liveDurationInfinity: true,
-            backBufferLength: Infinity,
-            liveSyncDurationCount: 3,
-            liveMaxLatencyDurationCount: 10,
-            xhrSetup: function(xhr) { xhr.withCredentials = true; }
-        });
-
+        fwHlsPlayer = new Hls({ xhrSetup: function(xhr) { xhr.withCredentials = true; } });
         fwHlsPlayer.attachMedia(fwVideo);
-
-        fwHlsPlayer.on(Hls.Events.MEDIA_ATTACHED, () => {
-            fwHlsPlayer.loadSource(freshPlaylistUrl);
-        });
-
-        fwHlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => {
-            fwVideo.play().catch(e => console.error("Live play error:", e));
-        });
+        fwHlsPlayer.on(Hls.Events.MEDIA_ATTACHED, () => fwHlsPlayer.loadSource(freshPlaylistUrl));
+        fwHlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => fwVideo.play().catch(e => {}));
     } else if (fwVideo.canPlayType('application/vnd.apple.mpegurl')) {
         fwVideo.src = freshPlaylistUrl;
         fwVideo.play().catch(e => {});
     }
 }
 
-// --- Smart Scrubber Logic ---
+// --- Highly Optimized Scrubber ---
 function updateFwTimelineFromEvent(e) {
     const rect = fwTimelineRegion.getBoundingClientRect();
-    let x = e.clientX - rect.left;
-    x = Math.max(0, Math.min(x, rect.width));
-    const pct = x / rect.width;
+    let x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+    fwIndicator.style.left = `${(x / rect.width) * 100}%`;
 
-    fwIndicator.style.left = `${pct * 100}%`;
-
-    const clips = globalManifest[camId] || [];
-    const dayClips = clips.filter(c => parseFilenameToSeconds(c.filename) !== null)
-        .sort((a,b) => parseFilenameToSeconds(a.filename) - parseFilenameToSeconds(b.filename));
-
-    if (dayClips.length === 0) {
-        fwTimeLabel.innerText = "NO DATA";
-        fwTimeLabel.style.color = "#666";
-        return;
-    }
+    const dayClips = getDayClips();
+    if (dayClips.length === 0) return;
 
     const totalDuration = dayClips.reduce((sum, c) => sum + c.duration, 0);
-    const targetContinuousSeconds = pct * totalDuration;
+    const targetSeconds = (x / rect.width) * totalDuration;
 
     let accum = 0;
     let selectedClip = dayClips[dayClips.length - 1];
     let offsetInClip = selectedClip.duration;
 
     for (let clip of dayClips) {
-        let dur = clip.duration;
-        if (targetContinuousSeconds <= accum + dur) {
+        if (targetSeconds <= accum + clip.duration) {
             selectedClip = clip;
-            offsetInClip = targetContinuousSeconds - accum;
+            offsetInClip = targetSeconds - accum;
             break;
         }
-        accum += dur;
+        accum += clip.duration;
     }
 
-    const realStartSec = parseFilenameToSeconds(selectedClip.filename);
-    const actualDaySec = realStartSec + offsetInClip;
-
-    fwTimeLabel.innerText = secondsToTimeStr(actualDaySec);
+    const actualSec = parseFilenameToSeconds(selectedClip.filename) + offsetInClip;
+    fwTimeLabel.innerText = secondsToTimeStr(actualSec);
     fwTimeLabel.style.color = "#f39c12";
 
     if (fwHlsPlayer) {
         fwHlsPlayer.destroy();
         fwHlsPlayer = null;
-        drawTimelineChunks();
     }
+    fwOverlay.style.display = 'none';
 
-    if (!fwVideo.src.includes(selectedClip.url.replace('./', ''))) {
-        // Capture snapshot to prevent black flash
-        const snap = getSnapshotCanvas();
-        try {
-            // readyState >= 2 ensures we don't draw a blank frame if scrubbing extremely fast
-            if (fwVideo.readyState >= 2 && fwVideo.videoWidth > 0) {
-                snap.width = fwVideo.videoWidth;
-                snap.height = fwVideo.videoHeight;
-                const ctx = snap.getContext('2d');
-                ctx.drawImage(fwVideo, 0, 0, snap.width, snap.height);
-                snap.style.display = 'block';
-            }
-        } catch (err) {
-            snap.style.display = 'none';
-        }
-
-        fwPendingSeekTime = null;
-        fwVideo.src = selectedClip.url;
-        fwVideo.style.display = 'block';
-        fwOverlay.style.display = 'none';
-
-        fwVideo.onloadedmetadata = () => {
-            const safeOffset = Math.min(offsetInClip, selectedClip.duration);
-            fwVideo.currentTime = safeOffset;
-        };
-
-        // --- THE FIX: Rock-solid snapshot removal ---
-        const removeSnapshot = () => {
-            // Double requestAnimationFrame forces the browser to wait until
-            // the new video frame is physically painted to the monitor.
-            requestAnimationFrame(() => {
-                requestAnimationFrame(() => {
-                    snap.style.display = 'none';
-                });
-            });
-            fwVideo.removeEventListener('seeked', removeSnapshot);
-            fwVideo.removeEventListener('playing', removeSnapshot);
-        };
-
-        // Listen for 'seeked' instead of 'timeupdate'
-        fwVideo.addEventListener('seeked', removeSnapshot);
-        fwVideo.addEventListener('playing', removeSnapshot);
-
-        if (!fwIsScrubbing) {
-            fwVideo.play().catch(e=>{});
-        } else {
-            fwVideo.pause();
-        }
+    // Core Logic: Are we staying within the same file or switching?
+    if (currentClipUrl === selectedClip.url) {
+        fwVideo.currentTime = offsetInClip;
     } else {
-        fwVideo.style.display = 'block';
-        fwOverlay.style.display = 'none';
-        const safeOffset = Math.min(offsetInClip, selectedClip.duration);
+        // We are crossing a file boundary.
+        snapToCanvas(); // Freeze current frame
 
-        if (Math.abs(fwVideo.currentTime - safeOffset) > 0.5 || fwIsScrubbing) {
-            if (fwVideo.seeking) {
-                fwPendingSeekTime = safeOffset;
-            } else {
-                fwVideo.currentTime = safeOffset;
-            }
-        }
+        clearTimeout(scrubDebounceTimer);
+        // Wait 100ms before triggering a file load to prevent network thrashing
+        scrubDebounceTimer = setTimeout(() => {
+            currentClipUrl = selectedClip.url;
+            fwVideo.src = selectedClip.url;
+            fwVideo.onloadedmetadata = () => {
+                fwVideo.currentTime = offsetInClip;
+                fwVideo.onloadedmetadata = null;
+            };
+        }, 100);
     }
 }
 
 fwTimelineRegion.addEventListener('pointerdown', (e) => {
     fwIsScrubbing = true;
+
+    // INSTANTLY kill any background caching to free up network bandwidth for scrubbing
+    abortController.abort();
+    abortController = new AbortController();
+
+    fwVideo.pause();
     fwTimelineRegion.setPointerCapture(e.pointerId);
     updateFwTimelineFromEvent(e);
 });
 
 fwTimelineRegion.addEventListener('pointermove', (e) => {
     if (fwIsScrubbing) {
-        const now = Date.now();
-        if (now - lastScrubUpdate > 60) {
-            updateFwTimelineFromEvent(e);
-            lastScrubUpdate = now;
-        }
+        updateFwTimelineFromEvent(e);
     }
 });
 
@@ -394,35 +281,21 @@ fwTimelineRegion.addEventListener('pointerup', (e) => {
     fwIsScrubbing = false;
     fwTimelineRegion.releasePointerCapture(e.pointerId);
 
-    if (snapshotCanvas) snapshotCanvas.style.display = 'none';
-
     if (!fwHlsPlayer && fwVideo.src) {
         fwVideo.play().catch(e=>{});
+
+        // Restart caching operations safely in the background
+        setTimeout(() => startSequentialPreload(), 1500);
     }
 });
 
 // Start up
 document.addEventListener('DOMContentLoaded', async () => {
-    try {
-        const response = await fetch('/basedir', { credentials: 'include' });
-        if (response.ok) {
-            const data = await response.json();
-            baseDir = data.baseDir || './cameras';
-        }
-    } catch (e) {
-        console.error("Failed to load base configuration:", e);
-    }
-
     await fetchManifest();
 
     if (dateParam && dateParam !== getTodayString()) {
-        fwHlsPlayer = null;
         fwTimeLabel.innerText = "LOADING";
-
-        setTimeout(() => {
-            const mockEvent = { clientX: fwTimelineRegion.getBoundingClientRect().left };
-            updateFwTimelineFromEvent(mockEvent);
-        }, 300);
+        setTimeout(() => updateFwTimelineFromEvent({ clientX: 0 }), 300);
     } else {
         fwGoLive();
     }
