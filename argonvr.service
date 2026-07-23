@@ -8,7 +8,7 @@ NotifyAccess=all
 User=root
 WorkingDirectory=/home/dave/argonvr
 # Execute launch.sh directly
-ExecStart=/bin/bash -c '/usr/bin/python3 /home/dave/argonvr/server.py & /usr/bin/python3 /home/dave/argonvr/watchdog.py & wait -n'
+ExecStart=/bin/bash -c '/usr/bin/python3 /home/dave/argonvr/server.py & /usr/bin/python3 /home/dave/argonvr/watchdog.py & /usr/bin/python3 /home/dave/argonvr/argonvr.py & wait -n'
 
 # Automatically restart if the script crashes
 Restart=always
