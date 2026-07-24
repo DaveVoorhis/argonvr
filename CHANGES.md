@@ -24,5 +24,6 @@ This is human-written.
 10. Camera colour now set as an even spectrum of colours going from red (1st camera) to violet (last camera).
 11. Frontend detects connection failure and resets to allow for server reboots, connection outage etc.
 12. Improved rapid-load single-camera timeline scrubbing.
+13. Single camera display now has selectable scale: 1 hour, 2 hour, etc.
 
 ## Features

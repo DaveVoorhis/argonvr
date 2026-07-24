@@ -26,6 +26,17 @@
 <div class="fw-controls" id="fw-controls">
     <button class="ctrl-btn live-btn" id="fw-btn-live" onclick="fwGoLive()">Go Live</button>
     <div class="fw-time-display" id="fw-time-label">LIVE</div>
+
+    <select id="fw-scale-select" class="ctrl-btn ctrl-select" onchange="handleScaleChange()">
+        <option value="1" selected>1 Hour</option>
+        <option value="2">2 Hours</option>
+        <option value="4">4 Hours</option>
+        <option value="6">6 Hours</option>
+        <option value="8">8 Hours</option>
+        <option value="12">12 Hours</option>
+        <option value="all">Full Day</option>
+    </select>
+
     <div class="fw-timeline-container">
         <div class="fw-timeline-region" id="fw-timeline-region" title="Sweep across recorded clips">
             <div class="fw-timeline-indicator" id="fw-timeline-indicator"></div>

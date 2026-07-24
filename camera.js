@@ -61,14 +61,64 @@ function parseFilenameToSeconds(filename) {
 
 function getDayClips() {
     const clips = globalManifest[camId] || [];
-    return clips.filter(c => parseFilenameToSeconds(c.filename) !== null)
+    let parsed = clips.filter(c => parseFilenameToSeconds(c.filename) !== null)
         .sort((a,b) => parseFilenameToSeconds(a.filename) - parseFilenameToSeconds(b.filename));
+
+    const scaleSelect = document.getElementById('fw-scale-select');
+    if (scaleSelect && scaleSelect.value !== 'all' && parsed.length > 0) {
+        const scaleHours = parseInt(scaleSelect.value, 10);
+        const scaleSeconds = scaleHours * 3600;
+
+        // Anchor the window to the end of the latest available clip
+        const lastClip = parsed[parsed.length - 1];
+        const lastClipEnd = parseFilenameToSeconds(lastClip.filename) + (lastClip.duration || 0);
+
+        // Floor it at 0 to strictly prevent bleeding into the previous calendar day
+        const startTime = Math.max(0, lastClipEnd - scaleSeconds);
+
+        parsed = parsed.filter(c => {
+            const clipStart = parseFilenameToSeconds(c.filename);
+            const clipEnd = clipStart + (c.duration || 0);
+            return clipEnd > startTime;
+        });
+    }
+
+    return parsed;
+}
+
+// Timeline scale change handler
+function handleScaleChange() {
+    drawTimelineChunks();
+
+    const dayClips = getDayClips();
+
+    // If we're currently playing a recorded clip, check if it just got filtered out
+    if (currentClipUrl) {
+        const stillExists = dayClips.some(c => c.url === currentClipUrl);
+        if (!stillExists) {
+            if (currentDayString === getTodayString()) {
+                fwGoLive();
+            } else if (dayClips.length > 0) {
+                // If viewing a past day, just jump to the oldest clip in the new window
+                const first = dayClips[0];
+                currentClipUrl = first.url;
+                fwVideo.src = first.url;
+                fwVideo.currentTime = 0;
+                fwVideo.play().catch(e=>{});
+            } else {
+                fwVideo.pause();
+                fwVideo.removeAttribute('src');
+                fwVideo.load();
+            }
+        } else {
+            // Force a timeupdate to recalibrate the orange indicator line visually
+            fwVideo.dispatchEvent(new Event('timeupdate'));
+        }
+    }
 }
 
 // --- Canvas Snapshot Logic ---
 function snapToCanvas() {
-    // Do not take a snapshot if the video element is currently blank/buffering.
-    // readyState >= 2 (HAVE_CURRENT_DATA) ensures we have a valid pixel buffer to paint.
     if (fwVideo.readyState < 2 || !fwVideo.videoWidth) return;
 
     snapshotCanvas.width = fwVideo.videoWidth;
@@ -79,8 +129,6 @@ function snapToCanvas() {
 }
 
 fwVideo.addEventListener('seeked', () => {
-    // PREVENT PREMATURE DROP: If the mouse has moved on to a new file,
-    // keep the canvas up to protect the imminent src change!
     if (targetClipUrl !== currentClipUrl) return;
 
     if (currentClipUrl !== null && targetClipUrl === currentClipUrl) {
@@ -101,7 +149,6 @@ fwVideo.addEventListener('seeked', () => {
     }
 });
 
-// NEW: Drop the canvas once the stream successfully begins playing
 fwVideo.addEventListener('playing', () => {
     if (snapshotCanvas.style.display === 'block') {
         snapshotCanvas.style.display = 'none';
@@ -120,8 +167,6 @@ fwVideo.addEventListener('ended', () => {
 });
 
 fwVideo.addEventListener('timeupdate', () => {
-    // Don't fight the user if they are actively dragging the scrubber,
-    // and ignore this during LIVE mode (where currentClipUrl is null).
     if (fwIsScrubbing || !currentClipUrl) return;
 
     const dayClips = getDayClips();
@@ -130,7 +175,6 @@ fwVideo.addEventListener('timeupdate', () => {
     let accumOffset = 0;
     let playingClip = null;
 
-    // Find the currently playing clip to know our base offset in the timeline
     for (let clip of dayClips) {
         if (clip.url === currentClipUrl) {
             playingClip = clip;
@@ -140,12 +184,10 @@ fwVideo.addEventListener('timeupdate', () => {
     }
 
     if (playingClip) {
-        // 1. Update the clock text
         const absoluteSeconds = parseFilenameToSeconds(playingClip.filename) + fwVideo.currentTime;
         fwTimeLabel.innerText = secondsToTimeStr(absoluteSeconds);
-        fwTimeLabel.style.color = ""; // Revert from the yellow scrubbing color to default CSS
+        fwTimeLabel.style.color = "";
 
-        // 2. Move the indicator line
         const totalDuration = dayClips.reduce((sum, c) => sum + c.duration, 0);
         const progressPercentage = ((accumOffset + fwVideo.currentTime) / totalDuration) * 100;
         fwIndicator.style.left = `${progressPercentage}%`;
@@ -187,7 +229,6 @@ function drawTimelineChunks() {
         chunk.className = 'fw-timeline-chunk';
         chunk.style.left = `${startPct}%`;
         chunk.style.width = `${widthPct}%`;
-        // Use a uniform color since we no longer track manual caching status
         chunk.style.backgroundColor = 'rgba(255, 255, 255, 0.25)';
 
         fwTimelineRegion.insertBefore(chunk, fwIndicator);
@@ -201,17 +242,14 @@ function fwGoLive() {
     fwTimeLabel.style.color = "#4cd137";
     fwIndicator.style.left = '100%';
 
-    // 1. STATE SANITIZATION: Kill any pending scrubber timers that might overwrite the stream
     if (scrubDebounceTimer) {
         clearTimeout(scrubDebounceTimer);
         scrubDebounceTimer = null;
     }
 
-    // 2. STATE SANITIZATION: Nuke lingering metadata callbacks from the scrubber
     fwVideo.onloadedmetadata = null;
     targetClipUrl = null;
 
-    // 3. Snapshot the last known frame before tearing down
     if (snapshotCanvas.style.display !== 'block') {
         snapToCanvas();
     }
@@ -226,13 +264,9 @@ function fwGoLive() {
     fwVideo.removeAttribute('src');
     fwVideo.load();
 
-    // Reset hardware decoder time to prevent offset conflicts with HLS
     try { fwVideo.currentTime = 0; } catch(e){}
 
     fwOverlay.style.display = 'none';
-
-    // Canvas teardown is now handled gracefully by the 'playing' listener
-
     fwVideo.muted = true;
 
     const freshPlaylistUrl = `${baseDir}/${camId}/stream.m3u8?t=${Date.now()}`;
@@ -245,7 +279,6 @@ function fwGoLive() {
         });
 
         fwHlsPlayer.attachMedia(fwVideo);
-
         fwHlsPlayer.on(Hls.Events.MEDIA_ATTACHED, () => fwHlsPlayer.loadSource(freshPlaylistUrl));
         fwHlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => fwVideo.play().catch(e=>{}));
 
@@ -276,12 +309,9 @@ function updateFwTimelineFromEvent(e) {
     let x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
     const scrubFraction = x / rect.width;
 
-    // --- NEW: Snap to LIVE ---
-    // If viewing today's date and scrubbing to the extreme right edge, return to the live stream.
     if (currentDayString === getTodayString() && scrubFraction >= 0.99) {
         fwIndicator.style.left = '100%';
 
-        // Only trigger fwGoLive if we are currently playing a recorded clip
         if (currentClipUrl !== null) {
             if (scrubDebounceTimer) {
                 clearTimeout(scrubDebounceTimer);
@@ -289,10 +319,9 @@ function updateFwTimelineFromEvent(e) {
             }
             fwGoLive();
         }
-        return; // Exit early so we don't try to load a recorded clip
+        return;
     }
 
-    // Normal scrubbing behavior
     fwIndicator.style.left = `${scrubFraction * 100}%`;
 
     const dayClips = getDayClips();
@@ -322,7 +351,6 @@ function updateFwTimelineFromEvent(e) {
     targetClipOffset = offsetInClip;
 
     if (currentClipUrl === selectedClip.url) {
-        // Fast native scrubbing within the same file.
         if (fwVideo.readyState > 1 && !fwVideo.seeking) {
             fwVideo.currentTime = targetClipOffset;
         }
@@ -332,14 +360,10 @@ function updateFwTimelineFromEvent(e) {
             scrubDebounceTimer = null;
         }
     } else {
-        // Crossing a file boundary or leaving LIVE mode.
-
-        // 1. SNAPSHOT FIRST (Before touching the active stream/clip)
         if (snapshotCanvas.style.display !== 'block') {
             snapToCanvas();
         }
 
-        // 2. NOW safely tear down the Live stream if it was active
         if (fwHlsPlayer) {
             fwHlsPlayer.destroy();
             fwHlsPlayer = null;
@@ -353,7 +377,6 @@ function updateFwTimelineFromEvent(e) {
             fwVideo.src = selectedClip.url;
 
             fwVideo.onloadedmetadata = () => {
-                // Only seek if the user hasn't clicked "Go Live" while we were loading!
                 if (currentClipUrl === selectedClip.url) {
                     fwVideo.currentTime = targetClipOffset;
                 }
@@ -388,7 +411,6 @@ fwTimelineRegion.addEventListener('pointerup', (e) => {
     fwIsScrubbing = false;
     fwTimelineRegion.releasePointerCapture(e.pointerId);
 
-    // Only initiate active playback once the scrubber is released
     if (!fwHlsPlayer && fwVideo.src) {
         fwVideo.play().catch(e=>{});
     }
