@@ -5,7 +5,7 @@ const colorParam = urlParams.get('color');
 let baseDir = './cameras';
 
 // --- Tuning Parameters ---
-const SCRUB_THROTTLE_MS = 250;
+const SCRUB_THROTTLE_MS = 50;
 
 // --- Helper Functions ---
 function getTodayString() {
