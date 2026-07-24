@@ -79,24 +79,19 @@ function snapToCanvas() {
 }
 
 fwVideo.addEventListener('seeked', () => {
-    // Asynchronous catch-up: If the mouse kept moving while the hardware decoder was seeking,
-    // we execute the final seek now. This prevents spamming the decoder and flashing black.
-    if (targetClipUrl === currentClipUrl) {
+    if (currentClipUrl !== null && targetClipUrl === currentClipUrl) {
         if (Math.abs(fwVideo.currentTime - targetClipOffset) > 0.1) {
             fwVideo.currentTime = targetClipOffset;
-            return; // Exit early. Do not drop the canvas yet, we are seeking again!
+            return;
         }
     }
 
-    // When the final seek completes and aligns with the mouse, drop the canvas
-    // ONLY when the new frame is successfully painted to the screen by the GPU.
     if (snapshotCanvas.style.display === 'block') {
         if ('requestVideoFrameCallback' in fwVideo) {
             fwVideo.requestVideoFrameCallback(() => {
                 snapshotCanvas.style.display = 'none';
             });
         } else {
-            // Fallback for older browsers
             setTimeout(() => { snapshotCanvas.style.display = 'none'; }, 30);
         }
     }
@@ -195,6 +190,16 @@ function fwGoLive() {
     fwTimeLabel.style.color = "#4cd137";
     fwIndicator.style.left = '100%';
 
+    // 1. STATE SANITIZATION: Kill any pending scrubber timers that might overwrite the stream
+    if (scrubDebounceTimer) {
+        clearTimeout(scrubDebounceTimer);
+        scrubDebounceTimer = null;
+    }
+
+    // 2. STATE SANITIZATION: Nuke lingering metadata callbacks from the scrubber
+    fwVideo.onloadedmetadata = null;
+    targetClipUrl = null;
+
     if (fwHlsPlayer) {
         fwHlsPlayer.destroy();
         fwHlsPlayer = null;
@@ -204,19 +209,46 @@ function fwGoLive() {
     fwVideo.pause();
     fwVideo.removeAttribute('src');
     fwVideo.load();
+
+    // Reset hardware decoder time to prevent offset conflicts with HLS
+    try { fwVideo.currentTime = 0; } catch(e){}
+
     fwOverlay.style.display = 'none';
     snapshotCanvas.style.display = 'none';
+    fwVideo.muted = true;
 
     const freshPlaylistUrl = `${baseDir}/${camId}/stream.m3u8?t=${Date.now()}`;
 
     if (typeof Hls !== 'undefined' && Hls.isSupported()) {
-        fwHlsPlayer = new Hls({ xhrSetup: function(xhr) { xhr.withCredentials = true; } });
+        fwHlsPlayer = new Hls({
+            xhrSetup: function(xhr) { xhr.withCredentials = true; },
+            liveSyncDurationCount: 3,
+            liveMaxLatencyDurationCount: 10
+        });
+
         fwHlsPlayer.attachMedia(fwVideo);
+
         fwHlsPlayer.on(Hls.Events.MEDIA_ATTACHED, () => fwHlsPlayer.loadSource(freshPlaylistUrl));
-        fwHlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => fwVideo.play().catch(e => {}));
+        fwHlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => fwVideo.play().catch(e=>{}));
+
+        fwHlsPlayer.on(Hls.Events.ERROR, (event, data) => {
+            if (data.fatal) {
+                switch (data.type) {
+                    case Hls.ErrorTypes.NETWORK_ERROR:
+                        fwHlsPlayer.startLoad();
+                        break;
+                    case Hls.ErrorTypes.MEDIA_ERROR:
+                        fwHlsPlayer.recoverMediaError();
+                        break;
+                    default:
+                        fwHlsPlayer.destroy();
+                        break;
+                }
+            }
+        });
     } else if (fwVideo.canPlayType('application/vnd.apple.mpegurl')) {
         fwVideo.src = freshPlaylistUrl;
-        fwVideo.play().catch(e => {});
+        fwVideo.play().catch(e=>{});
     }
 }
 
@@ -224,13 +256,32 @@ function fwGoLive() {
 function updateFwTimelineFromEvent(e) {
     const rect = fwTimelineRegion.getBoundingClientRect();
     let x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
-    fwIndicator.style.left = `${(x / rect.width) * 100}%`;
+    const scrubFraction = x / rect.width;
+
+    // --- NEW: Snap to LIVE ---
+    // If viewing today's date and scrubbing to the extreme right edge, return to the live stream.
+    if (currentDayString === getTodayString() && scrubFraction >= 0.99) {
+        fwIndicator.style.left = '100%';
+
+        // Only trigger fwGoLive if we are currently playing a recorded clip
+        if (currentClipUrl !== null) {
+            if (scrubDebounceTimer) {
+                clearTimeout(scrubDebounceTimer);
+                scrubDebounceTimer = null;
+            }
+            fwGoLive();
+        }
+        return; // Exit early so we don't try to load a recorded clip
+    }
+
+    // Normal scrubbing behavior
+    fwIndicator.style.left = `${scrubFraction * 100}%`;
 
     const dayClips = getDayClips();
     if (dayClips.length === 0) return;
 
     const totalDuration = dayClips.reduce((sum, c) => sum + c.duration, 0);
-    const targetSeconds = (x / rect.width) * totalDuration;
+    const targetSeconds = scrubFraction * totalDuration;
 
     let accum = 0;
     let selectedClip = dayClips[dayClips.length - 1];
@@ -260,7 +311,6 @@ function updateFwTimelineFromEvent(e) {
 
     if (currentClipUrl === selectedClip.url) {
         // Fast native scrubbing within the same file.
-        // Guard against InvalidStateError and NEVER interrupt an active seek!
         if (fwVideo.readyState > 1 && !fwVideo.seeking) {
             fwVideo.currentTime = targetClipOffset;
         }
@@ -282,7 +332,10 @@ function updateFwTimelineFromEvent(e) {
             fwVideo.src = selectedClip.url;
 
             fwVideo.onloadedmetadata = () => {
-                fwVideo.currentTime = targetClipOffset;
+                // Only seek if the user hasn't clicked "Go Live" while we were loading!
+                if (currentClipUrl === selectedClip.url) {
+                    fwVideo.currentTime = targetClipOffset;
+                }
             };
         };
 
