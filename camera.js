@@ -113,6 +113,39 @@ fwVideo.addEventListener('ended', () => {
     }
 });
 
+fwVideo.addEventListener('timeupdate', () => {
+    // Don't fight the user if they are actively dragging the scrubber,
+    // and ignore this during LIVE mode (where currentClipUrl is null).
+    if (fwIsScrubbing || !currentClipUrl) return;
+
+    const dayClips = getDayClips();
+    if (dayClips.length === 0) return;
+
+    let accumOffset = 0;
+    let playingClip = null;
+
+    // Find the currently playing clip to know our base offset in the timeline
+    for (let clip of dayClips) {
+        if (clip.url === currentClipUrl) {
+            playingClip = clip;
+            break;
+        }
+        accumOffset += clip.duration;
+    }
+
+    if (playingClip) {
+        // 1. Update the clock text
+        const absoluteSeconds = parseFilenameToSeconds(playingClip.filename) + fwVideo.currentTime;
+        fwTimeLabel.innerText = secondsToTimeStr(absoluteSeconds);
+        fwTimeLabel.style.color = ""; // Revert from the yellow scrubbing color to default CSS
+
+        // 2. Move the indicator line
+        const totalDuration = dayClips.reduce((sum, c) => sum + c.duration, 0);
+        const progressPercentage = ((accumOffset + fwVideo.currentTime) / totalDuration) * 100;
+        fwIndicator.style.left = `${progressPercentage}%`;
+    }
+});
+
 // --- Manifest Logic ---
 async function fetchManifest() {
     try {
