@@ -41,6 +41,7 @@ let isPreloading = false;
 let abortController = new AbortController();
 let scrubDebounceTimer = null;
 let scrubMoveQueueTimer = null;
+let lastSrcChangeTime = 0; // Tracks the last time we switched video sources
 
 function secondsToTimeStr(seconds) {
     const h = Math.floor(seconds / 3600);
@@ -324,20 +325,38 @@ function updateFwTimelineFromEvent(e) {
     // Core Logic: Are we staying within the same file or switching?
     if (currentClipUrl === selectedClip.url) {
         fwVideo.currentTime = offsetInClip;
+
+        // If we moved back into the currently loaded file, cancel any pending cross-file switches
+        if (scrubDebounceTimer) {
+            clearTimeout(scrubDebounceTimer);
+            scrubDebounceTimer = null;
+        }
     } else {
         // We are crossing a file boundary.
         snapToCanvas(); // Freeze current frame
 
-        clearTimeout(scrubDebounceTimer);
-        // Wait 100ms before triggering a file load to prevent network thrashing
-        scrubDebounceTimer = setTimeout(() => {
+        const loadNewClip = () => {
+            scrubDebounceTimer = null;
+            lastSrcChangeTime = Date.now();
             currentClipUrl = selectedClip.url;
             fwVideo.src = selectedClip.url;
             fwVideo.onloadedmetadata = () => {
                 fwVideo.currentTime = offsetInClip;
                 fwVideo.onloadedmetadata = null;
             };
-        }, 100);
+        };
+
+        const now = Date.now();
+        if (now - lastSrcChangeTime > 100) {
+            // Throttle window is open: Execute the file switch immediately
+            clearTimeout(scrubDebounceTimer);
+            loadNewClip();
+        } else {
+            // Throttle window is closed: Queue it up for the trailing edge.
+            // Clearing existing timers guarantees we only load the very last clip you stopped on.
+            clearTimeout(scrubDebounceTimer);
+            scrubDebounceTimer = setTimeout(loadNewClip, 100 - (now - lastSrcChangeTime));
+        }
     }
 }
 
