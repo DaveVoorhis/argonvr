@@ -39,12 +39,8 @@ let currentClipUrl = null;
 let targetClipUrl = null;
 let targetClipOffset = 0;
 
-// --- Network Management ---
-let preloadQueue = [];
-let isPreloading = false;
-let abortController = new AbortController();
+// --- Network & Debounce Management ---
 let scrubDebounceTimer = null;
-let scrubMoveQueueTimer = null;
 let lastSrcChangeTime = 0;
 
 function secondsToTimeStr(seconds) {
@@ -71,7 +67,7 @@ function getDayClips() {
 
 // --- Canvas Snapshot Logic ---
 function snapToCanvas() {
-    // CRITICAL FIX: Do not take a snapshot if the video element is currently blank/buffering.
+    // Do not take a snapshot if the video element is currently blank/buffering.
     // readyState >= 2 (HAVE_CURRENT_DATA) ensures we have a valid pixel buffer to paint.
     if (fwVideo.readyState < 2 || !fwVideo.videoWidth) return;
 
@@ -114,12 +110,10 @@ fwVideo.addEventListener('ended', () => {
         currentClipUrl = nextClip.url;
         fwVideo.src = nextClip.url;
         fwVideo.play().catch(e=>{});
-
-        recenterPreload();
     }
 });
 
-// --- Manifest & Preloading Logic ---
+// --- Manifest Logic ---
 async function fetchManifest() {
     try {
         const url = `/history?date=${currentDayString}&cam=${camId}`;
@@ -128,119 +122,13 @@ async function fetchManifest() {
 
         Object.keys(newManifest).forEach(id => {
             newManifest[id].sort((a, b) => (parseFilenameToSeconds(a.filename) || 0) - (parseFilenameToSeconds(b.filename) || 0));
-
-            if (globalManifest[id]) {
-                const oldClipMap = new Map(globalManifest[id].map(c => [c.url, c.isCached]));
-                newManifest[id].forEach(c => {
-                    if (oldClipMap.get(c.url)) {
-                        c.isCached = true;
-                    }
-                });
-            }
         });
         globalManifest = newManifest;
 
         drawTimelineChunks();
-        setTimeout(() => startSequentialPreload(), 1500);
     } catch (e) {
         console.log("Could not load history manifest.");
     }
-}
-
-function getCurrentClipIndex(dayClips) {
-    if (dayClips.length === 0) return 0;
-
-    const indicatorLeft = fwIndicator.style.left;
-    let pct = null;
-
-    if (indicatorLeft && indicatorLeft.includes('%')) {
-        pct = parseFloat(indicatorLeft) / 100;
-    } else if (currentClipUrl) {
-        const idx = dayClips.findIndex(c => c.url === currentClipUrl);
-        if (idx !== -1) return idx;
-    }
-
-    if (pct === null) return 0;
-
-    const totalDuration = dayClips.reduce((sum, c) => sum + c.duration, 0);
-    const targetSeconds = pct * totalDuration;
-
-    let accum = 0;
-    for (let i = 0; i < dayClips.length; i++) {
-        const clip = dayClips[i];
-        if (targetSeconds <= accum + clip.duration) {
-            return i;
-        }
-        accum += clip.duration;
-    }
-    return dayClips.length - 1;
-}
-
-function startSequentialPreload() {
-    const dayClips = getDayClips();
-    if (dayClips.length === 0) return;
-
-    const centerIdx = getCurrentClipIndex(dayClips);
-    const orderedIndices = [];
-    const maxLen = dayClips.length;
-
-    orderedIndices.push(centerIdx);
-    let offset = 1;
-
-    while (orderedIndices.length < maxLen) {
-        const right = centerIdx + offset;
-        const left = centerIdx - offset;
-
-        if (right < maxLen) {
-            orderedIndices.push(right);
-        }
-        if (left >= 0) {
-            orderedIndices.push(left);
-        }
-        offset++;
-    }
-
-    preloadQueue = orderedIndices
-        .map(i => dayClips[i])
-        .filter(c => c && c.url && !c.isCached);
-
-    if (!isPreloading) processPreloadQueue();
-}
-
-function recenterPreload() {
-    abortController.abort();
-    abortController = new AbortController();
-    startSequentialPreload();
-}
-
-async function processPreloadQueue() {
-    if (preloadQueue.length === 0) {
-        isPreloading = false;
-        return;
-    }
-    isPreloading = true;
-    const clip = preloadQueue.shift();
-
-    if (clip.isCached) {
-        processPreloadQueue();
-        return;
-    }
-
-    try {
-        const response = await fetch(clip.url, {
-            cache: 'force-cache',
-            priority: 'low',
-            signal: abortController.signal
-        });
-        if (response.ok || response.status === 206) {
-            clip.isCached = true;
-            drawTimelineChunks();
-        }
-    } catch (e) {
-        // Ignore intentional AbortError
-    }
-
-    setTimeout(processPreloadQueue, 300);
 }
 
 // --- Timeline Visualizer ---
@@ -260,7 +148,8 @@ function drawTimelineChunks() {
         chunk.className = 'fw-timeline-chunk';
         chunk.style.left = `${startPct}%`;
         chunk.style.width = `${widthPct}%`;
-        chunk.style.backgroundColor = clip.isCached ? 'rgba(46, 204, 113, 0.6)' : 'rgba(255, 255, 255, 0.15)';
+        // Use a uniform color since we no longer track manual caching status
+        chunk.style.backgroundColor = 'rgba(255, 255, 255, 0.25)';
 
         fwTimelineRegion.insertBefore(chunk, fwIndicator);
         accum += clip.duration;
@@ -287,7 +176,7 @@ function fwGoLive() {
 
     const freshPlaylistUrl = `${baseDir}/${camId}/stream.m3u8?t=${Date.now()}`;
 
-    if (Hls.isSupported()) {
+    if (typeof Hls !== 'undefined' && Hls.isSupported()) {
         fwHlsPlayer = new Hls({ xhrSetup: function(xhr) { xhr.withCredentials = true; } });
         fwHlsPlayer.attachMedia(fwVideo);
         fwHlsPlayer.on(Hls.Events.MEDIA_ATTACHED, () => fwHlsPlayer.loadSource(freshPlaylistUrl));
@@ -380,19 +269,11 @@ fwTimelineRegion.addEventListener('pointerdown', (e) => {
     fwVideo.pause();
     fwTimelineRegion.setPointerCapture(e.pointerId);
     updateFwTimelineFromEvent(e);
-    recenterPreload();
 });
 
 fwTimelineRegion.addEventListener('pointermove', (e) => {
     if (fwIsScrubbing) {
         updateFwTimelineFromEvent(e);
-
-        if (!scrubMoveQueueTimer) {
-            scrubMoveQueueTimer = setTimeout(() => {
-                recenterPreload();
-                scrubMoveQueueTimer = null;
-            }, 200);
-        }
     }
 });
 
@@ -400,12 +281,7 @@ fwTimelineRegion.addEventListener('pointerup', (e) => {
     fwIsScrubbing = false;
     fwTimelineRegion.releasePointerCapture(e.pointerId);
 
-    if (scrubMoveQueueTimer) {
-        clearTimeout(scrubMoveQueueTimer);
-        scrubMoveQueueTimer = null;
-    }
-    recenterPreload();
-
+    // Only initiate active playback once the scrubber is released
     if (!fwHlsPlayer && fwVideo.src) {
         fwVideo.play().catch(e=>{});
     }
