@@ -4,6 +4,9 @@ const dateParam = urlParams.get('date');
 const colorParam = urlParams.get('color');
 let baseDir = './cameras';
 
+// --- Tuning Parameters ---
+const SCRUB_THROTTLE_MS = 250;
+
 // --- Helper Functions ---
 function getTodayString() {
     const now = new Date();
@@ -382,9 +385,9 @@ function updateFwTimelineFromEvent(e, forceVideoUpdate = false) {
     fwTimeLabel.innerText = secondsToTimeStr(target.actualSec);
     fwTimeLabel.style.color = "#f39c12";
 
-    // Throttled Video Frame Sampling (~100ms) or Forced on PointerUp
+    // Throttled Video Frame Sampling using the configurable variable or Forced on PointerUp
     const now = Date.now();
-    if (forceVideoUpdate || (now - lastScrubTime > 100)) {
+    if (forceVideoUpdate || (now - lastScrubTime > SCRUB_THROTTLE_MS)) {
         lastScrubTime = now;
         applyVideoScrub(target.selectedClip, target.offsetInClip);
     }
