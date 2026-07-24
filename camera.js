@@ -79,6 +79,10 @@ function snapToCanvas() {
 }
 
 fwVideo.addEventListener('seeked', () => {
+    // PREVENT PREMATURE DROP: If the mouse has moved on to a new file,
+    // keep the canvas up to protect the imminent src change!
+    if (targetClipUrl !== currentClipUrl) return;
+
     if (currentClipUrl !== null && targetClipUrl === currentClipUrl) {
         if (Math.abs(fwVideo.currentTime - targetClipOffset) > 0.1) {
             fwVideo.currentTime = targetClipOffset;
@@ -94,6 +98,13 @@ fwVideo.addEventListener('seeked', () => {
         } else {
             setTimeout(() => { snapshotCanvas.style.display = 'none'; }, 30);
         }
+    }
+});
+
+// NEW: Drop the canvas once the stream successfully begins playing
+fwVideo.addEventListener('playing', () => {
+    if (snapshotCanvas.style.display === 'block') {
+        snapshotCanvas.style.display = 'none';
     }
 });
 
@@ -200,6 +211,11 @@ function fwGoLive() {
     fwVideo.onloadedmetadata = null;
     targetClipUrl = null;
 
+    // 3. Snapshot the last known frame before tearing down
+    if (snapshotCanvas.style.display !== 'block') {
+        snapToCanvas();
+    }
+
     if (fwHlsPlayer) {
         fwHlsPlayer.destroy();
         fwHlsPlayer = null;
@@ -214,7 +230,9 @@ function fwGoLive() {
     try { fwVideo.currentTime = 0; } catch(e){}
 
     fwOverlay.style.display = 'none';
-    snapshotCanvas.style.display = 'none';
+
+    // Canvas teardown is now handled gracefully by the 'playing' listener
+
     fwVideo.muted = true;
 
     const freshPlaylistUrl = `${baseDir}/${camId}/stream.m3u8?t=${Date.now()}`;
@@ -300,12 +318,6 @@ function updateFwTimelineFromEvent(e) {
     fwTimeLabel.innerText = secondsToTimeStr(actualSec);
     fwTimeLabel.style.color = "#f39c12";
 
-    if (fwHlsPlayer) {
-        fwHlsPlayer.destroy();
-        fwHlsPlayer = null;
-        fwOverlay.style.display = 'none';
-    }
-
     targetClipUrl = selectedClip.url;
     targetClipOffset = offsetInClip;
 
@@ -320,9 +332,18 @@ function updateFwTimelineFromEvent(e) {
             scrubDebounceTimer = null;
         }
     } else {
-        // Crossing a file boundary.
+        // Crossing a file boundary or leaving LIVE mode.
+
+        // 1. SNAPSHOT FIRST (Before touching the active stream/clip)
         if (snapshotCanvas.style.display !== 'block') {
             snapToCanvas();
+        }
+
+        // 2. NOW safely tear down the Live stream if it was active
+        if (fwHlsPlayer) {
+            fwHlsPlayer.destroy();
+            fwHlsPlayer = null;
+            fwOverlay.style.display = 'none';
         }
 
         const executeSrcChange = () => {
