@@ -39,7 +39,8 @@ let currentClipUrl = null;
 let targetClipUrl = null;
 let targetClipOffset = 0;
 
-// --- Network & Debounce Management ---
+// --- Network & Throttle Management ---
+let lastScrubTime = 0;
 let scrubDebounceTimer = null;
 let lastSrcChangeTime = 0;
 
@@ -303,29 +304,14 @@ function fwGoLive() {
     }
 }
 
-// --- Highly Optimized Scrubber ---
-function updateFwTimelineFromEvent(e) {
+// --- Highly Optimized Throttled Scrubber ---
+function calculateScrubTarget(e) {
     const rect = fwTimelineRegion.getBoundingClientRect();
     let x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
     const scrubFraction = x / rect.width;
 
-    if (currentDayString === getTodayString() && scrubFraction >= 0.99) {
-        fwIndicator.style.left = '100%';
-
-        if (currentClipUrl !== null) {
-            if (scrubDebounceTimer) {
-                clearTimeout(scrubDebounceTimer);
-                scrubDebounceTimer = null;
-            }
-            fwGoLive();
-        }
-        return;
-    }
-
-    fwIndicator.style.left = `${scrubFraction * 100}%`;
-
     const dayClips = getDayClips();
-    if (dayClips.length === 0) return;
+    if (dayClips.length === 0) return null;
 
     const totalDuration = dayClips.reduce((sum, c) => sum + c.duration, 0);
     const targetSeconds = scrubFraction * totalDuration;
@@ -343,21 +329,21 @@ function updateFwTimelineFromEvent(e) {
         accum += clip.duration;
     }
 
-    const actualSec = parseFilenameToSeconds(selectedClip.filename) + offsetInClip;
-    fwTimeLabel.innerText = secondsToTimeStr(actualSec);
-    fwTimeLabel.style.color = "#f39c12";
+    return {
+        scrubFraction,
+        selectedClip,
+        offsetInClip,
+        actualSec: parseFilenameToSeconds(selectedClip.filename) + offsetInClip
+    };
+}
 
+function applyVideoScrub(selectedClip, offsetInClip) {
     targetClipUrl = selectedClip.url;
     targetClipOffset = offsetInClip;
 
     if (currentClipUrl === selectedClip.url) {
         if (fwVideo.readyState > 1 && !fwVideo.seeking) {
             fwVideo.currentTime = targetClipOffset;
-        }
-
-        if (scrubDebounceTimer) {
-            clearTimeout(scrubDebounceTimer);
-            scrubDebounceTimer = null;
         }
     } else {
         if (snapshotCanvas.style.display !== 'block') {
@@ -370,27 +356,37 @@ function updateFwTimelineFromEvent(e) {
             fwOverlay.style.display = 'none';
         }
 
-        const executeSrcChange = () => {
-            scrubDebounceTimer = null;
-            lastSrcChangeTime = Date.now();
-            currentClipUrl = selectedClip.url;
-            fwVideo.src = selectedClip.url;
-
-            fwVideo.onloadedmetadata = () => {
-                if (currentClipUrl === selectedClip.url) {
-                    fwVideo.currentTime = targetClipOffset;
-                }
-            };
+        currentClipUrl = selectedClip.url;
+        fwVideo.src = selectedClip.url;
+        fwVideo.onloadedmetadata = () => {
+            if (currentClipUrl === selectedClip.url) {
+                fwVideo.currentTime = targetClipOffset;
+            }
         };
+    }
+}
 
-        const now = Date.now();
-        if (now - lastSrcChangeTime > 150) {
-            clearTimeout(scrubDebounceTimer);
-            executeSrcChange();
-        } else {
-            clearTimeout(scrubDebounceTimer);
-            scrubDebounceTimer = setTimeout(executeSrcChange, 150 - (now - lastSrcChangeTime));
-        }
+function updateFwTimelineFromEvent(e, forceVideoUpdate = false) {
+    const target = calculateScrubTarget(e);
+    if (!target) return;
+
+    // Instant UI Feedback
+    if (currentDayString === getTodayString() && target.scrubFraction >= 0.99) {
+        fwIndicator.style.left = '100%';
+        fwTimeLabel.innerText = "LIVE";
+        fwTimeLabel.style.color = "#4cd137";
+        return;
+    }
+
+    fwIndicator.style.left = `${target.scrubFraction * 100}%`;
+    fwTimeLabel.innerText = secondsToTimeStr(target.actualSec);
+    fwTimeLabel.style.color = "#f39c12";
+
+    // Throttled Video Frame Sampling (~100ms) or Forced on PointerUp
+    const now = Date.now();
+    if (forceVideoUpdate || (now - lastScrubTime > 100)) {
+        lastScrubTime = now;
+        applyVideoScrub(target.selectedClip, target.offsetInClip);
     }
 }
 
@@ -398,12 +394,17 @@ fwTimelineRegion.addEventListener('pointerdown', (e) => {
     fwIsScrubbing = true;
     fwVideo.pause();
     fwTimelineRegion.setPointerCapture(e.pointerId);
-    updateFwTimelineFromEvent(e);
+
+    if (snapshotCanvas.style.display !== 'block') {
+        snapToCanvas();
+    }
+
+    updateFwTimelineFromEvent(e, true);
 });
 
 fwTimelineRegion.addEventListener('pointermove', (e) => {
     if (fwIsScrubbing) {
-        updateFwTimelineFromEvent(e);
+        updateFwTimelineFromEvent(e, false);
     }
 });
 
@@ -411,8 +412,27 @@ fwTimelineRegion.addEventListener('pointerup', (e) => {
     fwIsScrubbing = false;
     fwTimelineRegion.releasePointerCapture(e.pointerId);
 
+    if (scrubDebounceTimer) {
+        clearTimeout(scrubDebounceTimer);
+        scrubDebounceTimer = null;
+    }
+
+    // Force final target frame load immediately upon release
+    updateFwTimelineFromEvent(e, true);
+
+    // Check if scrubbed to LIVE region
+    const rect = fwTimelineRegion.getBoundingClientRect();
+    const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+    if (currentDayString === getTodayString() && (x / rect.width) >= 0.99) {
+        fwGoLive();
+        return;
+    }
+
+    // Resume playback on the selected clip
     if (!fwHlsPlayer && fwVideo.src) {
-        fwVideo.play().catch(e=>{});
+        setTimeout(() => {
+            fwVideo.play().catch(e => {});
+        }, 50);
     }
 });
 
@@ -422,7 +442,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     if (dateParam && dateParam !== getTodayString()) {
         fwTimeLabel.innerText = "LOADING";
-        setTimeout(() => updateFwTimelineFromEvent({ clientX: 0 }), 300);
+        setTimeout(() => updateFwTimelineFromEvent({ clientX: 0 }, true), 300);
     } else {
         fwGoLive();
     }
