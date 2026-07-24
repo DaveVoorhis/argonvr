@@ -34,6 +34,7 @@ let globalManifest = {};
 let fwHlsPlayer = null;
 let fwIsScrubbing = false;
 let currentClipUrl = null;
+let targetClipOffset = 0; // Tracks precise mouse intent for delayed loads
 
 // --- Network Management ---
 let preloadQueue = [];
@@ -41,7 +42,7 @@ let isPreloading = false;
 let abortController = new AbortController();
 let scrubDebounceTimer = null;
 let scrubMoveQueueTimer = null;
-let lastSrcChangeTime = 0; // Tracks the last time we switched video sources
+let lastSrcChangeTime = 0;
 
 function secondsToTimeStr(seconds) {
     const h = Math.floor(seconds / 3600);
@@ -76,14 +77,17 @@ function snapToCanvas() {
 }
 
 fwVideo.addEventListener('seeked', () => {
-    // If scrubbing, keep updating the canvas to create a smooth visual scrubbing effect
-    if (fwIsScrubbing) snapToCanvas();
-});
-
-fwVideo.addEventListener('canplay', () => {
-    // Once the new clip is actually loaded and ready to show frames, drop the canvas
-    if (!fwIsScrubbing) {
-        snapshotCanvas.style.display = 'none';
+    // When a seek completes across a file boundary, drop the canvas ONLY
+    // when the new frame is successfully painted to the screen.
+    if (snapshotCanvas.style.display === 'block') {
+        if ('requestVideoFrameCallback' in fwVideo) {
+            fwVideo.requestVideoFrameCallback(() => {
+                snapshotCanvas.style.display = 'none';
+            });
+        } else {
+            // Fallback for non-compliant browsers
+            setTimeout(() => { snapshotCanvas.style.display = 'none'; }, 30);
+        }
     }
 });
 
@@ -96,7 +100,6 @@ fwVideo.addEventListener('ended', () => {
         fwVideo.src = nextClip.url;
         fwVideo.play().catch(e=>{});
 
-        // Re-center preloading around the newly playing clip
         recenterPreload();
     }
 });
@@ -111,7 +114,6 @@ async function fetchManifest() {
         Object.keys(newManifest).forEach(id => {
             newManifest[id].sort((a, b) => (parseFilenameToSeconds(a.filename) || 0) - (parseFilenameToSeconds(b.filename) || 0));
 
-            // Preserve existing cached states across manifest updates
             if (globalManifest[id]) {
                 const oldClipMap = new Map(globalManifest[id].map(c => [c.url, c.isCached]));
                 newManifest[id].forEach(c => {
@@ -133,7 +135,6 @@ async function fetchManifest() {
 function getCurrentClipIndex(dayClips) {
     if (dayClips.length === 0) return 0;
 
-    // Prioritize scrubber visual indicator position if available
     const indicatorLeft = fwIndicator.style.left;
     let pct = null;
 
@@ -168,7 +169,6 @@ function startSequentialPreload() {
     const orderedIndices = [];
     const maxLen = dayClips.length;
 
-    // Add center first, then radiate outward (right, left, right, left...)
     orderedIndices.push(centerIdx);
     let offset = 1;
 
@@ -185,8 +185,6 @@ function startSequentialPreload() {
         offset++;
     }
 
-    // Filter out already cached clips so we don't re-download them,
-    // but keep existing cached clips intact on the timeline.
     preloadQueue = orderedIndices
         .map(i => dayClips[i])
         .filter(c => c && c.url && !c.isCached);
@@ -208,7 +206,6 @@ async function processPreloadQueue() {
     isPreloading = true;
     const clip = preloadQueue.shift();
 
-    // Skip if already cached in the meantime
     if (clip.isCached) {
         processPreloadQueue();
         return;
@@ -225,10 +222,9 @@ async function processPreloadQueue() {
             drawTimelineChunks();
         }
     } catch (e) {
-        // Ignore AbortError, it's intentional when shifting focus
+        // Ignore intentional AbortError
     }
 
-    // Pause briefly to let the main video breathe, then continue
     setTimeout(processPreloadQueue, 300);
 }
 
@@ -319,43 +315,49 @@ function updateFwTimelineFromEvent(e) {
     if (fwHlsPlayer) {
         fwHlsPlayer.destroy();
         fwHlsPlayer = null;
+        fwOverlay.style.display = 'none';
     }
-    fwOverlay.style.display = 'none';
 
-    // Core Logic: Are we staying within the same file or switching?
+    // Store exact desired offset globally so delayed loads can use the freshest value
+    targetClipOffset = offsetInClip;
+
     if (currentClipUrl === selectedClip.url) {
-        fwVideo.currentTime = offsetInClip;
+        // Fast native scrubbing within the same file.
+        // Guard against InvalidStateError if dragging very fast during a src swap
+        if (fwVideo.readyState > 0) {
+            fwVideo.currentTime = targetClipOffset;
+        }
 
-        // If we moved back into the currently loaded file, cancel any pending cross-file switches
         if (scrubDebounceTimer) {
             clearTimeout(scrubDebounceTimer);
             scrubDebounceTimer = null;
         }
     } else {
-        // We are crossing a file boundary.
-        snapToCanvas(); // Freeze current frame
+        // Crossing a file boundary.
+        // ONLY snap to canvas if it's hidden. If it's already visible, we are bridging
+        // multiple files in rapid succession and shouldn't overwrite our good snapshot with black space.
+        if (snapshotCanvas.style.display !== 'block') {
+            snapToCanvas();
+        }
 
-        const loadNewClip = () => {
+        const executeSrcChange = () => {
             scrubDebounceTimer = null;
             lastSrcChangeTime = Date.now();
             currentClipUrl = selectedClip.url;
             fwVideo.src = selectedClip.url;
+
             fwVideo.onloadedmetadata = () => {
-                fwVideo.currentTime = offsetInClip;
-                fwVideo.onloadedmetadata = null;
+                fwVideo.currentTime = targetClipOffset; // Uses the updated dynamic position
             };
         };
 
         const now = Date.now();
-        if (now - lastSrcChangeTime > 100) {
-            // Throttle window is open: Execute the file switch immediately
+        if (now - lastSrcChangeTime > 150) {
             clearTimeout(scrubDebounceTimer);
-            loadNewClip();
+            executeSrcChange();
         } else {
-            // Throttle window is closed: Queue it up for the trailing edge.
-            // Clearing existing timers guarantees we only load the very last clip you stopped on.
             clearTimeout(scrubDebounceTimer);
-            scrubDebounceTimer = setTimeout(loadNewClip, 100 - (now - lastSrcChangeTime));
+            scrubDebounceTimer = setTimeout(executeSrcChange, 150 - (now - lastSrcChangeTime));
         }
     }
 }
@@ -372,7 +374,6 @@ fwTimelineRegion.addEventListener('pointermove', (e) => {
     if (fwIsScrubbing) {
         updateFwTimelineFromEvent(e);
 
-        // Dynamically re-center preloading as the scrubber drags, throttled to prevent thrashing
         if (!scrubMoveQueueTimer) {
             scrubMoveQueueTimer = setTimeout(() => {
                 recenterPreload();
