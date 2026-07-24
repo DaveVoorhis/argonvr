@@ -34,7 +34,10 @@ let globalManifest = {};
 let fwHlsPlayer = null;
 let fwIsScrubbing = false;
 let currentClipUrl = null;
-let targetClipOffset = 0; // Tracks precise mouse intent for delayed loads
+
+// Tracks precise mouse intent for asynchronous seek catch-ups
+let targetClipUrl = null;
+let targetClipOffset = 0;
 
 // --- Network Management ---
 let preloadQueue = [];
@@ -68,7 +71,10 @@ function getDayClips() {
 
 // --- Canvas Snapshot Logic ---
 function snapToCanvas() {
-    if (!fwVideo.videoWidth) return;
+    // CRITICAL FIX: Do not take a snapshot if the video element is currently blank/buffering.
+    // readyState >= 2 (HAVE_CURRENT_DATA) ensures we have a valid pixel buffer to paint.
+    if (fwVideo.readyState < 2 || !fwVideo.videoWidth) return;
+
     snapshotCanvas.width = fwVideo.videoWidth;
     snapshotCanvas.height = fwVideo.videoHeight;
     const ctx = snapshotCanvas.getContext('2d');
@@ -77,15 +83,24 @@ function snapToCanvas() {
 }
 
 fwVideo.addEventListener('seeked', () => {
-    // When a seek completes across a file boundary, drop the canvas ONLY
-    // when the new frame is successfully painted to the screen.
+    // Asynchronous catch-up: If the mouse kept moving while the hardware decoder was seeking,
+    // we execute the final seek now. This prevents spamming the decoder and flashing black.
+    if (targetClipUrl === currentClipUrl) {
+        if (Math.abs(fwVideo.currentTime - targetClipOffset) > 0.1) {
+            fwVideo.currentTime = targetClipOffset;
+            return; // Exit early. Do not drop the canvas yet, we are seeking again!
+        }
+    }
+
+    // When the final seek completes and aligns with the mouse, drop the canvas
+    // ONLY when the new frame is successfully painted to the screen by the GPU.
     if (snapshotCanvas.style.display === 'block') {
         if ('requestVideoFrameCallback' in fwVideo) {
             fwVideo.requestVideoFrameCallback(() => {
                 snapshotCanvas.style.display = 'none';
             });
         } else {
-            // Fallback for non-compliant browsers
+            // Fallback for older browsers
             setTimeout(() => { snapshotCanvas.style.display = 'none'; }, 30);
         }
     }
@@ -318,13 +333,13 @@ function updateFwTimelineFromEvent(e) {
         fwOverlay.style.display = 'none';
     }
 
-    // Store exact desired offset globally so delayed loads can use the freshest value
+    targetClipUrl = selectedClip.url;
     targetClipOffset = offsetInClip;
 
     if (currentClipUrl === selectedClip.url) {
         // Fast native scrubbing within the same file.
-        // Guard against InvalidStateError if dragging very fast during a src swap
-        if (fwVideo.readyState > 0) {
+        // Guard against InvalidStateError and NEVER interrupt an active seek!
+        if (fwVideo.readyState > 1 && !fwVideo.seeking) {
             fwVideo.currentTime = targetClipOffset;
         }
 
@@ -334,8 +349,6 @@ function updateFwTimelineFromEvent(e) {
         }
     } else {
         // Crossing a file boundary.
-        // ONLY snap to canvas if it's hidden. If it's already visible, we are bridging
-        // multiple files in rapid succession and shouldn't overwrite our good snapshot with black space.
         if (snapshotCanvas.style.display !== 'block') {
             snapToCanvas();
         }
@@ -347,7 +360,7 @@ function updateFwTimelineFromEvent(e) {
             fwVideo.src = selectedClip.url;
 
             fwVideo.onloadedmetadata = () => {
-                fwVideo.currentTime = targetClipOffset; // Uses the updated dynamic position
+                fwVideo.currentTime = targetClipOffset;
             };
         };
 
