@@ -22,6 +22,7 @@ USERNAME = config['SETTINGS'].get('WEB_USER', 'admin')
 PASSWORD = config['SETTINGS'].get('WEB_PASS', 'secret')
 STORE_DIR = config['SETTINGS'].get('STORE_DIR', './recordings')
 BASE_DIR = config['SETTINGS'].get('BASE_DIR', './cameras')
+WEB_DIR = config['SETTINGS'].get('WEB_DIR', './web')
 
 PORT = int(config['SETTINGS'].get('PORT', '8000'))
 
@@ -46,6 +47,10 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
     # Kills zombie threads if the client hangs for 10 seconds
     timeout = 10
 
+    def __init__(self, *args, **kwargs):
+        # Override the default directory to strictly serve static files from WEB_DIR
+        super().__init__(*args, directory=WEB_DIR, **kwargs)
+
     def address_string(self):
         """Prevents reverse DNS lookups that cause initial connection lag."""
         return self.client_address[0]
@@ -68,9 +73,21 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
         super().log_message(format, *args)
 
     def translate_path(self, path):
-        if path.startswith('/recordings/'):
-            relative_path = path[len('/recordings/'):]
+        # Strip query string and fragments for path matching
+        clean_path = path.split('?', 1)[0].split('#', 1)[0]
+
+        # 1. Keep recordings explicitly mapped to STORE_DIR
+        if clean_path.startswith('/recordings/'):
+            relative_path = clean_path[len('/recordings/'):]
             return os.path.join(STORE_DIR, relative_path)
+
+        # 2. Ensure active camera streams explicitly map to BASE_DIR outside of WEB_DIR
+        base_dir_name = os.path.basename(os.path.normpath(BASE_DIR))
+        if clean_path.startswith(f'/{base_dir_name}/'):
+            relative_path = clean_path[len(f'/{base_dir_name}/'):]
+            return os.path.join(BASE_DIR, relative_path)
+
+        # 3. Everything else defaults to being securely served out of WEB_DIR
         return super().translate_path(path)
 
     def do_AUTHHEAD(self):
