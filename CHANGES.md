@@ -25,5 +25,6 @@ This is human-written.
 11. Frontend detects connection failure and resets to allow for server reboots, connection outage etc.
 12. Improved rapid-load single-camera timeline scrubbing.
 13. Single camera display now has selectable scale: 1 hour, 2 hour, etc.
+14. Moved web files into Web directory for improved security.
 
 ## Features
