@@ -135,20 +135,23 @@ function snapToCanvas() {
 fwVideo.addEventListener('seeked', () => {
     if (targetClipUrl !== currentClipUrl) return;
 
-    if (currentClipUrl !== null && targetClipUrl === currentClipUrl) {
-        if (Math.abs(fwVideo.currentTime - targetClipOffset) > 0.1) {
-            fwVideo.currentTime = targetClipOffset;
-            return;
-        }
-    }
-
+    // 1. Hide the canvas immediately upon a successful seek.
+    // This guarantees visual feedback on slower mobile decoders.
     if (snapshotCanvas.style.display === 'block') {
         if ('requestVideoFrameCallback' in fwVideo) {
             fwVideo.requestVideoFrameCallback(() => {
                 snapshotCanvas.style.display = 'none';
             });
         } else {
-            setTimeout(() => { snapshotCanvas.style.display = 'none'; }, 30);
+            // Removed the 30ms setTimeout for faster UI response on mobile fallbacks
+            snapshotCanvas.style.display = 'none';
+        }
+    }
+
+    // 2. Catch-up logic evaluated AFTER the UI is updated.
+    if (currentClipUrl !== null && targetClipUrl === currentClipUrl) {
+        if (Math.abs(fwVideo.currentTime - targetClipOffset) > 0.1) {
+            fwVideo.currentTime = targetClipOffset;
         }
     }
 });
