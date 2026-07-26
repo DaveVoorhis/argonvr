@@ -135,24 +135,26 @@ function snapToCanvas() {
 fwVideo.addEventListener('seeked', () => {
     if (targetClipUrl !== currentClipUrl) return;
 
-    // 1. Hide the canvas immediately upon a successful seek.
-    // This guarantees visual feedback on slower mobile decoders.
-    if (snapshotCanvas.style.display === 'block') {
-        if ('requestVideoFrameCallback' in fwVideo) {
-            fwVideo.requestVideoFrameCallback(() => {
-                snapshotCanvas.style.display = 'none';
-            });
-        } else {
-            // Removed the 30ms setTimeout for faster UI response on mobile fallbacks
-            snapshotCanvas.style.display = 'none';
+    // 1. Isolate the catch-up logic
+    const performCatchUp = () => {
+        if (currentClipUrl !== null && targetClipUrl === currentClipUrl) {
+            if (Math.abs(fwVideo.currentTime - targetClipOffset) > 0.1) {
+                fwVideo.currentTime = targetClipOffset;
+            }
         }
-    }
+    };
 
-    // 2. Catch-up logic evaluated AFTER the UI is updated.
-    if (currentClipUrl !== null && targetClipUrl === currentClipUrl) {
-        if (Math.abs(fwVideo.currentTime - targetClipOffset) > 0.1) {
-            fwVideo.currentTime = targetClipOffset;
-        }
+    // 2. Hide canvas and yield to the rendering thread
+    if ('requestVideoFrameCallback' in fwVideo) {
+        fwVideo.requestVideoFrameCallback(() => {
+            snapshotCanvas.style.display = 'none';
+            // Yield the thread for 50ms. This guarantees the compositor
+            // has time to paint the decoded frame before we lock the decoder again.
+            setTimeout(performCatchUp, 50);
+        });
+    } else {
+        snapshotCanvas.style.display = 'none';
+        setTimeout(performCatchUp, 50);
     }
 });
 
