@@ -21,3 +21,6 @@ SSL_KEY_PATH =
 # Software-based video copy for H264 sources: copy
 ENCODER = libx264
 LOG_HTTP_REQUESTS = False
+# Timeline preview resolution (320x180 is recommended for sharp scrubbing)
+SPRITE_WIDTH = 320
+SPRITE_HEIGHT = 180

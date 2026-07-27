@@ -23,6 +23,8 @@ WEB_USER = SETTINGS.get('WEB_USER', 'admin')
 WEB_PASS = SETTINGS.get('WEB_PASS', 'secret')
 BASE_DIR = SETTINGS.get('BASE_DIR', './cameras')
 MOTION_THRESHOLD = SETTINGS.get('MOTION_THRESHOLD', '0.01')
+SPRITE_WIDTH = int(SETTINGS.get('SPRITE_WIDTH', '320'))
+SPRITE_HEIGHT = int(SETTINGS.get('SPRITE_HEIGHT', '180'))
 
 # --- Configurable Storage Options ---
 STORE_DIR = SETTINGS.get('STORE_DIR', './recordings')
@@ -115,8 +117,8 @@ async def generate_sprite_and_vtt(mp4_filepath, output_dir, base_name):
         num_frames = len(valid_i_frames)
         cols = 5
         rows = math.ceil(num_frames / cols)
-        width = 160
-        height = 90
+        width = SPRITE_WIDTH
+        height = SPRITE_HEIGHT
 
         # 3. Generate Sprite Sheet
         cmd_ffmpeg = [
