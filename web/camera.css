@@ -60,6 +60,9 @@ body {
 .snapshot-canvas {
     z-index: 5;
     display: none;
+    /* Keeps the low-res 160x90 sprite tiles from blurring when stretched */
+    image-rendering: -webkit-optimize-contrast;
+    image-rendering: crisp-edges;
 }
 
 .no-video-overlay {

@@ -4,8 +4,9 @@ const dateParam = urlParams.get('date');
 const colorParam = urlParams.get('color');
 let baseDir = './cameras';
 
-// --- Tuning Parameters ---
-const SCRUB_THROTTLE_MS = 250;
+// --- Global Metadata Cache ---
+const vttCache = {}; // clipUrl -> Array of cue objects
+const spriteImages = {}; // spriteUrl -> Preloaded Image object
 
 // --- Helper Functions ---
 function getTodayString() {
@@ -22,30 +23,14 @@ function getCameraColor() {
     return colorParam ? '#' + colorParam : '#3498db';
 }
 
-// UI Initialization
-document.getElementById('cam-title').innerText = camId.toUpperCase();
-document.getElementById('cam-title').style.color = getCameraColor();
-
-const fwVideo = document.getElementById('fw-video');
-const snapshotCanvas = document.getElementById('snapshot-canvas');
-const fwOverlay = document.getElementById('fw-overlay');
-const fwTimelineRegion = document.getElementById('fw-timeline-region');
-const fwIndicator = document.getElementById('fw-timeline-indicator');
-const fwTimeLabel = document.getElementById('fw-time-label');
-
-let globalManifest = {};
-let fwHlsPlayer = null;
-let fwIsScrubbing = false;
-let currentClipUrl = null;
-
-// Tracks precise mouse intent for asynchronous seek catch-ups
-let targetClipUrl = null;
-let targetClipOffset = 0;
-
-// --- Network & Throttle Management ---
-let lastScrubTime = 0;
-let scrubDebounceTimer = null;
-let lastSrcChangeTime = 0;
+function parseVTTTime(timeStr) {
+    const parts = timeStr.split(':');
+    const secParts = parts[2].split('.');
+    return (parseInt(parts[0], 10) * 3600) +
+        (parseInt(parts[1], 10) * 60) +
+        parseInt(secParts[0], 10) +
+        (parseInt(secParts[1], 10) / 1000);
+}
 
 function secondsToTimeStr(seconds) {
     const h = Math.floor(seconds / 3600);
@@ -63,6 +48,24 @@ function parseFilenameToSeconds(filename) {
     return (h * 3600) + (m * 60) + s;
 }
 
+// UI Initialization
+document.getElementById('cam-title').innerText = camId.toUpperCase();
+document.getElementById('cam-title').style.color = getCameraColor();
+
+const fwVideo = document.getElementById('fw-video');
+const snapshotCanvas = document.getElementById('snapshot-canvas');
+const fwOverlay = document.getElementById('fw-overlay');
+const fwTimelineRegion = document.getElementById('fw-timeline-region');
+const fwIndicator = document.getElementById('fw-timeline-indicator');
+const fwTimeLabel = document.getElementById('fw-time-label');
+
+let globalManifest = {};
+let fwHlsPlayer = null;
+let fwIsScrubbing = false;
+let currentClipUrl = null;
+let targetClipUrl = null;
+let targetClipOffset = 0;
+
 function getDayClips() {
     const clips = globalManifest[camId] || [];
     let parsed = clips.filter(c => parseFilenameToSeconds(c.filename) !== null)
@@ -73,11 +76,8 @@ function getDayClips() {
         const scaleHours = parseInt(scaleSelect.value, 10);
         const scaleSeconds = scaleHours * 3600;
 
-        // Anchor the window to the end of the latest available clip
         const lastClip = parsed[parsed.length - 1];
         const lastClipEnd = parseFilenameToSeconds(lastClip.filename) + (lastClip.duration || 0);
-
-        // Floor it at 0 to strictly prevent bleeding into the previous calendar day
         const startTime = Math.max(0, lastClipEnd - scaleSeconds);
 
         parsed = parsed.filter(c => {
@@ -86,24 +86,19 @@ function getDayClips() {
             return clipEnd > startTime;
         });
     }
-
     return parsed;
 }
 
-// Timeline scale change handler
 function handleScaleChange() {
     drawTimelineChunks();
-
     const dayClips = getDayClips();
 
-    // If we're currently playing a recorded clip, check if it just got filtered out
     if (currentClipUrl) {
         const stillExists = dayClips.some(c => c.url === currentClipUrl);
         if (!stillExists) {
             if (currentDayString === getTodayString()) {
                 fwGoLive();
             } else if (dayClips.length > 0) {
-                // If viewing a past day, just jump to the oldest clip in the new window
                 const first = dayClips[0];
                 currentClipUrl = first.url;
                 fwVideo.src = first.url;
@@ -115,16 +110,14 @@ function handleScaleChange() {
                 fwVideo.load();
             }
         } else {
-            // Force a timeupdate to recalibrate the orange indicator line visually
             fwVideo.dispatchEvent(new Event('timeupdate'));
         }
     }
 }
 
-// --- Canvas Snapshot Logic ---
+// --- Canvas & Sprite Logic ---
 function snapToCanvas() {
     if (fwVideo.readyState < 2 || !fwVideo.videoWidth) return;
-
     snapshotCanvas.width = fwVideo.videoWidth;
     snapshotCanvas.height = fwVideo.videoHeight;
     const ctx = snapshotCanvas.getContext('2d');
@@ -132,10 +125,48 @@ function snapToCanvas() {
     snapshotCanvas.style.display = 'block';
 }
 
+function renderSpriteFrame(clip, offset) {
+    if (!clip) return false;
+
+    const cues = vttCache[clip.url];
+    const img = spriteImages[clip.sprite_url];
+
+    if (cues && cues.length > 0 && img && img.complete && img.naturalWidth > 0) {
+        let targetCue = cues[0];
+
+        // Locate the correct sprite tile based on the VTT timestamps
+        for (let i = 0; i < cues.length; i++) {
+            if (offset >= cues[i].start && (i === cues.length - 1 || offset < cues[i+1].start)) {
+                targetCue = cues[i];
+                break;
+            }
+        }
+
+        // Establish a fixed high-res aspect ratio canvas to keep scaling crisp
+        snapshotCanvas.width = 1920;
+        snapshotCanvas.height = 1080;
+        const ctx = snapshotCanvas.getContext('2d');
+
+        // Fill black background to prevent edge-bleeding
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, snapshotCanvas.width, snapshotCanvas.height);
+
+        // Crop the 160x90 tile from the massive sprite sheet and stretch it over the canvas
+        ctx.drawImage(img,
+            targetCue.x, targetCue.y, targetCue.w, targetCue.h,
+            0, 0, snapshotCanvas.width, snapshotCanvas.height
+        );
+
+        snapshotCanvas.style.display = 'block';
+        return true;
+    }
+    return false;
+}
+
+// --- Video Sync Listeners ---
 fwVideo.addEventListener('seeked', () => {
     if (targetClipUrl !== currentClipUrl) return;
 
-    // 1. Isolate the catch-up logic
     const performCatchUp = () => {
         if (currentClipUrl !== null && targetClipUrl === currentClipUrl) {
             if (Math.abs(fwVideo.currentTime - targetClipOffset) > 0.1) {
@@ -144,12 +175,9 @@ fwVideo.addEventListener('seeked', () => {
         }
     };
 
-    // 2. Hide canvas and yield to the rendering thread
     if ('requestVideoFrameCallback' in fwVideo) {
         fwVideo.requestVideoFrameCallback(() => {
             snapshotCanvas.style.display = 'none';
-            // Yield the thread for 50ms. This guarantees the compositor
-            // has time to paint the decoded frame before we lock the decoder again.
             setTimeout(performCatchUp, 50);
         });
     } else {
@@ -203,7 +231,45 @@ fwVideo.addEventListener('timeupdate', () => {
     }
 });
 
-// --- Manifest Logic ---
+// --- Background Data Loaders ---
+async function loadClipMetadata(clips) {
+    const promises = clips.map(async clip => {
+        // Pre-fetch the sprite sheet image
+        if (clip.sprite_url && !spriteImages[clip.sprite_url]) {
+            const img = new Image();
+            img.src = clip.sprite_url;
+            spriteImages[clip.sprite_url] = img;
+        }
+
+        // Fetch and parse the VTT manifest
+        if (clip.vtt_url && !vttCache[clip.url]) {
+            try {
+                const resp = await fetch(clip.vtt_url);
+                const text = await resp.text();
+                const cues = [];
+                // Safely extract HH:MM:SS.mmm and coordinates
+                const regex = /(\d{2}:\d{2}:\d{2}\.\d{3})\s-->\s(\d{2}:\d{2}:\d{2}\.\d{3})\s+.*?#xywh=(\d+),(\d+),(\d+),(\d+)/g;
+                let match;
+                while ((match = regex.exec(text)) !== null) {
+                    cues.push({
+                        start: parseVTTTime(match[1]),
+                        end: parseVTTTime(match[2]),
+                        x: parseInt(match[3], 10),
+                        y: parseInt(match[4], 10),
+                        w: parseInt(match[5], 10),
+                        h: parseInt(match[6], 10)
+                    });
+                }
+                vttCache[clip.url] = cues;
+            } catch (e) {
+                console.error("Failed to load VTT for", clip.url, e);
+            }
+        }
+    });
+    // Let these silently load in the background
+    await Promise.allSettled(promises);
+}
+
 async function fetchManifest() {
     try {
         const url = `/history?date=${currentDayString}&cam=${camId}`;
@@ -215,13 +281,16 @@ async function fetchManifest() {
         });
         globalManifest = newManifest;
 
+        if (newManifest[camId]) {
+            loadClipMetadata(newManifest[camId]);
+        }
+
         drawTimelineChunks();
     } catch (e) {
         console.log("Could not load history manifest.");
     }
 }
 
-// --- Timeline Visualizer ---
 function drawTimelineChunks() {
     document.querySelectorAll('.fw-timeline-chunk').forEach(el => el.remove());
     const dayClips = getDayClips();
@@ -245,16 +314,10 @@ function drawTimelineChunks() {
     });
 }
 
-// --- Live Stream Logic ---
 function fwGoLive() {
     fwTimeLabel.innerText = "LIVE";
     fwTimeLabel.style.color = "#4cd137";
     fwIndicator.style.left = '100%';
-
-    if (scrubDebounceTimer) {
-        clearTimeout(scrubDebounceTimer);
-        scrubDebounceTimer = null;
-    }
 
     fwVideo.onloadedmetadata = null;
     targetClipUrl = null;
@@ -312,7 +375,7 @@ function fwGoLive() {
     }
 }
 
-// --- Highly Optimized Throttled Scrubber ---
+// --- Refactored Zero-Load Scrubber ---
 function calculateScrubTarget(e) {
     const rect = fwTimelineRegion.getBoundingClientRect();
     let x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
@@ -350,14 +413,10 @@ function applyVideoScrub(selectedClip, offsetInClip) {
     targetClipOffset = offsetInClip;
 
     if (currentClipUrl === selectedClip.url) {
-        if (fwVideo.readyState > 1 && !fwVideo.seeking) {
+        if (fwVideo.readyState > 1) {
             fwVideo.currentTime = targetClipOffset;
         }
     } else {
-        if (snapshotCanvas.style.display !== 'block') {
-            snapToCanvas();
-        }
-
         if (fwHlsPlayer) {
             fwHlsPlayer.destroy();
             fwHlsPlayer = null;
@@ -374,11 +433,10 @@ function applyVideoScrub(selectedClip, offsetInClip) {
     }
 }
 
-function updateFwTimelineFromEvent(e, forceVideoUpdate = false) {
+function updateFwTimelineFromEvent(e, isRelease = false) {
     const target = calculateScrubTarget(e);
     if (!target) return;
 
-    // Instant UI Feedback
     if (currentDayString === getTodayString() && target.scrubFraction >= 0.99) {
         fwIndicator.style.left = '100%';
         fwTimeLabel.innerText = "LIVE";
@@ -390,10 +448,11 @@ function updateFwTimelineFromEvent(e, forceVideoUpdate = false) {
     fwTimeLabel.innerText = secondsToTimeStr(target.actualSec);
     fwTimeLabel.style.color = "#f39c12";
 
-    // Throttled Video Frame Sampling using the configurable variable or Forced on PointerUp
-    const now = Date.now();
-    if (forceVideoUpdate || (now - lastScrubTime > SCRUB_THROTTLE_MS)) {
-        lastScrubTime = now;
+    if (!isRelease) {
+        // Fast UI interaction: Draw the nearest I-Frame to the canvas and bypass the video file
+        renderSpriteFrame(target.selectedClip, target.offsetInClip);
+    } else {
+        // Mouse released: Execute the single network request to load the final massive MP4 clip
         applyVideoScrub(target.selectedClip, target.offsetInClip);
     }
 }
@@ -407,7 +466,7 @@ fwTimelineRegion.addEventListener('pointerdown', (e) => {
         snapToCanvas();
     }
 
-    updateFwTimelineFromEvent(e, true);
+    updateFwTimelineFromEvent(e, false);
 });
 
 fwTimelineRegion.addEventListener('pointermove', (e) => {
@@ -420,15 +479,8 @@ fwTimelineRegion.addEventListener('pointerup', (e) => {
     fwIsScrubbing = false;
     fwTimelineRegion.releasePointerCapture(e.pointerId);
 
-    if (scrubDebounceTimer) {
-        clearTimeout(scrubDebounceTimer);
-        scrubDebounceTimer = null;
-    }
-
-    // Force final target frame load immediately upon release
     updateFwTimelineFromEvent(e, true);
 
-    // Check if scrubbed to LIVE region
     const rect = fwTimelineRegion.getBoundingClientRect();
     const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
     if (currentDayString === getTodayString() && (x / rect.width) >= 0.99) {
@@ -436,7 +488,6 @@ fwTimelineRegion.addEventListener('pointerup', (e) => {
         return;
     }
 
-    // Resume playback on the selected clip
     if (!fwHlsPlayer && fwVideo.src) {
         setTimeout(() => {
             fwVideo.play().catch(e => {});
@@ -444,7 +495,6 @@ fwTimelineRegion.addEventListener('pointerup', (e) => {
     }
 });
 
-// Start up
 document.addEventListener('DOMContentLoaded', async () => {
     await fetchManifest();
 
