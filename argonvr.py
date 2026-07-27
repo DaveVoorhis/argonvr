@@ -7,6 +7,8 @@ import json
 import configparser
 import shutil
 import subprocess
+import math
+import datetime
 
 config = configparser.ConfigParser()
 config.read('argonvr.cfg')
@@ -62,6 +64,98 @@ def get_video_duration(filepath):
     except Exception:
         return 0.0
 
+def format_vtt_time(seconds):
+    """Formats raw seconds into WebVTT timestamp format."""
+    td = datetime.timedelta(seconds=float(seconds))
+    hours, remainder = divmod(td.seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    milliseconds = td.microseconds // 1000
+    return f"{hours:02d}:{minutes:02d}:{seconds:02d}.{milliseconds:03d}"
+
+async def generate_sprite_and_vtt(mp4_filepath, output_dir, base_name):
+    """Extracts I-frames into a single JPEG sprite sheet and generates a WebVTT map."""
+    jpg_filepath = os.path.join(output_dir, f"{base_name}.jpg")
+    vtt_filepath = os.path.join(output_dir, f"{base_name}.vtt")
+
+    try:
+        # 1. Get raw frame data using async subprocess
+        cmd_probe = [
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "frame=pkt_pts_time,pkt_dts_time,pict_type",
+            "-of", "json", mp4_filepath
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd_probe,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE
+        )
+        stdout, _ = await proc.communicate()
+
+        probe_data = json.loads(stdout.decode('utf-8'))
+        frames = probe_data.get('frames', [])
+
+        # 2. Safely parse timestamps, falling back to DTS if PTS is "N/A"
+        valid_i_frames = []
+        for f in frames:
+            if f.get('pict_type') == 'I':
+                pts = f.get('pkt_pts_time', 'N/A')
+                if pts == 'N/A':
+                    pts = f.get('pkt_dts_time', 'N/A')
+
+                if pts != 'N/A':
+                    try:
+                        valid_i_frames.append(float(pts))
+                    except ValueError:
+                        pass
+
+        if not valid_i_frames:
+            print(f"[⚠️] Skipped sprite generation for {base_name}: No valid float timestamps found.")
+            return
+
+        num_frames = len(valid_i_frames)
+        cols = 5
+        rows = math.ceil(num_frames / cols)
+        width = 160
+        height = 90
+
+        # 3. Generate Sprite Sheet
+        cmd_ffmpeg = [
+            "ffmpeg", "-i", mp4_filepath,
+            "-vf", f"select='eq(pict_type,I)',scale={width}:{height},tile={cols}x{rows}",
+            "-frames:v", "1", "-y", jpg_filepath
+        ]
+        proc_ff = await asyncio.create_subprocess_exec(
+            *cmd_ffmpeg,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL
+        )
+        await proc_ff.wait()
+
+        # 4. Generate WebVTT
+        with open(vtt_filepath, 'w') as vtt_file:
+            vtt_file.write("WEBVTT\n\n")
+
+            for i in range(num_frames):
+                col = i % cols
+                row = i // cols
+                x = col * width
+                y = row * height
+
+                start_time = valid_i_frames[i]
+                # Ensure the final frame holds on screen for a few seconds if no next frame
+                end_time = valid_i_frames[i+1] if i + 1 < num_frames else start_time + 5.0
+
+                vtt_file.write(f"{format_vtt_time(start_time)} --> {format_vtt_time(end_time)}\n")
+                vtt_file.write(f"{base_name}.jpg#xywh={x},{y},{width},{height}\n\n")
+
+        print(f"[🎞️] Generated Sprite ({num_frames} tiles) & VTT for {base_name}")
+
+    except Exception as e:
+        print(f"[⚠️] Failed to process sprite/vtt for {base_name}: {e}")
+        # Atomic failure: clean up corrupted files so they don't break the JSON checks
+        if os.path.exists(jpg_filepath): os.remove(jpg_filepath)
+        if os.path.exists(vtt_filepath): os.remove(vtt_filepath)
+
 def update_history_manifest(target_cam_id=None):
     """Scans the recordings directory and generates daily JSON manifests per camera."""
     if not os.path.exists(STORE_DIR):
@@ -108,15 +202,26 @@ def update_history_manifest(target_cam_id=None):
 
             manifest_data = []
             for f in files:
-                # Use cached data if available to avoid ffprobe overhead
-                if f in existing_data:
+                # Determine paths for potential sprite/vtt files
+                base_name = f[:-4]
+                jpg_filename = f"{base_name}.jpg"
+                vtt_filename = f"{base_name}.vtt"
+
+                # Check existence to ensure we don't return broken links
+                has_sprite = os.path.exists(os.path.join(cam_path, jpg_filename))
+                has_vtt = os.path.exists(os.path.join(cam_path, vtt_filename))
+
+                # Use cached data if available AND if sprite/vtt status hasn't changed
+                if f in existing_data and existing_data[f].get('sprite_url') and has_sprite:
                     manifest_data.append(existing_data[f])
                 else:
                     filepath = os.path.join(cam_path, f)
                     manifest_data.append({
                         "filename": f,
                         "url": f"./{os.path.basename(STORE_DIR)}/{cam_id}/{f}",
-                        "duration": get_video_duration(filepath)
+                        "duration": get_video_duration(filepath),
+                        "sprite_url": f"./{os.path.basename(STORE_DIR)}/{cam_id}/{jpg_filename}" if has_sprite else None,
+                        "vtt_url": f"./{os.path.basename(STORE_DIR)}/{cam_id}/{vtt_filename}" if has_vtt else None
                     })
 
             manifest_data.sort(key=lambda x: x['filename'], reverse=True)
@@ -124,7 +229,7 @@ def update_history_manifest(target_cam_id=None):
             with open(manifest_path, 'w') as mf:
                 json.dump(manifest_data, mf)
 
-        # Clean up orphaned history files (e.g., if storage manager deleted all clips for a specific day)
+        # Clean up orphaned history files
         for f in os.listdir(cam_path):
             if f.startswith('history_') and f.endswith('.json') and f not in active_dates:
                 try:
@@ -149,9 +254,11 @@ async def storage_manager():
 
                 all_files = []
                 for root, _, files in os.walk(STORE_DIR):
-                    for f in files:
-                        if f.endswith('.mp4'):
-                            all_files.append(os.path.join(root, f))
+                    if files:
+                        for f in files:
+                            # Also target orphaned .vtt and .jpg when cleaning up
+                            if f.endswith('.mp4') or f.endswith('.jpg') or f.endswith('.vtt'):
+                                all_files.append(os.path.join(root, f))
 
                 # Sort by modification time so the oldest file is at index 0
                 all_files.sort(key=os.path.getmtime)
@@ -192,7 +299,6 @@ def recover_stale_staging_files():
 
 async def background_encoder_worker():
     """A background worker that sequentially encodes queued .ts files into .mp4."""
-    # Moved worker log to persistent storage
     worker_log = open(os.path.join(STORE_DIR, "encoder_worker.log"), "a")
     print("[⚙️] Background Encoder Worker started.")
 
@@ -244,6 +350,10 @@ async def background_encoder_worker():
                     if proc.returncode == 0:
                         print(f"[✅] Successfully encoded and stored: {final_filepath}")
                         os.remove(raw_filepath)
+
+                        # Generate the I-frame sprite sheet and WebVTT right after encoding
+                        await generate_sprite_and_vtt(final_filepath, final_dir, base_name)
+
                         update_history_manifest(cam_id)
                     else:
                         print(f"[❌] Error encoding {raw_filename}. See encoder_worker.log")

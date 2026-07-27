@@ -67,7 +67,7 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
 
     def log_message(self, format, *args):
         request_path = getattr(self, 'path', '')
-        quiet_extensions = ['.ts', '.m3u8', '.mp4', '.json']
+        quiet_extensions = ['.ts', '.m3u8', '.mp4', '.json', '.jpg', '.vtt']
         if not LOG_HTTP_REQUESTS and any(ext in request_path for ext in quiet_extensions):
             return
         super().log_message(format, *args)
@@ -142,7 +142,7 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
             self.wfile.write(b"OK")
             return
 
-        if path_no_query.endswith(('.m3u8', '.ts', '.mp4', '.json')):
+        if path_no_query.endswith(('.m3u8', '.ts', '.mp4', '.json', '.jpg', '.vtt')):
             if not os.path.exists(filepath):
                 self.send_error(404)
                 return
