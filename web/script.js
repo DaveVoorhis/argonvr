@@ -9,7 +9,7 @@ function runEasterEgg() {
 }
 setInterval(runEasterEgg, 10000);
 
-let CAMERA_COLORS = ['#3498db']; // Fallback color
+let CAMERA_COLORS = ['#3498db'];
 
 function hslToHex(h, s, l) {
 	l /= 100;
@@ -27,14 +27,18 @@ function getCameraColor(camId) {
 	return CAMERA_COLORS[(num - 1) % CAMERA_COLORS.length];
 }
 
+// --- Global State & Caches ---
 let globalManifest = {};
 const hlsPlayers = {};
 const activeCameras = [];
+const vttCache = {};
+const spriteImages = {};
 
 let baseDir = './cameras';
 
 let isLive = true;
 let isPlayingHistory = false;
+let isScrubbing = false; // Tracks if the user is currently dragging the timeline
 let playbackInterval = null;
 let liveSyncInterval = null;
 let currentDayString = "";
@@ -52,7 +56,6 @@ const zoomSlider = document.getElementById('zoom-slider');
 const timelineContent = document.getElementById('timeline-content');
 const timelineViewport = document.getElementById('timeline-viewport');
 
-// Handle fatal network errors to re-init live streams
 function handleStreamError(hlsInstance) {
 	if (hlsInstance) hlsInstance.destroy();
 
@@ -79,6 +82,84 @@ async function fetchAvailableDates() {
 	} catch (e) {
 		console.error("Could not load global calendar dates.");
 	}
+}
+
+// --- VTT & Sprite Logic ---
+function parseVTTTime(timeStr) {
+	const parts = timeStr.split(':');
+	const secParts = parts[2].split('.');
+	return (parseInt(parts[0], 10) * 3600) +
+		(parseInt(parts[1], 10) * 60) +
+		parseInt(secParts[0], 10) +
+		(parseInt(secParts[1], 10) / 1000);
+}
+
+async function loadClipMetadata(clips) {
+	const promises = clips.map(async clip => {
+		if (clip.sprite_url && !spriteImages[clip.sprite_url]) {
+			const img = new Image();
+			img.src = clip.sprite_url;
+			spriteImages[clip.sprite_url] = img;
+		}
+
+		if (clip.vtt_url && !vttCache[clip.url]) {
+			try {
+				const resp = await fetch(clip.vtt_url);
+				const text = await resp.text();
+				const cues = [];
+				const regex = /(\d{2}:\d{2}:\d{2}\.\d{3})\s-->\s(\d{2}:\d{2}:\d{2}\.\d{3})\s+.*?#xywh=(\d+),(\d+),(\d+),(\d+)/g;
+				let match;
+				while ((match = regex.exec(text)) !== null) {
+					cues.push({
+						start: parseVTTTime(match[1]),
+						end: parseVTTTime(match[2]),
+						x: parseInt(match[3], 10),
+						y: parseInt(match[4], 10),
+						w: parseInt(match[5], 10),
+						h: parseInt(match[6], 10)
+					});
+				}
+				vttCache[clip.url] = cues;
+			} catch (e) {
+				console.error("Failed to load VTT for", clip.url, e);
+			}
+		}
+	});
+	await Promise.allSettled(promises);
+}
+
+function renderSpriteFrame(camId, clip, offset) {
+	if (!clip) return false;
+
+	const cues = vttCache[clip.url];
+	const img = spriteImages[clip.sprite_url];
+	const canvas = document.getElementById(`canvas-${camId}`);
+
+	if (canvas && cues && cues.length > 0 && img && img.complete && img.naturalWidth > 0) {
+		let targetCue = cues[0];
+
+		for (let i = 0; i < cues.length; i++) {
+			if (offset >= cues[i].start && (i === cues.length - 1 || offset < cues[i+1].start)) {
+				targetCue = cues[i];
+				break;
+			}
+		}
+
+		canvas.width = 1920;
+		canvas.height = 1080;
+		const ctx = canvas.getContext('2d');
+
+		ctx.fillStyle = '#000';
+		ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+		ctx.drawImage(img,
+			targetCue.x, targetCue.y, targetCue.w, targetCue.h,
+			0, 0, canvas.width, canvas.height
+		);
+
+		return true;
+	}
+	return false;
 }
 
 function adjustZoom(direction) {
@@ -159,7 +240,7 @@ function setDate(dateObj) {
 
 			scrubber.value = 43200;
 			timeLabel.innerText = secondsToTimeStr(43200);
-			updateCamerasToScrubber(43200, true);
+			updateCamerasToScrubber(43200, false);
 			setTimeout(centerViewportOnScrubber, 50);
 		}
 	}
@@ -185,17 +266,16 @@ function parseFilenameToSeconds(filename) {
 async function fetchManifest(camId) {
 	try {
 		const url = `/history?date=${currentDayString}&cam=${camId}`;
-
 		const response = await fetch(url, { cache: 'no-store', credentials: 'include' });
 		const allData = await response.json();
 
 		let clips = allData[camId] || [];
-
-		clips.sort((a, b) => {
-			return (parseFilenameToSeconds(a.filename) || 0) - (parseFilenameToSeconds(b.filename) || 0);
-		});
+		clips.sort((a, b) => (parseFilenameToSeconds(a.filename) || 0) - (parseFilenameToSeconds(b.filename) || 0));
 
 		globalManifest[camId] = clips;
+
+		// Fire and forget metadata loader
+		loadClipMetadata(clips);
 
 		Object.values(allData).forEach(allClips => {
 			if (Array.isArray(allClips)) {
@@ -331,9 +411,10 @@ function findClipForCamera(camId, targetSeconds) {
 	return null;
 }
 
-function updateCamerasToScrubber(targetSeconds, isManualScrub = false) {
+function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 	activeCameras.forEach(camId => {
 		const videoEl = document.getElementById(`video-${camId}`);
+		const canvasEl = document.getElementById(`canvas-${camId}`);
 		const overlay = document.getElementById(`overlay-${camId}`);
 		const matchData = findClipForCamera(camId, targetSeconds);
 
@@ -341,27 +422,68 @@ function updateCamerasToScrubber(targetSeconds, isManualScrub = false) {
 			const manifestRef = matchData.manifestRef;
 			const offset = matchData.offset;
 
-			if (!videoEl.src.includes(manifestRef.url.replace('./', ''))) {
-				videoEl.src = manifestRef.url;
-				videoEl.style.display = 'block';
+			// 1. Evaluate if a jump/seek is actually required
+			const srcChanged = !videoEl.src.includes(manifestRef.url.replace('./', ''));
+			const drift = srcChanged ? 0 : Math.abs(videoEl.currentTime - offset);
+			const needsSeek = srcChanged || drift > 1.0; // 1-second tolerance prevents micro-stutters during normal playback
+
+			// 2. Render the sprite into the canvas memory
+			const hasSprite = renderSpriteFrame(camId, manifestRef, offset);
+
+			if (isDragging) {
+				// --- DRAGGING MODE ---
+				if (hasSprite) {
+					canvasEl.style.display = 'block';
+					videoEl.style.display = 'none';
+					overlay.style.display = 'none';
+				} else {
+					videoEl.pause();
+				}
+			} else {
+				// --- RELEASE OR PLAYBACK TICK MODE ---
 				overlay.style.display = 'none';
 
-				videoEl.onloadedmetadata = () => {
-					videoEl.currentTime = offset;
-					if (isPlayingHistory) videoEl.play().catch(e => {});
-				};
-			} else {
-				if (videoEl.readyState > 0 && offset > videoEl.duration) {
-					videoEl.style.display = 'none';
-					overlay.style.display = 'flex';
-				} else {
-					videoEl.style.display = 'block';
-					overlay.style.display = 'none';
-
-					const drift = Math.abs(videoEl.currentTime - offset);
-					if (isManualScrub || drift > 3) {
-						videoEl.currentTime = offset;
+				if (needsSeek) {
+					// We are jumping to a new timestamp.
+					// Keep the canvas visible to mask the browser's buffering delay (no black screen).
+					if (hasSprite) {
+						canvasEl.style.display = 'block';
+						videoEl.style.display = 'none';
+					} else {
+						videoEl.style.display = 'block';
 					}
+
+					// Define the atomic swap that executes only when the video frame is fully decoded
+					const onVideoReady = () => {
+						canvasEl.style.display = 'none';
+						videoEl.style.display = 'block';
+
+						videoEl.removeEventListener('seeked', onVideoReady);
+						videoEl.removeEventListener('playing', onVideoReady);
+					};
+
+					videoEl.addEventListener('seeked', onVideoReady);
+					videoEl.addEventListener('playing', onVideoReady);
+
+					// Command the video to fetch and seek
+					if (srcChanged) {
+						videoEl.src = manifestRef.url;
+						videoEl.load(); // Force network fetch
+						videoEl.onloadedmetadata = () => {
+							videoEl.currentTime = offset;
+							if (isPlayingHistory) videoEl.play().catch(e => {});
+						};
+					} else {
+						videoEl.currentTime = offset;
+						if (isPlayingHistory && videoEl.paused) {
+							videoEl.play().catch(e => {});
+						}
+					}
+				} else {
+					// Continuous playback ticking (no jumping needed).
+					// Do not touch the displays so playback remains perfectly smooth.
+					videoEl.style.display = 'block';
+					canvasEl.style.display = 'none';
 
 					if (isPlayingHistory && videoEl.paused) {
 						videoEl.play().catch(e => {});
@@ -371,8 +493,10 @@ function updateCamerasToScrubber(targetSeconds, isManualScrub = false) {
 				}
 			}
 		} else {
+			// Dead zone (No recording)
+			canvasEl.style.display = 'none';
 			videoEl.src = "";
-			videoEl.style.display = 'block';
+			videoEl.style.display = 'none';
 			overlay.style.display = 'flex';
 		}
 	});
@@ -388,6 +512,7 @@ function returnToLive() {
 
 	isLive = true;
 	isPlayingHistory = false;
+	isScrubbing = false;
 	if (playbackInterval) clearInterval(playbackInterval);
 
 	playBtn.innerText = "▶ Play";
@@ -435,8 +560,10 @@ function returnToLive() {
 
 	activeCameras.forEach(camId => {
 		const videoEl = document.getElementById(`video-${camId}`);
+		const canvasEl = document.getElementById(`canvas-${camId}`);
 		const overlay = document.getElementById(`overlay-${camId}`);
 
+		canvasEl.style.display = 'none';
 		videoEl.style.display = 'block';
 		overlay.style.display = 'none';
 
@@ -460,17 +587,14 @@ function returnToLive() {
 			hls.loadSource(freshPlaylistUrl);
 			hls.attachMedia(videoEl);
 
-			// FIXED BUG HERE
 			hls.on(Hls.Events.MANIFEST_PARSED, () => videoEl.play().catch(e => {}));
 
-			// Fallback for unexpected stream deaths
 			hls.on(Hls.Events.ERROR, (event, data) => {
 				if (data.fatal && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
 					handleStreamError(hls);
 				}
 			});
 
-			// FIXED BUG HERE
 		} else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
 			videoEl.src = freshPlaylistUrl;
 			videoEl.play().catch(e => {});
@@ -479,6 +603,7 @@ function returnToLive() {
 	});
 }
 
+// 1. INPUT event: Fires continuously while dragging the slider
 scrubber.addEventListener('input', (e) => {
 	if (isLive) {
 		isLive = false;
@@ -494,10 +619,12 @@ scrubber.addEventListener('input', (e) => {
 
 		activeCameras.forEach(camId => fetchManifest(camId));
 	}
+
+	isScrubbing = true;
 	const targetSeconds = parseInt(e.target.value, 10);
 	timeLabel.innerText = secondsToTimeStr(targetSeconds);
-	if (isPlayingHistory) playBtn.click();
 
+	// Pass true to signify we are actively dragging (renders the Sprite Canvas)
 	updateCamerasToScrubber(targetSeconds, true);
 
 	const scrubberX = (targetSeconds / 86400) * timelineContent.clientWidth;
@@ -509,6 +636,15 @@ scrubber.addEventListener('input', (e) => {
 	}
 });
 
+// 2. CHANGE event: Fires once when the user releases the mouse click / touch
+scrubber.addEventListener('change', (e) => {
+	isScrubbing = false;
+	const targetSeconds = parseInt(e.target.value, 10);
+
+	// Pass false to signify release (hides canvas, loads video)
+	updateCamerasToScrubber(targetSeconds, false);
+});
+
 playBtn.addEventListener('click', () => {
 	if (isLive) return;
 
@@ -516,6 +652,9 @@ playBtn.addEventListener('click', () => {
 	if (isPlayingHistory) {
 		playBtn.innerText = "⏸ Pause";
 		playbackInterval = setInterval(() => {
+			// Do not fight the user if they are currently scrubbing
+			if (isScrubbing) return;
+
 			let currentVal = parseInt(scrubber.value, 10);
 			if (currentVal >= 86399) {
 				returnToLive();
@@ -605,11 +744,13 @@ function createCameraDOM(camId, streamPath) {
 	const camColor = getCameraColor(camId);
 	card.style.borderTop = `4px solid ${camColor}`;
 
+	// Injected the new specific Canvas element below the header
 	card.innerHTML = `
 		<div class="camera-header">
 			<span class="camera-title" style="color: ${camColor}; text-shadow: 1px 1px 2px black;">${camId}</span>
 		</div>
-		<video id="video-${camId}" muted playsinline></video>
+		<canvas id="canvas-${camId}" class="snapshot-canvas"></canvas>
+		<video id="video-${camId}" muted playsinline preload="none"></video>
 		<div class="no-video-overlay" id="overlay-${camId}">
 			<div>No Motion Detected</div>
 		</div>
@@ -636,7 +777,6 @@ function createCameraDOM(camId, streamPath) {
 		hls.attachMedia(videoElement);
 		hls.on(Hls.Events.MANIFEST_PARSED, () => videoElement.play().catch(e => {}));
 
-		// Fallback for unexpected stream deaths
 		hls.on(Hls.Events.ERROR, (event, data) => {
 			if (data.fatal && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
 				handleStreamError(hls);
