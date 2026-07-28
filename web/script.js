@@ -282,7 +282,8 @@ function secondsToTimeStr(seconds) {
 }
 
 function parseFilenameToSeconds(filename) {
-	const match = filename.match(/_(\d{8})_(\d{2})(\d{2})(\d{2})\.mp4/);
+	// Changed regex to look for .m3u8
+	const match = filename.match(/_(\d{8})_(\d{2})(\d{2})(\d{2})\.m3u8/);
 	if (!match) return null;
 
 	const h = parseInt(match[2], 10);
@@ -495,12 +496,35 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 
 					// Command the video to fetch and seek
 					if (srcChanged) {
-						videoEl.src = manifestRef.url;
-						videoEl.load(); // Force network fetch
-						videoEl.onloadedmetadata = () => {
-							videoEl.currentTime = offset;
-							if (isPlayingHistory) videoEl.play().catch(e => {});
-						};
+						if (Hls.isSupported()) {
+							// Destroy the previous VOD HLS instance if it exists to prevent memory leaks
+							if (hlsPlayers[camId]) {
+								hlsPlayers[camId].destroy();
+							}
+
+							const hls = new Hls({
+								manifestLoadingMaxRetry: 5,
+								xhrSetup: function(xhr) {
+									xhr.withCredentials = true;
+								}
+							});
+							hlsPlayers[camId] = hls;
+							hls.loadSource(manifestRef.url);
+							hls.attachMedia(videoEl);
+
+							hls.on(Hls.Events.MANIFEST_PARSED, () => {
+								videoEl.currentTime = offset;
+								if (isPlayingHistory) videoEl.play().catch(e => {});
+							});
+						} else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+							// Native Safari fallback
+							videoEl.src = manifestRef.url;
+							videoEl.load();
+							videoEl.onloadedmetadata = () => {
+								videoEl.currentTime = offset;
+								if (isPlayingHistory) videoEl.play().catch(e => {});
+							};
+						}
 					} else {
 						videoEl.currentTime = offset;
 						if (isPlayingHistory && videoEl.paused) {

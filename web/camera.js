@@ -40,7 +40,8 @@ function secondsToTimeStr(seconds) {
 }
 
 function parseFilenameToSeconds(filename) {
-    const match = filename.match(/_(\d{8})_(\d{2})(\d{2})(\d{2})\.mp4/);
+    // Changed regex to look for .m3u8
+    const match = filename.match(/_(\d{8})_(\d{2})(\d{2})(\d{2})\.m3u8/);
     if (!match) return null;
     const h = parseInt(match[2], 10);
     const m = parseInt(match[3], 10);
@@ -430,23 +431,41 @@ function applyVideoScrub(selectedClip, offsetInClip) {
     targetClipOffset = offsetInClip;
 
     if (currentClipUrl === selectedClip.url) {
+        // If we are scrubbing within the same clip, just seek.
         if (fwVideo.readyState > 1) {
             fwVideo.currentTime = targetClipOffset;
         }
     } else {
-        if (fwHlsPlayer) {
-            fwHlsPlayer.destroy();
-            fwHlsPlayer = null;
-            fwOverlay.style.display = 'none';
-        }
-
         currentClipUrl = selectedClip.url;
-        fwVideo.src = selectedClip.url;
-        fwVideo.onloadedmetadata = () => {
-            if (currentClipUrl === selectedClip.url) {
-                fwVideo.currentTime = targetClipOffset;
+
+        if (typeof Hls !== 'undefined' && Hls.isSupported()) {
+            if (fwHlsPlayer) {
+                fwHlsPlayer.destroy();
             }
-        };
+
+            fwHlsPlayer = new Hls({
+                manifestLoadingMaxRetry: 5,
+                xhrSetup: function(xhr) { xhr.withCredentials = true; }
+            });
+
+            fwHlsPlayer.loadSource(selectedClip.url);
+            fwHlsPlayer.attachMedia(fwVideo);
+
+            fwHlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => {
+                if (currentClipUrl === selectedClip.url) {
+                    fwVideo.currentTime = targetClipOffset;
+                }
+            });
+        } else if (fwVideo.canPlayType('application/vnd.apple.mpegurl')) {
+            // Native Safari fallback
+            fwVideo.src = selectedClip.url;
+            fwVideo.load();
+            fwVideo.onloadedmetadata = () => {
+                if (currentClipUrl === selectedClip.url) {
+                    fwVideo.currentTime = targetClipOffset;
+                }
+            };
+        }
     }
 }
 
@@ -469,7 +488,7 @@ function updateFwTimelineFromEvent(e, isRelease = false) {
         // Fast UI interaction: Draw the nearest I-Frame to the canvas and bypass the video file
         renderSpriteFrame(target.selectedClip, target.offsetInClip);
     } else {
-        // Mouse released: Execute the single network request to load the final massive MP4 clip
+        // load the HLS playlist
         applyVideoScrub(target.selectedClip, target.offsetInClip);
     }
 }
@@ -505,11 +524,10 @@ fwTimelineRegion.addEventListener('pointerup', (e) => {
         return;
     }
 
-    if (!fwHlsPlayer && fwVideo.src) {
-        setTimeout(() => {
-            fwVideo.play().catch(e => {});
-        }, 50);
-    }
+    // Unconditionally resume playback after dropping the scrubber
+    setTimeout(() => {
+        fwVideo.play().catch(e => {});
+    }, 50);
 });
 
 document.addEventListener('DOMContentLoaded', async () => {

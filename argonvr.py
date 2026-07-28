@@ -176,9 +176,9 @@ def update_history_manifest(target_cam_id=None):
         # Group files by date
         daily_files = {}
         for f in os.listdir(cam_path):
-            if f.endswith('.mp4'):
+            # Target VOD playlists, ignore the live master stream
+            if f.endswith('.m3u8') and f != 'stream.m3u8':
                 try:
-                    # Extract date from filename, e.g., cam1_20260722_153000.mp4 -> 20260722
                     parts = f.split('_')
                     if len(parts) >= 2:
                         date_str = parts[1]
@@ -205,10 +205,11 @@ def update_history_manifest(target_cam_id=None):
                 except Exception:
                     pass
 
+            # ⬅️ FIXED: These lines must be indented INSIDE the daily_files loop!
             manifest_data = []
             for f in files:
-                # Determine paths for potential sprite/vtt files
-                base_name = f[:-4]
+                # Remove the '.m3u8' extension securely
+                base_name = os.path.splitext(f)[0]
                 jpg_filename = f"{base_name}.jpg"
                 vtt_filename = f"{base_name}.vtt"
 
@@ -261,29 +262,32 @@ async def storage_manager():
                 for root, _, files in os.walk(STORE_DIR):
                     if files:
                         for f in files:
-                            # Also target orphaned .vtt and .jpg when cleaning up
-                            if f.endswith('.mp4') or f.endswith('.jpg') or f.endswith('.vtt'):
+                            # Only track the root playlist for deletion
+                            if f.endswith('.m3u8') and f != 'stream.m3u8':
                                 all_files.append(os.path.join(root, f))
 
-                # Sort by modification time so the oldest file is at index 0
                 all_files.sort(key=os.path.getmtime)
 
                 deleted_count = 0
                 while all_files and get_free_space_pct(STORAGE_DEVICE) < MIN_FREE_SPACE_PCT:
-                    target_file = all_files.pop(0)
-                    try:
-                        os.remove(target_file)
-                        deleted_count += 1
-                    except OSError:
-                        pass
+                    target_m3u8 = all_files.pop(0)
+                    base_path = os.path.splitext(target_m3u8)[0]
+
+                    # Glob catches the .m3u8, all _xxx.ts chunks, .jpg, and .vtt
+                    for f_to_delete in glob.glob(f"{base_path}*"):
+                        try:
+                            os.remove(f_to_delete)
+                            deleted_count += 1
+                        except OSError:
+                            pass
 
                 if deleted_count > 0:
-                    print(f"[🧹] Purged {deleted_count} files. Updating history manifests.")
+                    print(f"[🧹] Purged {deleted_count} files/chunks. Updating history manifests.")
                     update_history_manifest()
         except Exception as e:
             print(f"[⚠️] Storage Manager error: {e}")
 
-        await asyncio.sleep(60) # Check disk space every minute
+        await asyncio.sleep(60)
 
 def recover_stale_staging_files():
     """Moves orphaned .ts files from previous unclean shutdowns into the queue."""
@@ -303,9 +307,9 @@ def recover_stale_staging_files():
                     print(f"[♻️] Recovered stale capture: {f}")
 
 async def background_encoder_worker():
-    """A background worker that sequentially encodes queued .ts files into .mp4."""
+    """A background worker that sequentially packages queued .ts files into HLS VOD."""
     worker_log = open(os.path.join(STORE_DIR, "encoder_worker.log"), "a")
-    print("[⚙️] Background Encoder Worker started.")
+    print("[⚙️] Background Packager Worker started.")
 
     while True:
         task_found = False
@@ -318,27 +322,29 @@ async def background_encoder_worker():
 
                 queued_files = [f for f in os.listdir(queued_dir) if f.endswith('.ts')]
                 if queued_files:
-                    # Sort to encode the oldest first
                     queued_files.sort(key=lambda x: os.path.getmtime(os.path.join(queued_dir, x)))
                     raw_filename = queued_files[0]
                     raw_filepath = os.path.join(queued_dir, raw_filename)
 
                     base_name = os.path.splitext(raw_filename)[0]
                     final_dir = os.path.join(STORE_DIR, cam_id)
-                    final_filepath = os.path.join(final_dir, f"{base_name}.mp4")
+                    final_filepath = os.path.join(final_dir, f"{base_name}.m3u8") # Changed to .m3u8
 
-                    print(f"[⚙️] Encoding queue item: {raw_filename} -> {final_filepath}")
+                    print(f"[⚙️] Packaging queue item: {raw_filename} -> {final_filepath}")
                     timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
-                    worker_log.write(f"\n--- [{timestamp}] ENCODING {raw_filepath} ---\n")
+                    worker_log.write(f"\n--- [{timestamp}] PACKAGING {raw_filepath} ---\n")
                     worker_log.flush()
 
+                    # Re-mux directly to HLS VOD without re-encoding
                     encode_cmd = [
                         "ffmpeg",
                         "-i", raw_filepath,
-                        "-c:v", ENCODER,
-                        "-preset", "ultrafast",
+                        "-c:v", "copy",
                         "-an",
-                        "-movflags", "faststart",
+                        "-f", "hls",
+                        "-hls_time", "2",
+                        "-hls_playlist_type", "vod",
+                        "-hls_segment_filename", os.path.join(final_dir, f"{base_name}_%03d.ts"),
                         "-y", final_filepath
                     ]
 
@@ -353,22 +359,22 @@ async def background_encoder_worker():
                     active_processes.remove(proc)
 
                     if proc.returncode == 0:
-                        print(f"[✅] Successfully encoded and stored: {final_filepath}")
+                        print(f"[✅] Successfully packaged and stored: {final_filepath}")
                         os.remove(raw_filepath)
 
-                        # Generate the I-frame sprite sheet and WebVTT right after encoding
+                        # FFprobe/FFmpeg will seamlessly read the .m3u8 to generate the sprite sheet
                         await generate_sprite_and_vtt(final_filepath, final_dir, base_name)
 
                         update_history_manifest(cam_id)
                     else:
-                        print(f"[❌] Error encoding {raw_filename}. See encoder_worker.log")
+                        print(f"[❌] Error packaging {raw_filename}. See encoder_worker.log")
                         os.rename(raw_filepath, raw_filepath + ".failed")
 
                     task_found = True
-                    break # Break out of the directory loop to evaluate the global queue again
+                    break
 
         if not task_found:
-            await asyncio.sleep(5) # No tasks, rest the CPU
+            await asyncio.sleep(5)
 
 class CameraStream:
     def __init__(self, cam_id, rtsp_url):
