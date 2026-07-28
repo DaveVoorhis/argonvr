@@ -205,7 +205,6 @@ def update_history_manifest(target_cam_id=None):
                 except Exception:
                     pass
 
-            # ⬅️ FIXED: These lines must be indented INSIDE the daily_files loop!
             manifest_data = []
             for f in files:
                 # Remove the '.m3u8' extension securely
@@ -501,7 +500,7 @@ class CameraStream:
                         self.recording = False
                         continue
 
-                        # Direct Stream Copy: Negligible CPU footprint
+                    # Direct Stream Copy: Negligible CPU footprint
                     record_cmd = [
                         "ffmpeg",
                         "-i", m3u8_path,
