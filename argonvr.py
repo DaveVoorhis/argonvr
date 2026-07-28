@@ -80,10 +80,10 @@ async def generate_sprite_and_vtt(mp4_filepath, output_dir, base_name):
     vtt_filepath = os.path.join(output_dir, f"{base_name}.vtt")
 
     try:
-        # 1. Get raw frame data using async subprocess
+        # 1. FAST PROBE: Read 'packets' instead of 'frames' (bypasses the decoder entirely)
         cmd_probe = [
             "ffprobe", "-v", "error", "-select_streams", "v:0",
-            "-show_entries", "frame=pkt_pts_time,pkt_dts_time,pict_type",
+            "-show_entries", "packet=pts_time,dts_time,flags",
             "-of", "json", mp4_filepath
         ]
         proc = await asyncio.create_subprocess_exec(
@@ -94,15 +94,16 @@ async def generate_sprite_and_vtt(mp4_filepath, output_dir, base_name):
         stdout, _ = await proc.communicate()
 
         probe_data = json.loads(stdout.decode('utf-8'))
-        frames = probe_data.get('frames', [])
+        packets = probe_data.get('packets', [])
 
-        # 2. Safely parse timestamps, falling back to DTS if PTS is "N/A"
+        # 2. Extract keyframe timestamps using the 'K' flag
         valid_i_frames = []
-        for f in frames:
-            if f.get('pict_type') == 'I':
-                pts = f.get('pkt_pts_time', 'N/A')
+        for p in packets:
+            # The 'flags' string contains 'K' if it's a Keyframe (I-frame)
+            if 'K' in p.get('flags', ''):
+                pts = p.get('pts_time', 'N/A')
                 if pts == 'N/A':
-                    pts = f.get('pkt_dts_time', 'N/A')
+                    pts = p.get('dts_time', 'N/A')
 
                 if pts != 'N/A':
                     try:
@@ -120,11 +121,15 @@ async def generate_sprite_and_vtt(mp4_filepath, output_dir, base_name):
         width = SPRITE_WIDTH
         height = SPRITE_HEIGHT
 
-        # 3. Generate Sprite Sheet
+        # 3. FAST SPRITE GEN: Use '-skip_frame nokey' to avoid decoding P/B frames
         cmd_ffmpeg = [
-            "ffmpeg", "-i", mp4_filepath,
+            "ffmpeg",
+            "-skip_frame", "nokey", # ⬅️ Huge CPU savings here
+            "-i", mp4_filepath,
             "-vf", f"select='eq(pict_type,I)',scale={width}:{height},tile={cols}x{rows}",
-            "-frames:v", "1", "-y", jpg_filepath
+            "-frames:v", "1",
+            "-q:v", "3",            # Optional: slightly compresses the JPEG to save I/O overhead
+            "-y", jpg_filepath
         ]
         proc_ff = await asyncio.create_subprocess_exec(
             *cmd_ffmpeg,
@@ -144,7 +149,6 @@ async def generate_sprite_and_vtt(mp4_filepath, output_dir, base_name):
                 y = row * height
 
                 start_time = valid_i_frames[i]
-                # Ensure the final frame holds on screen for a few seconds if no next frame
                 end_time = valid_i_frames[i+1] if i + 1 < num_frames else start_time + 5.0
 
                 vtt_file.write(f"{format_vtt_time(start_time)} --> {format_vtt_time(end_time)}\n")
@@ -154,7 +158,6 @@ async def generate_sprite_and_vtt(mp4_filepath, output_dir, base_name):
 
     except Exception as e:
         print(f"[⚠️] Failed to process sprite/vtt for {base_name}: {e}")
-        # Atomic failure: clean up corrupted files so they don't break the JSON checks
         if os.path.exists(jpg_filepath): os.remove(jpg_filepath)
         if os.path.exists(vtt_filepath): os.remove(vtt_filepath)
 
