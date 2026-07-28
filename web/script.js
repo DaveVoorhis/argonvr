@@ -57,7 +57,11 @@ const timelineContent = document.getElementById('timeline-content');
 const timelineViewport = document.getElementById('timeline-viewport');
 
 function handleStreamError(hlsInstance) {
-	if (hlsInstance) hlsInstance.destroy();
+	if (hlsInstance) {
+		hlsInstance.stopLoad();
+		hlsInstance.detachMedia();
+		hlsInstance.destroy();
+	}
 
 	if (isLive && !reconnectTimer) {
 		console.warn("Connection lost. ArgoNVR backend may have rebooted. Retrying in 5s...");
@@ -234,8 +238,15 @@ function setDate(dateObj) {
 			if (liveSyncInterval) clearInterval(liveSyncInterval);
 
 			timeLabel.style.color = "#f39c12";
+
+			// Fully clean up the HLS players when entering history scrubbing mode
 			activeCameras.forEach(camId => {
-				if (hlsPlayers[camId]) hlsPlayers[camId].detachMedia();
+				if (hlsPlayers[camId]) {
+					hlsPlayers[camId].stopLoad();
+					hlsPlayers[camId].detachMedia();
+					hlsPlayers[camId].destroy();
+					delete hlsPlayers[camId];
+				}
 			});
 
 			scrubber.value = 43200;
@@ -558,6 +569,7 @@ function returnToLive() {
 		return;
 	}
 
+// Inside returnToLive(), replace the existing cleanup code with this:
 	activeCameras.forEach(camId => {
 		const videoEl = document.getElementById(`video-${camId}`);
 		const canvasEl = document.getElementById(`canvas-${camId}`);
@@ -567,11 +579,18 @@ function returnToLive() {
 		videoEl.style.display = 'block';
 		overlay.style.display = 'none';
 
+		// 1. Fully tear down the HLS instance first to abort network requests
+		if (hlsPlayers[camId]) {
+			hlsPlayers[camId].stopLoad();    // Abort all pending XHR requests instantly
+			hlsPlayers[camId].detachMedia(); // Unbind the HTML5 video element safely
+			hlsPlayers[camId].destroy();     // Clear internal listeners
+			delete hlsPlayers[camId];        // Remove reference for the JS garbage collector
+		}
+
+		// 2. Clear the native video element buffer
 		videoEl.pause();
 		videoEl.removeAttribute('src');
 		videoEl.load();
-
-		if (hlsPlayers[camId]) hlsPlayers[camId].destroy();
 
 		const freshPlaylistUrl = `${baseDir}/${camId}/stream.m3u8?t=${Date.now()}`;
 
