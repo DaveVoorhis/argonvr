@@ -166,11 +166,11 @@ body {
 .fw-timeline-region:hover { background: rgba(255, 255, 255, 0.12); }
 
 .fw-timeline-region.sprites-loaded {
-    background: rgba(46, 204, 113, 0.15); /* Subtle green */
+    background: rgba(46, 204, 113, 0.4); /* Stronger, greener green */
 }
 
 .fw-timeline-region.sprites-loaded:hover {
-    background: rgba(46, 204, 113, 0.25); /* Slightly brighter on hover */
+    background: rgba(46, 204, 113, 0.6); /* Even brighter green on hover */
 }
 
 .fw-timeline-indicator {
