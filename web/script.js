@@ -98,38 +98,55 @@ function parseVTTTime(timeStr) {
 		(parseInt(secParts[1], 10) / 1000);
 }
 
-async function loadClipMetadata(clips) {
-	const promises = clips.map(async clip => {
-		if (clip.sprite_url && !spriteImages[clip.sprite_url]) {
+const pendingMetadata = new Set(); // Tracks in-flight requests
+
+async function ensureClipMetadata(clip) {
+	if (!clip || pendingMetadata.has(clip.url)) return;
+
+	const needsSprite = clip.sprite_url && !spriteImages[clip.sprite_url];
+	const needsVtt = clip.vtt_url && !vttCache[clip.url];
+
+	if (!needsSprite && !needsVtt) return;
+
+	pendingMetadata.add(clip.url);
+	const promises = [];
+
+	if (needsSprite) {
+		promises.push(new Promise((resolve) => {
 			const img = new Image();
+			img.onload = resolve;
+			img.onerror = resolve;
 			img.src = clip.sprite_url;
 			spriteImages[clip.sprite_url] = img;
-		}
+		}));
+	}
 
-		if (clip.vtt_url && !vttCache[clip.url]) {
-			try {
-				const resp = await fetch(clip.vtt_url);
-				const text = await resp.text();
-				const cues = [];
-				const regex = /(\d{2}:\d{2}:\d{2}\.\d{3})\s-->\s(\d{2}:\d{2}:\d{2}\.\d{3})\s+.*?#xywh=(\d+),(\d+),(\d+),(\d+)/g;
-				let match;
-				while ((match = regex.exec(text)) !== null) {
-					cues.push({
-						start: parseVTTTime(match[1]),
-						end: parseVTTTime(match[2]),
-						x: parseInt(match[3], 10),
-						y: parseInt(match[4], 10),
-						w: parseInt(match[5], 10),
-						h: parseInt(match[6], 10)
-					});
-				}
-				vttCache[clip.url] = cues;
-			} catch (e) {
-				console.error("Failed to load VTT for", clip.url, e);
-			}
-		}
-	});
+	if (needsVtt) {
+		promises.push(
+			fetch(clip.vtt_url)
+				.then(resp => resp.text())
+				.then(text => {
+					const cues = [];
+					const regex = /(\d{2}:\d{2}:\d{2}\.\d{3})\s-->\s(\d{2}:\d{2}:\d{2}\.\d{3})\s+.*?#xywh=(\d+),(\d+),(\d+),(\d+)/g;
+					let match;
+					while ((match = regex.exec(text)) !== null) {
+						cues.push({
+							start: parseVTTTime(match[1]),
+							end: parseVTTTime(match[2]),
+							x: parseInt(match[3], 10),
+							y: parseInt(match[4], 10),
+							w: parseInt(match[5], 10),
+							h: parseInt(match[6], 10)
+						});
+					}
+					vttCache[clip.url] = cues;
+				})
+				.catch(e => console.error("Failed to load VTT for", clip.url, e))
+		);
+	}
+
 	await Promise.allSettled(promises);
+	pendingMetadata.delete(clip.url);
 }
 
 function renderSpriteFrame(camId, clip, offset) {
@@ -285,9 +302,6 @@ async function fetchManifest(camId) {
 
 		globalManifest[camId] = clips;
 
-		// Fire and forget metadata loader
-		loadClipMetadata(clips);
-
 		Object.values(allData).forEach(allClips => {
 			if (Array.isArray(allClips)) {
 				allClips.forEach(clip => {
@@ -369,9 +383,9 @@ function renderCalendar() {
 	const daysInMonth = new Date(year, month + 1, 0).getDate();
 
 	let html = `
-		<div class="cal-day-header">Su</div><div class="cal-day-header">Mo</div><div class="cal-day-header">Tu</div>
-		<div class="cal-day-header">We</div><div class="cal-day-header">Th</div><div class="cal-day-header">Fr</div><div class="cal-day-header">Sa</div>
-	`;
+       <div class="cal-day-header">Su</div><div class="cal-day-header">Mo</div><div class="cal-day-header">Tu</div>
+       <div class="cal-day-header">We</div><div class="cal-day-header">Th</div><div class="cal-day-header">Fr</div><div class="cal-day-header">Sa</div>
+    `;
 
 	for (let i = 0; i < firstDay; i++) {
 		html += `<div class="cal-day empty"></div>`;
@@ -432,6 +446,9 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 		if (matchData) {
 			const manifestRef = matchData.manifestRef;
 			const offset = matchData.offset;
+
+			// JIT fetch metadata if we don't have it yet
+			ensureClipMetadata(manifestRef);
 
 			// 1. Evaluate if a jump/seek is actually required
 			const srcChanged = !videoEl.src.includes(manifestRef.url.replace('./', ''));
@@ -765,15 +782,15 @@ function createCameraDOM(camId, streamPath) {
 
 	// Injected the new specific Canvas element below the header
 	card.innerHTML = `
-		<div class="camera-header">
-			<span class="camera-title" style="color: ${camColor}; text-shadow: 1px 1px 2px black;">${camId}</span>
-		</div>
-		<canvas id="canvas-${camId}" class="snapshot-canvas"></canvas>
-		<video id="video-${camId}" muted playsinline preload="none"></video>
-		<div class="no-video-overlay" id="overlay-${camId}">
-			<div>No Motion Detected</div>
-		</div>
-	`;
+       <div class="camera-header">
+          <span class="camera-title" style="color: ${camColor}; text-shadow: 1px 1px 2px black;">${camId}</span>
+       </div>
+       <canvas id="canvas-${camId}" class="snapshot-canvas"></canvas>
+       <video id="video-${camId}" muted playsinline preload="none"></video>
+       <div class="no-video-overlay" id="overlay-${camId}">
+          <div>No Motion Detected</div>
+       </div>
+    `;
 
 	card.addEventListener('click', () => openCameraPage(camId));
 
