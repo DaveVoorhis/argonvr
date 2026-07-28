@@ -234,39 +234,50 @@ fwVideo.addEventListener('timeupdate', () => {
 // --- Background Data Loaders ---
 async function loadClipMetadata(clips) {
     const promises = clips.map(async clip => {
-        // Pre-fetch the sprite sheet image
+        const tasks = [];
+
+        // 1. Wrap the image load in a Promise to track its completion
         if (clip.sprite_url && !spriteImages[clip.sprite_url]) {
-            const img = new Image();
-            img.src = clip.sprite_url;
-            spriteImages[clip.sprite_url] = img;
+            tasks.push(new Promise((resolve) => {
+                const img = new Image();
+                img.onload = resolve;
+                img.onerror = resolve; // Resolve on error so a failed image doesn't block the UI
+                img.src = clip.sprite_url;
+                spriteImages[clip.sprite_url] = img;
+            }));
         }
 
-        // Fetch and parse the VTT manifest
+        // 2. Push the VTT fetch into the tasks array
         if (clip.vtt_url && !vttCache[clip.url]) {
-            try {
-                const resp = await fetch(clip.vtt_url);
-                const text = await resp.text();
-                const cues = [];
-                // Safely extract HH:MM:SS.mmm and coordinates
-                const regex = /(\d{2}:\d{2}:\d{2}\.\d{3})\s-->\s(\d{2}:\d{2}:\d{2}\.\d{3})\s+.*?#xywh=(\d+),(\d+),(\d+),(\d+)/g;
-                let match;
-                while ((match = regex.exec(text)) !== null) {
-                    cues.push({
-                        start: parseVTTTime(match[1]),
-                        end: parseVTTTime(match[2]),
-                        x: parseInt(match[3], 10),
-                        y: parseInt(match[4], 10),
-                        w: parseInt(match[5], 10),
-                        h: parseInt(match[6], 10)
-                    });
+            tasks.push((async () => {
+                try {
+                    const resp = await fetch(clip.vtt_url);
+                    const text = await resp.text();
+                    const cues = [];
+                    const regex = /(\d{2}:\d{2}:\d{2}\.\d{3})\s-->\s(\d{2}:\d{2}:\d{2}\.\d{3})\s+.*?#xywh=(\d+),(\d+),(\d+),(\d+)/g;
+                    let match;
+                    while ((match = regex.exec(text)) !== null) {
+                        cues.push({
+                            start: parseVTTTime(match[1]),
+                            end: parseVTTTime(match[2]),
+                            x: parseInt(match[3], 10),
+                            y: parseInt(match[4], 10),
+                            w: parseInt(match[5], 10),
+                            h: parseInt(match[6], 10)
+                        });
+                    }
+                    vttCache[clip.url] = cues;
+                } catch (e) {
+                    console.error("Failed to load VTT for", clip.url, e);
                 }
-                vttCache[clip.url] = cues;
-            } catch (e) {
-                console.error("Failed to load VTT for", clip.url, e);
-            }
+            })());
         }
+
+        // Wait for both the image and the VTT for this specific clip to finish
+        await Promise.all(tasks);
     });
-    // Let these silently load in the background
+
+    // Wait for all clips to complete their background loading
     await Promise.allSettled(promises);
 }
 
@@ -281,8 +292,14 @@ async function fetchManifest() {
         });
         globalManifest = newManifest;
 
+        // Reset the timeline color when pulling new data
+        fwTimelineRegion.classList.remove('sprites-loaded');
+
         if (newManifest[camId]) {
-            loadClipMetadata(newManifest[camId]);
+            // Apply the green background once all metadata and sprites have successfully loaded
+            loadClipMetadata(newManifest[camId]).then(() => {
+                fwTimelineRegion.classList.add('sprites-loaded');
+            });
         }
 
         drawTimelineChunks();

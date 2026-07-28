@@ -159,9 +159,19 @@ body {
     touch-action: none;
     border: 1px solid #333;
     box-sizing: border-box;
+    /* Add a transition so the color change isn't jarring */
+    transition: background-color 0.4s ease;
 }
 
 .fw-timeline-region:hover { background: rgba(255, 255, 255, 0.12); }
+
+.fw-timeline-region.sprites-loaded {
+    background: rgba(46, 204, 113, 0.15); /* Subtle green */
+}
+
+.fw-timeline-region.sprites-loaded:hover {
+    background: rgba(46, 204, 113, 0.25); /* Slightly brighter on hover */
+}
 
 .fw-timeline-indicator {
     position: absolute;
