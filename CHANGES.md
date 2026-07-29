@@ -27,5 +27,6 @@ This is human-written.
 13. Single camera display now has selectable scale: 1 hour, 2 hour, etc.
 14. Moved web files into Web directory for improved security.
 15. Dramatically improved multiple and single camera motion clip scrubber preview.
+16. Single-camera caching loads from the current scrubber position outward.
 
 ## Features
