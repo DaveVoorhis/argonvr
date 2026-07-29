@@ -7,7 +7,7 @@ let baseDir = './cameras';
 // --- Global Metadata Cache ---
 const vttCache = {}; // clipUrl -> Array of cue objects
 const spriteImages = {}; // spriteUrl -> Preloaded Image object
-const vttInFlight = new Set(); // clipUrl -> tracks active downloads to prevent duplicates
+const vttInFlight = new Map(); // clipUrl -> Promise (tracks active downloads to allow adoption across sessions)
 
 // --- Helper Functions ---
 function getTodayString() {
@@ -262,8 +262,7 @@ async function loadClipMetadata(clips) {
 
         let allComplete = true;
 
-        // 1. Universal UI Sweep: Safely catches any clips that finished in
-        // the background after being orphaned by a previous session.
+        // 1. Universal UI Sweep
         for (const clip of clips) {
             const hasVtt = !!vttCache[clip.url];
             const hasSprite = spriteImages[clip.sprite_url] && spriteImages[clip.sprite_url].complete;
@@ -281,14 +280,13 @@ async function loadClipMetadata(clips) {
 
         if (allComplete) break; // Entire timeline is loaded!
 
-        // 2. Find clips that are missing data AND are not currently in-flight
+        // 2. Find clips that are missing data OR are actively in-flight
+        // By including in-flight clips, we ensure they are prioritized in the distance sort
         const pendingClips = clips.filter(c =>
-            (c.sprite_url && !spriteImages[c.sprite_url]) ||
-            (c.vtt_url && !vttCache[c.url] && !vttInFlight.has(c.url))
+            (c.sprite_url && (!spriteImages[c.sprite_url] || !spriteImages[c.sprite_url].complete)) ||
+            (c.vtt_url && !vttCache[c.url])
         );
 
-        // If the remaining missing clips are actively being fetched by an orphaned
-        // background process, simply wait a fraction of a second and loop again.
         if (pendingClips.length === 0) {
             await new Promise(r => setTimeout(r, 200));
             continue;
@@ -307,58 +305,74 @@ async function loadClipMetadata(clips) {
         const batchPromises = [];
 
         for (const targetClip of batch) {
-            const tasks = [];
 
-            if (targetClip.sprite_url && !spriteImages[targetClip.sprite_url]) {
-                tasks.push(new Promise((resolve) => {
+            // Handle JPEGs
+            if (targetClip.sprite_url) {
+                if (!spriteImages[targetClip.sprite_url]) {
+                    // Start a new image fetch and attach the promise to the element
                     const img = new Image();
-                    img.onload = resolve;
-                    img.onerror = resolve;
+                    const p = new Promise(resolve => {
+                        img.onload = resolve;
+                        img.onerror = resolve; // Ensure it resolves even on 404
+                    });
                     img.src = targetClip.sprite_url;
-                    spriteImages[targetClip.sprite_url] = img; // Register instantly
-                }));
-            }
-
-            if (targetClip.vtt_url && !vttCache[targetClip.url] && !vttInFlight.has(targetClip.url)) {
-                vttInFlight.add(targetClip.url);
-
-                tasks.push((async () => {
-                    try {
-                        const resp = await fetch(targetClip.vtt_url);
-                        if (!resp.ok) throw new Error("Fetch failed");
-                        const text = await resp.text();
-                        const cues = [];
-                        const regex = /(\d{2}:\d{2}:\d{2}\.\d{3})\s-->\s(\d{2}:\d{2}:\d{2}\.\d{3})\s+.*?#xywh=(\d+),(\d+),(\d+),(\d+)/g;
-                        let match;
-                        while ((match = regex.exec(text)) !== null) {
-                            cues.push({
-                                start: parseVTTTime(match[1]),
-                                end: parseVTTTime(match[2]),
-                                x: parseInt(match[3], 10),
-                                y: parseInt(match[4], 10),
-                                w: parseInt(match[5], 10),
-                                h: parseInt(match[6], 10)
-                            });
-                        }
-                        vttCache[targetClip.url] = cues;
-                    } catch (e) {
-                        console.error("Failed to load VTT for", targetClip.url, e);
-                        vttCache[targetClip.url] = []; // Prevent infinite retry loops
-                    } finally {
-                        vttInFlight.delete(targetClip.url);
+                    img._loadPromise = p;
+                    spriteImages[targetClip.sprite_url] = img;
+                    batchPromises.push(p);
+                } else if (!spriteImages[targetClip.sprite_url].complete) {
+                    // It's already fetching! Adopt the existing promise so we can wait on it
+                    if (spriteImages[targetClip.sprite_url]._loadPromise) {
+                        batchPromises.push(spriteImages[targetClip.sprite_url]._loadPromise);
                     }
-                })());
+                }
             }
 
-            if (tasks.length > 0) {
-                batchPromises.push(Promise.allSettled(tasks));
+            // Handle VTTs
+            if (targetClip.vtt_url && !vttCache[targetClip.url]) {
+                if (!vttInFlight.has(targetClip.url)) {
+                    // Start a new text fetch
+                    const p = (async () => {
+                        try {
+                            const resp = await fetch(targetClip.vtt_url);
+                            if (!resp.ok) throw new Error("Fetch failed");
+                            const text = await resp.text();
+                            const cues = [];
+                            const regex = /(\d{2}:\d{2}:\d{2}\.\d{3})\s-->\s(\d{2}:\d{2}:\d{2}\.\d{3})\s+.*?#xywh=(\d+),(\d+),(\d+),(\d+)/g;
+                            let match;
+                            while ((match = regex.exec(text)) !== null) {
+                                cues.push({
+                                    start: parseVTTTime(match[1]),
+                                    end: parseVTTTime(match[2]),
+                                    x: parseInt(match[3], 10),
+                                    y: parseInt(match[4], 10),
+                                    w: parseInt(match[5], 10),
+                                    h: parseInt(match[6], 10)
+                                });
+                            }
+                            vttCache[targetClip.url] = cues;
+                        } catch (e) {
+                            console.error("Failed to load VTT for", targetClip.url, e);
+                            vttCache[targetClip.url] = []; // Prevent infinite retry loops
+                        } finally {
+                            vttInFlight.delete(targetClip.url); // Always clear the queue
+                        }
+                    })();
+
+                    vttInFlight.set(targetClip.url, p);
+                    batchPromises.push(p);
+                } else {
+                    // It's already fetching! Adopt the existing promise
+                    batchPromises.push(vttInFlight.get(targetClip.url));
+                }
             }
         }
 
-        // Wait for this 4-clip batch to finish before looping back around
-        // to re-evaluate where the scrubber is for the next batch.
+        // Wait for this batch before re-evaluating where the scrubber moved
         if (batchPromises.length > 0) {
             await Promise.allSettled(batchPromises);
+        } else {
+            // Safety fallback to prevent a tight infinite loop
+            await new Promise(r => setTimeout(r, 100));
         }
     }
 }
