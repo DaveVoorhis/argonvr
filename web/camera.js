@@ -99,6 +99,17 @@ function getPlayheadAbsoluteSeconds(clips) {
         return parseFilenameToSeconds(lastClip.filename) + (lastClip.duration || 0);
     }
 
+    // Prioritize the exact absolute time from the label to bypass UI percentage lag during scale changes
+    if (fwTimeLabel.innerText && fwTimeLabel.innerText !== "LOADING") {
+        const parts = fwTimeLabel.innerText.split(':');
+        if (parts.length === 3) {
+            return (parseInt(parts[0], 10) * 3600) +
+                (parseInt(parts[1], 10) * 60) +
+                parseInt(parts[2], 10);
+        }
+    }
+
+    // Fallback to indicator percentage for initial loads before the time label is fully populated
     const leftStyle = fwIndicator.style.left;
     const indicatorPct = leftStyle ? parseFloat(leftStyle) : 100;
     const totalDuration = clips.reduce((sum, c) => sum + (c.duration || 0), 0);
