@@ -7,6 +7,7 @@ let baseDir = './cameras';
 // --- Global Metadata Cache ---
 const vttCache = {}; // clipUrl -> Array of cue objects
 const spriteImages = {}; // spriteUrl -> Preloaded Image object
+const vttInFlight = new Set(); // clipUrl -> tracks active downloads to prevent duplicates
 
 // --- Helper Functions ---
 function getTodayString() {
@@ -90,7 +91,6 @@ function getDayClips() {
     return parsed;
 }
 
-// Determines the absolute timestamp of the visual scrubber
 function getPlayheadAbsoluteSeconds(clips) {
     if (!clips || clips.length === 0) return 0;
 
@@ -112,7 +112,6 @@ function handleScaleChange() {
     drawTimelineChunks();
     const dayClips = getDayClips();
 
-    // Fire off the dynamic loader without awaiting it
     loadClipMetadata(dayClips);
 
     if (currentClipUrl) {
@@ -248,7 +247,7 @@ fwVideo.addEventListener('timeupdate', () => {
     }
 });
 
-// --- Background Data Loaders (Dynamically Tracks Scrubber) ---
+// --- Background Data Loaders (Parallel + Resilient UI Updates) ---
 async function loadClipMetadata(clips) {
     const session = ++currentLoadSession;
 
@@ -256,77 +255,110 @@ async function loadClipMetadata(clips) {
         await new Promise(r => setTimeout(r, 800));
     }
 
-    // Continuous loop that evaluates scrubber position on every pass
+    const PARALLEL_BATCH_SIZE = 4; // Safely load 4 clips at once
+
     while (true) {
-        // Abandon loop if a newer scale change or manifest pull started
         if (session !== currentLoadSession) break;
 
-        // Find clips that haven't even attempted to load yet
-        const unloadedClips = clips.filter(c =>
+        let allComplete = true;
+
+        // 1. Universal UI Sweep: Safely catches any clips that finished in
+        // the background after being orphaned by a previous session.
+        for (const clip of clips) {
+            const hasVtt = !!vttCache[clip.url];
+            const hasSprite = spriteImages[clip.sprite_url] && spriteImages[clip.sprite_url].complete;
+
+            if (hasVtt && hasSprite) {
+                const chunkEl = document.querySelector(`.fw-timeline-chunk[data-url="${clip.url}"]`);
+                if (chunkEl && !chunkEl.classList.contains('chunk-loaded')) {
+                    chunkEl.style.backgroundColor = 'rgba(76, 209, 55, 0.6)';
+                    chunkEl.classList.add('chunk-loaded');
+                }
+            } else {
+                allComplete = false;
+            }
+        }
+
+        if (allComplete) break; // Entire timeline is loaded!
+
+        // 2. Find clips that are missing data AND are not currently in-flight
+        const pendingClips = clips.filter(c =>
             (c.sprite_url && !spriteImages[c.sprite_url]) ||
-            (c.vtt_url && !vttCache[c.url])
+            (c.vtt_url && !vttCache[c.url] && !vttInFlight.has(c.url))
         );
 
-        if (unloadedClips.length === 0) break; // All loaded!
+        // If the remaining missing clips are actively being fetched by an orphaned
+        // background process, simply wait a fraction of a second and loop again.
+        if (pendingClips.length === 0) {
+            await new Promise(r => setTimeout(r, 200));
+            continue;
+        }
 
+        // 3. Dynamically sort the pending clips by distance to the scrubber
         const playheadTime = getPlayheadAbsoluteSeconds(clips);
-
-        // Sort dynamically based on the current playhead
-        unloadedClips.sort((a, b) => {
+        pendingClips.sort((a, b) => {
             const aCenter = parseFilenameToSeconds(a.filename) + ((a.duration || 0) / 2);
             const bCenter = parseFilenameToSeconds(b.filename) + ((b.duration || 0) / 2);
             return Math.abs(aCenter - playheadTime) - Math.abs(bCenter - playheadTime);
         });
 
-        const targetClip = unloadedClips[0];
-        const tasks = [];
+        // 4. Batch dispatch up to 4 closest clips concurrently
+        const batch = pendingClips.slice(0, PARALLEL_BATCH_SIZE);
+        const batchPromises = [];
 
-        if (targetClip.sprite_url && !spriteImages[targetClip.sprite_url]) {
-            tasks.push(new Promise((resolve) => {
-                const img = new Image();
-                img.onload = resolve;
-                img.onerror = resolve;
-                img.src = targetClip.sprite_url;
-                spriteImages[targetClip.sprite_url] = img; // Register instantly so it's excluded from next search
-            }));
-        }
+        for (const targetClip of batch) {
+            const tasks = [];
 
-        if (targetClip.vtt_url && !vttCache[targetClip.url]) {
-            tasks.push((async () => {
-                try {
-                    const resp = await fetch(targetClip.vtt_url);
-                    if (!resp.ok) throw new Error("Fetch failed");
-                    const text = await resp.text();
-                    const cues = [];
-                    const regex = /(\d{2}:\d{2}:\d{2}\.\d{3})\s-->\s(\d{2}:\d{2}:\d{2}\.\d{3})\s+.*?#xywh=(\d+),(\d+),(\d+),(\d+)/g;
-                    let match;
-                    while ((match = regex.exec(text)) !== null) {
-                        cues.push({
-                            start: parseVTTTime(match[1]),
-                            end: parseVTTTime(match[2]),
-                            x: parseInt(match[3], 10),
-                            y: parseInt(match[4], 10),
-                            w: parseInt(match[5], 10),
-                            h: parseInt(match[6], 10)
-                        });
+            if (targetClip.sprite_url && !spriteImages[targetClip.sprite_url]) {
+                tasks.push(new Promise((resolve) => {
+                    const img = new Image();
+                    img.onload = resolve;
+                    img.onerror = resolve;
+                    img.src = targetClip.sprite_url;
+                    spriteImages[targetClip.sprite_url] = img; // Register instantly
+                }));
+            }
+
+            if (targetClip.vtt_url && !vttCache[targetClip.url] && !vttInFlight.has(targetClip.url)) {
+                vttInFlight.add(targetClip.url);
+
+                tasks.push((async () => {
+                    try {
+                        const resp = await fetch(targetClip.vtt_url);
+                        if (!resp.ok) throw new Error("Fetch failed");
+                        const text = await resp.text();
+                        const cues = [];
+                        const regex = /(\d{2}:\d{2}:\d{2}\.\d{3})\s-->\s(\d{2}:\d{2}:\d{2}\.\d{3})\s+.*?#xywh=(\d+),(\d+),(\d+),(\d+)/g;
+                        let match;
+                        while ((match = regex.exec(text)) !== null) {
+                            cues.push({
+                                start: parseVTTTime(match[1]),
+                                end: parseVTTTime(match[2]),
+                                x: parseInt(match[3], 10),
+                                y: parseInt(match[4], 10),
+                                w: parseInt(match[5], 10),
+                                h: parseInt(match[6], 10)
+                            });
+                        }
+                        vttCache[targetClip.url] = cues;
+                    } catch (e) {
+                        console.error("Failed to load VTT for", targetClip.url, e);
+                        vttCache[targetClip.url] = []; // Prevent infinite retry loops
+                    } finally {
+                        vttInFlight.delete(targetClip.url);
                     }
-                    vttCache[targetClip.url] = cues;
-                } catch (e) {
-                    console.error("Failed to load VTT for", targetClip.url, e);
-                    vttCache[targetClip.url] = []; // Prevent infinite loop retries on 404
-                }
-            })());
+                })());
+            }
+
+            if (tasks.length > 0) {
+                batchPromises.push(Promise.allSettled(tasks));
+            }
         }
 
-        if (tasks.length > 0) {
-            await Promise.allSettled(tasks);
-        }
-
-        // Iteratively turn the corresponding timeline chunk green
-        const chunkEl = document.querySelector(`.fw-timeline-chunk[data-url="${targetClip.url}"]`);
-        if (chunkEl && vttCache[targetClip.url] && spriteImages[targetClip.sprite_url]?.complete) {
-            chunkEl.style.backgroundColor = 'rgba(76, 209, 55, 0.6)';
-            chunkEl.classList.add('chunk-loaded');
+        // Wait for this 4-clip batch to finish before looping back around
+        // to re-evaluate where the scrubber is for the next batch.
+        if (batchPromises.length > 0) {
+            await Promise.allSettled(batchPromises);
         }
     }
 }
