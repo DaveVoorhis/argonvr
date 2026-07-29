@@ -40,7 +40,6 @@ function secondsToTimeStr(seconds) {
 }
 
 function parseFilenameToSeconds(filename) {
-    // Changed regex to look for .m3u8
     const match = filename.match(/_(\d{8})_(\d{2})(\d{2})(\d{2})\.m3u8/);
     if (!match) return null;
     const h = parseInt(match[2], 10);
@@ -66,6 +65,7 @@ let fwIsScrubbing = false;
 let currentClipUrl = null;
 let targetClipUrl = null;
 let targetClipOffset = 0;
+let currentLoadSession = 0; // Tracks the active metadata loading loop
 
 function getDayClips() {
     const clips = globalManifest[camId] || [];
@@ -91,14 +91,11 @@ function getDayClips() {
 }
 
 function handleScaleChange() {
-    // Lazy load the metadata for the newly expanded view
-    fwTimelineRegion.classList.remove('sprites-loaded');
-    loadClipMetadata(getDayClips()).then(() => {
-        fwTimelineRegion.classList.add('sprites-loaded');
-    });
-
     drawTimelineChunks();
     const dayClips = getDayClips();
+
+    // Fire off the iterative loader without awaiting it
+    loadClipMetadata(dayClips);
 
     if (currentClipUrl) {
         const stillExists = dayClips.some(c => c.url === currentClipUrl);
@@ -238,23 +235,33 @@ fwVideo.addEventListener('timeupdate', () => {
     }
 });
 
-// --- Background Data Loaders ---
+// --- Background Data Loaders (Refactored for Iterative Loading) ---
 async function loadClipMetadata(clips) {
-    const promises = clips.map(async clip => {
+    const session = ++currentLoadSession;
+
+    // Slight delay on live load to give the HLS stream priority on the connection pool
+    if (currentDayString === getTodayString()) {
+        await new Promise(r => setTimeout(r, 800));
+    }
+
+    for (const clip of clips) {
+        // Abandon loop if a newer scale change or manifest pull started
+        if (session !== currentLoadSession) break;
+
         const tasks = [];
 
-        // 1. Wrap the image load in a Promise to track its completion
+        // 1. Wrap the image load in a Promise
         if (clip.sprite_url && !spriteImages[clip.sprite_url]) {
             tasks.push(new Promise((resolve) => {
                 const img = new Image();
                 img.onload = resolve;
-                img.onerror = resolve; // Resolve on error so a failed image doesn't block the UI
+                img.onerror = resolve;
                 img.src = clip.sprite_url;
                 spriteImages[clip.sprite_url] = img;
             }));
         }
 
-        // 2. Push the VTT fetch into the tasks array
+        // 2. Fetch VTT sequentially
         if (clip.vtt_url && !vttCache[clip.url]) {
             tasks.push((async () => {
                 try {
@@ -280,12 +287,18 @@ async function loadClipMetadata(clips) {
             })());
         }
 
-        // Wait for both the image and the VTT for this specific clip to finish
-        await Promise.all(tasks);
-    });
+        // Wait for this specific clip's metadata to finish before moving on
+        if (tasks.length > 0) {
+            await Promise.allSettled(tasks);
+        }
 
-    // Wait for all clips to complete their background loading
-    await Promise.allSettled(promises);
+        // Iteratively turn the corresponding timeline chunk green
+        const chunkEl = document.querySelector(`.fw-timeline-chunk[data-url="${clip.url}"]`);
+        if (chunkEl && vttCache[clip.url] && spriteImages[clip.sprite_url]?.complete) {
+            chunkEl.style.backgroundColor = 'rgba(76, 209, 55, 0.6)'; // Loaded green
+            chunkEl.classList.add('chunk-loaded');
+        }
+    }
 }
 
 async function fetchManifest() {
@@ -299,17 +312,13 @@ async function fetchManifest() {
         });
         globalManifest = newManifest;
 
-        // Reset the timeline color when pulling new data
-        fwTimelineRegion.classList.remove('sprites-loaded');
+        // Draw chunks immediately as grey/white
+        drawTimelineChunks();
 
         if (newManifest[camId]) {
-            // Apply the green background once all metadata and sprites in the VISIBLE span have loaded
-            loadClipMetadata(getDayClips()).then(() => {
-                fwTimelineRegion.classList.add('sprites-loaded');
-            });
+            // Start the sequential background loader without awaiting it
+            loadClipMetadata(getDayClips());
         }
-
-        drawTimelineChunks();
     } catch (e) {
         console.log("Could not load history manifest.");
     }
@@ -329,9 +338,17 @@ function drawTimelineChunks() {
 
         const chunk = document.createElement('div');
         chunk.className = 'fw-timeline-chunk';
+        chunk.setAttribute('data-url', clip.url);
         chunk.style.left = `${startPct}%`;
         chunk.style.width = `${widthPct}%`;
-        chunk.style.backgroundColor = 'rgba(255, 255, 255, 0.25)';
+
+        // If already cached, draw it green immediately, otherwise white/transparent
+        if (vttCache[clip.url] && spriteImages[clip.sprite_url]?.complete) {
+            chunk.style.backgroundColor = 'rgba(76, 209, 55, 0.6)';
+            chunk.classList.add('chunk-loaded');
+        } else {
+            chunk.style.backgroundColor = 'rgba(255, 255, 255, 0.25)';
+        }
 
         fwTimelineRegion.insertBefore(chunk, fwIndicator);
         accum += clip.duration;
