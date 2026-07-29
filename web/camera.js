@@ -91,6 +91,12 @@ function getDayClips() {
 }
 
 function handleScaleChange() {
+    // Lazy load the metadata for the newly expanded view
+    fwTimelineRegion.classList.remove('sprites-loaded');
+    loadClipMetadata(getDayClips()).then(() => {
+        fwTimelineRegion.classList.add('sprites-loaded');
+    });
+
     drawTimelineChunks();
     const dayClips = getDayClips();
 
@@ -297,8 +303,8 @@ async function fetchManifest() {
         fwTimelineRegion.classList.remove('sprites-loaded');
 
         if (newManifest[camId]) {
-            // Apply the green background once all metadata and sprites have successfully loaded
-            loadClipMetadata(newManifest[camId]).then(() => {
+            // Apply the green background once all metadata and sprites in the VISIBLE span have loaded
+            loadClipMetadata(getDayClips()).then(() => {
                 fwTimelineRegion.classList.add('sprites-loaded');
             });
         }
