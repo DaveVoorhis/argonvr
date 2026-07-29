@@ -90,11 +90,29 @@ function getDayClips() {
     return parsed;
 }
 
+// Determines the absolute timestamp of the visual scrubber
+function getPlayheadAbsoluteSeconds(clips) {
+    if (!clips || clips.length === 0) return 0;
+
+    if (fwTimeLabel.innerText === "LIVE") {
+        const lastClip = clips[clips.length - 1];
+        return parseFilenameToSeconds(lastClip.filename) + (lastClip.duration || 0);
+    }
+
+    const leftStyle = fwIndicator.style.left;
+    const indicatorPct = leftStyle ? parseFloat(leftStyle) : 100;
+    const totalDuration = clips.reduce((sum, c) => sum + (c.duration || 0), 0);
+    const targetOffset = (indicatorPct / 100) * totalDuration;
+
+    const firstClipSeconds = parseFilenameToSeconds(clips[0].filename);
+    return firstClipSeconds + targetOffset;
+}
+
 function handleScaleChange() {
     drawTimelineChunks();
     const dayClips = getDayClips();
 
-    // Fire off the iterative loader without awaiting it
+    // Fire off the dynamic loader without awaiting it
     loadClipMetadata(dayClips);
 
     if (currentClipUrl) {
@@ -138,7 +156,6 @@ function renderSpriteFrame(clip, offset) {
     if (cues && cues.length > 0 && img && img.complete && img.naturalWidth > 0) {
         let targetCue = cues[0];
 
-        // Locate the correct sprite tile based on the VTT timestamps
         for (let i = 0; i < cues.length; i++) {
             if (offset >= cues[i].start && (i === cues.length - 1 || offset < cues[i+1].start)) {
                 targetCue = cues[i];
@@ -146,16 +163,12 @@ function renderSpriteFrame(clip, offset) {
             }
         }
 
-        // Establish a fixed high-res aspect ratio canvas to keep scaling crisp
         snapshotCanvas.width = 1920;
         snapshotCanvas.height = 1080;
         const ctx = snapshotCanvas.getContext('2d');
 
-        // Fill black background to prevent edge-bleeding
         ctx.fillStyle = '#000';
         ctx.fillRect(0, 0, snapshotCanvas.width, snapshotCanvas.height);
-
-        // Crop the 160x90 tile from the massive sprite sheet and stretch it over the canvas
         ctx.drawImage(img,
             targetCue.x, targetCue.y, targetCue.w, targetCue.h,
             0, 0, snapshotCanvas.width, snapshotCanvas.height
@@ -235,37 +248,54 @@ fwVideo.addEventListener('timeupdate', () => {
     }
 });
 
-// --- Background Data Loaders (Refactored for Iterative Loading) ---
+// --- Background Data Loaders (Dynamically Tracks Scrubber) ---
 async function loadClipMetadata(clips) {
     const session = ++currentLoadSession;
 
-    // Slight delay on live load to give the HLS stream priority on the connection pool
-    if (currentDayString === getTodayString()) {
+    if (currentDayString === getTodayString() && fwTimeLabel.innerText === "LIVE") {
         await new Promise(r => setTimeout(r, 800));
     }
 
-    for (const clip of clips) {
+    // Continuous loop that evaluates scrubber position on every pass
+    while (true) {
         // Abandon loop if a newer scale change or manifest pull started
         if (session !== currentLoadSession) break;
 
+        // Find clips that haven't even attempted to load yet
+        const unloadedClips = clips.filter(c =>
+            (c.sprite_url && !spriteImages[c.sprite_url]) ||
+            (c.vtt_url && !vttCache[c.url])
+        );
+
+        if (unloadedClips.length === 0) break; // All loaded!
+
+        const playheadTime = getPlayheadAbsoluteSeconds(clips);
+
+        // Sort dynamically based on the current playhead
+        unloadedClips.sort((a, b) => {
+            const aCenter = parseFilenameToSeconds(a.filename) + ((a.duration || 0) / 2);
+            const bCenter = parseFilenameToSeconds(b.filename) + ((b.duration || 0) / 2);
+            return Math.abs(aCenter - playheadTime) - Math.abs(bCenter - playheadTime);
+        });
+
+        const targetClip = unloadedClips[0];
         const tasks = [];
 
-        // 1. Wrap the image load in a Promise
-        if (clip.sprite_url && !spriteImages[clip.sprite_url]) {
+        if (targetClip.sprite_url && !spriteImages[targetClip.sprite_url]) {
             tasks.push(new Promise((resolve) => {
                 const img = new Image();
                 img.onload = resolve;
                 img.onerror = resolve;
-                img.src = clip.sprite_url;
-                spriteImages[clip.sprite_url] = img;
+                img.src = targetClip.sprite_url;
+                spriteImages[targetClip.sprite_url] = img; // Register instantly so it's excluded from next search
             }));
         }
 
-        // 2. Fetch VTT sequentially
-        if (clip.vtt_url && !vttCache[clip.url]) {
+        if (targetClip.vtt_url && !vttCache[targetClip.url]) {
             tasks.push((async () => {
                 try {
-                    const resp = await fetch(clip.vtt_url);
+                    const resp = await fetch(targetClip.vtt_url);
+                    if (!resp.ok) throw new Error("Fetch failed");
                     const text = await resp.text();
                     const cues = [];
                     const regex = /(\d{2}:\d{2}:\d{2}\.\d{3})\s-->\s(\d{2}:\d{2}:\d{2}\.\d{3})\s+.*?#xywh=(\d+),(\d+),(\d+),(\d+)/g;
@@ -280,22 +310,22 @@ async function loadClipMetadata(clips) {
                             h: parseInt(match[6], 10)
                         });
                     }
-                    vttCache[clip.url] = cues;
+                    vttCache[targetClip.url] = cues;
                 } catch (e) {
-                    console.error("Failed to load VTT for", clip.url, e);
+                    console.error("Failed to load VTT for", targetClip.url, e);
+                    vttCache[targetClip.url] = []; // Prevent infinite loop retries on 404
                 }
             })());
         }
 
-        // Wait for this specific clip's metadata to finish before moving on
         if (tasks.length > 0) {
             await Promise.allSettled(tasks);
         }
 
         // Iteratively turn the corresponding timeline chunk green
-        const chunkEl = document.querySelector(`.fw-timeline-chunk[data-url="${clip.url}"]`);
-        if (chunkEl && vttCache[clip.url] && spriteImages[clip.sprite_url]?.complete) {
-            chunkEl.style.backgroundColor = 'rgba(76, 209, 55, 0.6)'; // Loaded green
+        const chunkEl = document.querySelector(`.fw-timeline-chunk[data-url="${targetClip.url}"]`);
+        if (chunkEl && vttCache[targetClip.url] && spriteImages[targetClip.sprite_url]?.complete) {
+            chunkEl.style.backgroundColor = 'rgba(76, 209, 55, 0.6)';
             chunkEl.classList.add('chunk-loaded');
         }
     }
@@ -312,11 +342,9 @@ async function fetchManifest() {
         });
         globalManifest = newManifest;
 
-        // Draw chunks immediately as grey/white
         drawTimelineChunks();
 
         if (newManifest[camId]) {
-            // Start the sequential background loader without awaiting it
             loadClipMetadata(getDayClips());
         }
     } catch (e) {
@@ -342,7 +370,6 @@ function drawTimelineChunks() {
         chunk.style.left = `${startPct}%`;
         chunk.style.width = `${widthPct}%`;
 
-        // If already cached, draw it green immediately, otherwise white/transparent
         if (vttCache[clip.url] && spriteImages[clip.sprite_url]?.complete) {
             chunk.style.backgroundColor = 'rgba(76, 209, 55, 0.6)';
             chunk.classList.add('chunk-loaded');
@@ -454,7 +481,6 @@ function applyVideoScrub(selectedClip, offsetInClip) {
     targetClipOffset = offsetInClip;
 
     if (currentClipUrl === selectedClip.url) {
-        // If we are scrubbing within the same clip, just seek.
         if (fwVideo.readyState > 1) {
             fwVideo.currentTime = targetClipOffset;
         }
@@ -480,7 +506,6 @@ function applyVideoScrub(selectedClip, offsetInClip) {
                 }
             });
         } else if (fwVideo.canPlayType('application/vnd.apple.mpegurl')) {
-            // Native Safari fallback
             fwVideo.src = selectedClip.url;
             fwVideo.load();
             fwVideo.onloadedmetadata = () => {
@@ -508,10 +533,8 @@ function updateFwTimelineFromEvent(e, isRelease = false) {
     fwTimeLabel.style.color = "#f39c12";
 
     if (!isRelease) {
-        // Fast UI interaction: Draw the nearest I-Frame to the canvas and bypass the video file
         renderSpriteFrame(target.selectedClip, target.offsetInClip);
     } else {
-        // load the HLS playlist
         applyVideoScrub(target.selectedClip, target.offsetInClip);
     }
 }
@@ -542,15 +565,14 @@ fwTimelineRegion.addEventListener('pointerup', (e) => {
 
     const rect = fwTimelineRegion.getBoundingClientRect();
     const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+
     if (currentDayString === getTodayString() && (x / rect.width) >= 0.99) {
         fwGoLive();
-        return;
+    } else {
+        setTimeout(() => {
+            fwVideo.play().catch(e => {});
+        }, 50);
     }
-
-    // Unconditionally resume playback after dropping the scrubber
-    setTimeout(() => {
-        fwVideo.play().catch(e => {});
-    }, 50);
 });
 
 document.addEventListener('DOMContentLoaded', async () => {
