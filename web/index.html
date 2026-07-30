@@ -9,6 +9,13 @@
     <title>ArgoNVR</title>
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <script>
+        // Fix mobile Chrome dvh cold-load bug by locking actual innerHeight
+        const setAppHeight = () => {
+            document.documentElement.style.setProperty('--app-height', `${window.innerHeight}px`);
+        };
+        window.addEventListener('resize', setAppHeight);
+        window.addEventListener('load', setAppHeight);
+        setAppHeight();
         if ('serviceWorker' in navigator) {
             window.addEventListener('load', () => {
                 navigator.serviceWorker.register('/sw.js')
@@ -19,15 +26,6 @@
                     });
             });
         }
-    </script>
-    <script>
-        // Fix mobile Chrome dvh cold-load bug by locking actual innerHeight
-        const setAppHeight = () => {
-            document.documentElement.style.setProperty('--app-height', `${window.innerHeight}px`);
-        };
-        window.addEventListener('resize', setAppHeight);
-        window.addEventListener('load', setAppHeight);
-        setAppHeight();
     </script>
 </head>
 <body>
