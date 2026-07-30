@@ -11,17 +11,6 @@ body {
     overflow: hidden;
 }
 
-.camera-header {
-    background: #1a1a1a;
-    padding: 10px 15px;
-    display: flex;
-    align-items: center;
-    border-bottom: 1px solid #333;
-    height: 40px;
-    flex-shrink: 0;
-    gap: 20px;
-}
-
 .back-btn {
     background: #333;
     border: none;

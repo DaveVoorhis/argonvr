@@ -1,4 +1,4 @@
-const CACHE_NAME = 'argonvr-cache-v11';
+const CACHE_NAME = 'argonvr-cache-v12';
 const urlsToCache = [
 ];
 
