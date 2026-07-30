@@ -65,7 +65,8 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
 
     def log_message(self, format, *args):
         request_path = getattr(self, 'path', '')
-        quiet_extensions = ['.ts', '.m3u8', '.mp4', '.json', '.jpg', '.vtt']
+        # Added .js to prevent Service Worker polling from spamming the logs
+        quiet_extensions = ['.ts', '.m3u8', '.mp4', '.json', '.jpg', '.vtt', '.js']
         if not LOG_HTTP_REQUESTS and any(ext in request_path for ext in quiet_extensions):
             return
         super().log_message(format, *args)
@@ -144,6 +145,14 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
             if not os.path.exists(filepath):
                 self.send_error(404)
                 return
+
+        # --- PWA Whitelist ---
+        # Allow manifest, service worker, and icons to bypass Basic Auth
+        # so the browser can validate the PWA in the background.
+        if path_no_query in ('/manifest.json', '/sw.js') or path_no_query.startswith('/icons/'):
+            super().do_GET()
+            return
+        # ---------------------
 
         auth_header = self.headers.get('Authorization')
         if not auth_header:
