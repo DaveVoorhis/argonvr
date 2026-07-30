@@ -5,9 +5,9 @@ const colorParam = urlParams.get('color');
 let baseDir = './cameras';
 
 // --- Global Metadata Cache ---
-const vttCache = {}; // clipUrl -> Array of cue objects
-const spriteImages = {}; // spriteUrl -> Preloaded Image object
-const vttInFlight = new Map(); // clipUrl -> Promise (tracks active downloads to allow adoption across sessions)
+const vttCache = {};
+const spriteImages = {};
+const vttInFlight = new Map();
 
 // --- Helper Functions ---
 function getTodayString() {
@@ -40,6 +40,12 @@ function secondsToTimeStr(seconds) {
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
+function secondsToHHMM(seconds) {
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
+
 function parseFilenameToSeconds(filename) {
     const match = filename.match(/_(\d{8})_(\d{2})(\d{2})(\d{2})\.m3u8/);
     if (!match) return null;
@@ -60,66 +66,79 @@ const fwTimelineRegion = document.getElementById('fw-timeline-region');
 const fwIndicator = document.getElementById('fw-timeline-indicator');
 const fwTimeLabel = document.getElementById('fw-time-label');
 
+const scaleSelect = document.getElementById('fw-scale-select');
+const startSlider = document.getElementById('fw-start-slider');
+const endSlider = document.getElementById('fw-end-slider');
+const startVal = document.getElementById('start-val');
+const endVal = document.getElementById('end-val');
+
 let globalManifest = {};
 let fwHlsPlayer = null;
 let fwIsScrubbing = false;
 let currentClipUrl = null;
 let targetClipUrl = null;
 let targetClipOffset = 0;
-let currentLoadSession = 0; // Tracks the active metadata loading loop
+let currentLoadSession = 0;
+
+let timelineStartSec = 0;
+let timelineEndSec = 86400;
+
+// --- Range & Boundary Logic ---
+function getMaxSecOfTheDay() {
+    if (currentDayString === getTodayString()) {
+        const now = new Date();
+        return (now.getHours() * 3600) + (now.getMinutes() * 60) + now.getSeconds();
+    }
+    const clips = globalManifest[camId] || [];
+    let parsed = clips.filter(c => parseFilenameToSeconds(c.filename) !== null)
+        .sort((a,b) => parseFilenameToSeconds(a.filename) - parseFilenameToSeconds(b.filename));
+
+    if (parsed.length > 0) {
+        const lastClip = parsed[parsed.length - 1];
+        return parseFilenameToSeconds(lastClip.filename) + (lastClip.duration || 0);
+    }
+    return 86400;
+}
+
+function updateSliderMaxBounds() {
+    const maxSec = getMaxSecOfTheDay();
+    startSlider.max = maxSec;
+    endSlider.max = maxSec;
+}
+
+// Tolerance Helper to handle browser resizing/reflow snapping
+function isEndSliderAtNow() {
+    if (currentDayString !== getTodayString()) return false;
+    const val = parseInt(endSlider.value, 10);
+    const max = parseInt(endSlider.max, 10);
+    // If within one 60s step of the absolute maximum time, consider it "NOW"
+    return val >= (max - 60);
+}
+
+function updateSliderLabels() {
+    startVal.innerText = secondsToHHMM(startSlider.value);
+    if (isEndSliderAtNow()) {
+        endVal.innerText = "NOW";
+    } else {
+        endVal.innerText = secondsToHHMM(endSlider.value);
+    }
+}
 
 function getDayClips() {
     const clips = globalManifest[camId] || [];
     let parsed = clips.filter(c => parseFilenameToSeconds(c.filename) !== null)
         .sort((a,b) => parseFilenameToSeconds(a.filename) - parseFilenameToSeconds(b.filename));
 
-    const scaleSelect = document.getElementById('fw-scale-select');
-    if (scaleSelect && scaleSelect.value !== 'all' && parsed.length > 0) {
-        const scaleHours = parseInt(scaleSelect.value, 10);
-        const scaleSeconds = scaleHours * 3600;
+    parsed = parsed.filter(c => {
+        const clipStart = parseFilenameToSeconds(c.filename);
+        const clipEnd = clipStart + (c.duration || 0);
+        return clipEnd > timelineStartSec && clipStart < timelineEndSec;
+    });
 
-        const lastClip = parsed[parsed.length - 1];
-        const lastClipEnd = parseFilenameToSeconds(lastClip.filename) + (lastClip.duration || 0);
-        const startTime = Math.max(0, lastClipEnd - scaleSeconds);
-
-        parsed = parsed.filter(c => {
-            const clipStart = parseFilenameToSeconds(c.filename);
-            const clipEnd = clipStart + (c.duration || 0);
-            return clipEnd > startTime;
-        });
-    }
     return parsed;
 }
 
-function getPlayheadAbsoluteSeconds(clips) {
-    if (!clips || clips.length === 0) return 0;
-
-    if (fwTimeLabel.innerText === "LIVE") {
-        const lastClip = clips[clips.length - 1];
-        return parseFilenameToSeconds(lastClip.filename) + (lastClip.duration || 0);
-    }
-
-    // Prioritize the exact absolute time from the label to bypass UI percentage lag during scale changes
-    if (fwTimeLabel.innerText && fwTimeLabel.innerText !== "LOADING") {
-        const parts = fwTimeLabel.innerText.split(':');
-        if (parts.length === 3) {
-            return (parseInt(parts[0], 10) * 3600) +
-                (parseInt(parts[1], 10) * 60) +
-                parseInt(parts[2], 10);
-        }
-    }
-
-    // Fallback to indicator percentage for initial loads before the time label is fully populated
-    const leftStyle = fwIndicator.style.left;
-    const indicatorPct = leftStyle ? parseFloat(leftStyle) : 100;
-    const totalDuration = clips.reduce((sum, c) => sum + (c.duration || 0), 0);
-    const targetOffset = (indicatorPct / 100) * totalDuration;
-
-    const firstClipSeconds = parseFilenameToSeconds(clips[0].filename);
-    return firstClipSeconds + targetOffset;
-}
-
-function handleScaleChange() {
+function applyTimelineRange() {
     drawTimelineChunks();
     const dayClips = getDayClips();
 
@@ -128,7 +147,7 @@ function handleScaleChange() {
     if (currentClipUrl) {
         const stillExists = dayClips.some(c => c.url === currentClipUrl);
         if (!stillExists) {
-            if (currentDayString === getTodayString()) {
+            if (isEndSliderAtNow()) {
                 fwGoLive();
             } else if (dayClips.length > 0) {
                 const first = dayClips[0];
@@ -145,6 +164,83 @@ function handleScaleChange() {
             fwVideo.dispatchEvent(new Event('timeupdate'));
         }
     }
+}
+
+function handleScaleChange() {
+    const val = scaleSelect.value;
+    const maxSec = getMaxSecOfTheDay();
+
+    if (val === 'all') {
+        timelineStartSec = 0;
+        timelineEndSec = maxSec;
+    } else if (val !== 'custom') {
+        const scaleSeconds = parseInt(val, 10) * 3600;
+        timelineEndSec = maxSec;
+        timelineStartSec = Math.max(0, timelineEndSec - scaleSeconds);
+    }
+
+    startSlider.value = timelineStartSec;
+    endSlider.value = timelineEndSec;
+    updateSliderLabels();
+    applyTimelineRange();
+}
+
+// Slider Interactivity Hooks
+startSlider.addEventListener('input', () => {
+    if (parseInt(startSlider.value, 10) >= parseInt(endSlider.value, 10)) {
+        startSlider.value = parseInt(endSlider.value, 10) - 60;
+    }
+    updateSliderLabels();
+});
+
+startSlider.addEventListener('change', () => {
+    timelineStartSec = parseInt(startSlider.value, 10);
+    scaleSelect.value = 'custom';
+    applyTimelineRange();
+});
+
+endSlider.addEventListener('input', () => {
+    if (parseInt(endSlider.value, 10) <= parseInt(startSlider.value, 10)) {
+        endSlider.value = parseInt(startSlider.value, 10) + 60;
+    }
+    updateSliderLabels();
+});
+
+endSlider.addEventListener('change', () => {
+    if (isEndSliderAtNow()) {
+        // Dragging the slider back to MAX forces it back onto the Live stream
+        fwGoLive();
+    } else {
+        timelineEndSec = parseInt(endSlider.value, 10);
+        scaleSelect.value = 'custom';
+        applyTimelineRange();
+    }
+});
+
+function getPlayheadAbsoluteSeconds(clips) {
+    if (!clips || clips.length === 0) return 0;
+
+    if (fwTimeLabel.innerText === "LIVE") {
+        const lastClip = clips[clips.length - 1];
+        return parseFilenameToSeconds(lastClip.filename) + (lastClip.duration || 0);
+    }
+
+    if (fwTimeLabel.innerText && fwTimeLabel.innerText !== "LOADING") {
+        const parts = fwTimeLabel.innerText.split(':');
+        if (parts.length === 3) {
+            return (parseInt(parts[0], 10) * 3600) +
+                (parseInt(parts[1], 10) * 60) +
+                parseInt(parts[2], 10);
+        }
+    }
+
+    const leftStyle = fwIndicator.style.left;
+    const indicatorPct = leftStyle ? parseFloat(leftStyle) : 100;
+    const totalDuration = clips.reduce((sum, c) => sum + (c.duration || 0), 0);
+    const targetOffset = (indicatorPct / 100) * totalDuration;
+
+    const firstClipSeconds = parseFilenameToSeconds(clips[0].filename);
+    return firstClipSeconds + targetOffset;
 }
 
 // --- Canvas & Sprite Logic ---
@@ -258,7 +354,7 @@ fwVideo.addEventListener('timeupdate', () => {
     }
 });
 
-// --- Background Data Loaders (Parallel + Resilient UI Updates) ---
+// --- Background Data Loaders ---
 async function loadClipMetadata(clips) {
     const session = ++currentLoadSession;
 
@@ -266,14 +362,13 @@ async function loadClipMetadata(clips) {
         await new Promise(r => setTimeout(r, 800));
     }
 
-    const PARALLEL_BATCH_SIZE = 4; // Safely load 4 clips at once
+    const PARALLEL_BATCH_SIZE = 4;
 
     while (true) {
         if (session !== currentLoadSession) break;
 
         let allComplete = true;
 
-        // 1. Universal UI Sweep
         for (const clip of clips) {
             const hasVtt = !!vttCache[clip.url];
             const hasSprite = spriteImages[clip.sprite_url] && spriteImages[clip.sprite_url].complete;
@@ -289,10 +384,8 @@ async function loadClipMetadata(clips) {
             }
         }
 
-        if (allComplete) break; // Entire timeline is loaded!
+        if (allComplete) break;
 
-        // 2. Find clips that are missing data OR are actively in-flight
-        // By including in-flight clips, we ensure they are prioritized in the distance sort
         const pendingClips = clips.filter(c =>
             (c.sprite_url && (!spriteImages[c.sprite_url] || !spriteImages[c.sprite_url].complete)) ||
             (c.vtt_url && !vttCache[c.url])
@@ -303,7 +396,6 @@ async function loadClipMetadata(clips) {
             continue;
         }
 
-        // 3. Dynamically sort the pending clips by distance to the scrubber
         const playheadTime = getPlayheadAbsoluteSeconds(clips);
         pendingClips.sort((a, b) => {
             const aCenter = parseFilenameToSeconds(a.filename) + ((a.duration || 0) / 2);
@@ -311,37 +403,30 @@ async function loadClipMetadata(clips) {
             return Math.abs(aCenter - playheadTime) - Math.abs(bCenter - playheadTime);
         });
 
-        // 4. Batch dispatch up to 4 closest clips concurrently
         const batch = pendingClips.slice(0, PARALLEL_BATCH_SIZE);
         const batchPromises = [];
 
         for (const targetClip of batch) {
-
-            // Handle JPEGs
             if (targetClip.sprite_url) {
                 if (!spriteImages[targetClip.sprite_url]) {
-                    // Start a new image fetch and attach the promise to the element
                     const img = new Image();
                     const p = new Promise(resolve => {
                         img.onload = resolve;
-                        img.onerror = resolve; // Ensure it resolves even on 404
+                        img.onerror = resolve;
                     });
                     img.src = targetClip.sprite_url;
                     img._loadPromise = p;
                     spriteImages[targetClip.sprite_url] = img;
                     batchPromises.push(p);
                 } else if (!spriteImages[targetClip.sprite_url].complete) {
-                    // It's already fetching! Adopt the existing promise so we can wait on it
                     if (spriteImages[targetClip.sprite_url]._loadPromise) {
                         batchPromises.push(spriteImages[targetClip.sprite_url]._loadPromise);
                     }
                 }
             }
 
-            // Handle VTTs
             if (targetClip.vtt_url && !vttCache[targetClip.url]) {
                 if (!vttInFlight.has(targetClip.url)) {
-                    // Start a new text fetch
                     const p = (async () => {
                         try {
                             const resp = await fetch(targetClip.vtt_url);
@@ -363,26 +448,23 @@ async function loadClipMetadata(clips) {
                             vttCache[targetClip.url] = cues;
                         } catch (e) {
                             console.error("Failed to load VTT for", targetClip.url, e);
-                            vttCache[targetClip.url] = []; // Prevent infinite retry loops
+                            vttCache[targetClip.url] = [];
                         } finally {
-                            vttInFlight.delete(targetClip.url); // Always clear the queue
+                            vttInFlight.delete(targetClip.url);
                         }
                     })();
 
                     vttInFlight.set(targetClip.url, p);
                     batchPromises.push(p);
                 } else {
-                    // It's already fetching! Adopt the existing promise
                     batchPromises.push(vttInFlight.get(targetClip.url));
                 }
             }
         }
 
-        // Wait for this batch before re-evaluating where the scrubber moved
         if (batchPromises.length > 0) {
             await Promise.allSettled(batchPromises);
         } else {
-            // Safety fallback to prevent a tight infinite loop
             await new Promise(r => setTimeout(r, 100));
         }
     }
@@ -399,11 +481,9 @@ async function fetchManifest() {
         });
         globalManifest = newManifest;
 
-        drawTimelineChunks();
+        updateSliderMaxBounds();
+        handleScaleChange();
 
-        if (newManifest[camId]) {
-            loadClipMetadata(getDayClips());
-        }
     } catch (e) {
         console.log("Could not load history manifest.");
     }
@@ -457,6 +537,27 @@ function fwGoLive() {
     }
 
     currentClipUrl = null;
+
+    updateSliderMaxBounds();
+    const maxSec = getMaxSecOfTheDay();
+    timelineEndSec = maxSec;
+
+    if (scaleSelect.value !== 'custom' && scaleSelect.value !== 'all') {
+        timelineStartSec = Math.max(0, timelineEndSec - (parseInt(scaleSelect.value, 10) * 3600));
+    } else if (scaleSelect.value === 'all') {
+        timelineStartSec = 0;
+    } else {
+        const currentSpan = parseInt(endSlider.value, 10) - parseInt(startSlider.value, 10);
+        timelineStartSec = Math.max(0, maxSec - currentSpan);
+    }
+
+    startSlider.value = timelineStartSec;
+    endSlider.value = timelineEndSec;
+    updateSliderLabels();
+
+    drawTimelineChunks();
+    loadClipMetadata(getDayClips());
+
     fwVideo.pause();
     fwVideo.removeAttribute('src');
     fwVideo.load();
@@ -578,7 +679,9 @@ function updateFwTimelineFromEvent(e, isRelease = false) {
     const target = calculateScrubTarget(e);
     if (!target) return;
 
-    if (currentDayString === getTodayString() && target.scrubFraction >= 0.99) {
+    const isAtNow = isEndSliderAtNow();
+
+    if (isAtNow && target.scrubFraction >= 0.99) {
         fwIndicator.style.left = '100%';
         fwTimeLabel.innerText = "LIVE";
         fwTimeLabel.style.color = "#4cd137";
@@ -623,13 +726,20 @@ fwTimelineRegion.addEventListener('pointerup', (e) => {
     const rect = fwTimelineRegion.getBoundingClientRect();
     const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
 
-    if (currentDayString === getTodayString() && (x / rect.width) >= 0.99) {
+    const isAtNow = isEndSliderAtNow();
+
+    if (isAtNow && (x / rect.width) >= 0.99) {
         fwGoLive();
     } else {
         setTimeout(() => {
             fwVideo.play().catch(e => {});
         }, 50);
     }
+});
+
+// Guard visual sync on resize
+window.addEventListener('resize', () => {
+    if (!fwIsScrubbing) updateSliderLabels();
 });
 
 document.addEventListener('DOMContentLoaded', async () => {
