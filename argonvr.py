@@ -19,8 +19,6 @@ CAMERAS = [config['CAMERAS'][k] for k in config['CAMERAS']]
 # Load Settings
 SETTINGS = config['SETTINGS']
 
-WEB_USER = SETTINGS.get('WEB_USER', 'admin')
-WEB_PASS = SETTINGS.get('WEB_PASS', 'secret')
 BASE_DIR = SETTINGS.get('BASE_DIR', './cameras')
 MOTION_THRESHOLD = SETTINGS.get('MOTION_THRESHOLD', '0.01')
 SPRITE_WIDTH = int(SETTINGS.get('SPRITE_WIDTH', '320'))
@@ -30,7 +28,6 @@ SPRITE_HEIGHT = int(SETTINGS.get('SPRITE_HEIGHT', '180'))
 STORE_DIR = SETTINGS.get('STORE_DIR', './recordings')
 STORAGE_DEVICE = SETTINGS.get('STORAGE_DEVICE', '/')
 MIN_FREE_SPACE_PCT = float(SETTINGS.get('MIN_FREE_SPACE_PCT', '15.0'))
-ENCODER = SETTINGS.get('ENCODER', 'libx264')
 
 COOLDOWN_PERIOD = 10
 MAX_RECORD_TIME = 60  # Maximum length of a single clip in seconds
