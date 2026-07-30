@@ -9,15 +9,26 @@
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <script>
         const setAppHeight = () => {
-            document.documentElement.style.setProperty('--app-height', `${window.innerHeight}px`);
+            // Use visualViewport if available, as it accurately tracks mobile screen boxes post-bfcache
+            const height = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+            document.documentElement.style.setProperty('--app-height', `${height}px`);
         };
+
+        if (window.visualViewport) {
+            window.visualViewport.addEventListener('resize', setAppHeight);
+            window.visualViewport.addEventListener('scroll', setAppHeight);
+        }
+
         window.addEventListener('resize', setAppHeight);
-        window.addEventListener('load', setAppHeight);
+
         window.addEventListener('pageshow', (event) => {
-            // Recalculate height when returning via history/bfcache
-            setAppHeight();
-            setTimeout(setAppHeight, 50); // Ensures layout settles after history restore
+            // Force height recalculation after a frame settles when coming out of bfcache
+            requestAnimationFrame(() => {
+                setAppHeight();
+                setTimeout(setAppHeight, 100);
+            });
         });
+
         setAppHeight();
     </script>
 </head>

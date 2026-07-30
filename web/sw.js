@@ -1,4 +1,4 @@
-const CACHE_NAME = 'argonvr-cache-v9';
+const CACHE_NAME = 'argonvr-cache-v10';
 const urlsToCache = [
     '/',
     '/manifest.json'
