@@ -1,7 +1,7 @@
 # Ignore runtime and sensitive data
 /recordings/
 /cameras/
-argonvr.cfg
+argonvr.yaml
 
 # Ignore python cache
 __pycache__/
@@ -12,5 +12,6 @@ __pycache__/
 
 # Ignore local dev environment cruft
 .DS_Store
-argonvr.cfg~
+argonvr.yaml~
+*~
 /.idea/

@@ -9,6 +9,7 @@ This is human-written.
 5. After server.py has run for 12 hours or so, it locks up. Server watchdog added to address this.
 6. Calendar popup only indicates there are clips for current day and doesn't immediately update timeline when day is changed. Fixed.
 7. Camera colour passed from script.js to camera.js.
+8. Slow camera view recovery when pressing Reset or gaining focus should now be fixed.
 
 ## Enhancements
 
