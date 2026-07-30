@@ -1,7 +1,5 @@
-const CACHE_NAME = 'argonvr-cache-v10';
+const CACHE_NAME = 'argonvr-cache-v11';
 const urlsToCache = [
-    '/',
-    '/manifest.json'
 ];
 
 // Install the service worker
