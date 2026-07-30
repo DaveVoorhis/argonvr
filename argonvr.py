@@ -4,30 +4,27 @@ import time
 import atexit
 import sys
 import json
-import configparser
+import yaml
 import shutil
 import subprocess
 import math
 import datetime
+import glob
 
-config = configparser.ConfigParser()
-config.read('argonvr.cfg')
+with open('argonvr.yaml', 'r') as f:
+    config = yaml.safe_load(f)
 
-# Load Cameras
-CAMERAS = [config['CAMERAS'][k] for k in config['CAMERAS']]
-
-# Load Settings
-SETTINGS = config['SETTINGS']
+CAMERAS = config.get('CAMERAS', {})
+SETTINGS = config.get('SETTINGS', {})
 
 BASE_DIR = SETTINGS.get('BASE_DIR', './cameras')
-MOTION_THRESHOLD = SETTINGS.get('MOTION_THRESHOLD', '0.01')
-SPRITE_WIDTH = int(SETTINGS.get('SPRITE_WIDTH', '320'))
-SPRITE_HEIGHT = int(SETTINGS.get('SPRITE_HEIGHT', '180'))
+SPRITE_WIDTH = int(SETTINGS.get('SPRITE_WIDTH', 320))
+SPRITE_HEIGHT = int(SETTINGS.get('SPRITE_HEIGHT', 180))
 
 # --- Configurable Storage Options ---
 STORE_DIR = SETTINGS.get('STORE_DIR', './recordings')
 STORAGE_DEVICE = SETTINGS.get('STORAGE_DEVICE', '/')
-MIN_FREE_SPACE_PCT = float(SETTINGS.get('MIN_FREE_SPACE_PCT', '15.0'))
+MIN_FREE_SPACE_PCT = float(SETTINGS.get('MIN_FREE_SPACE_PCT', 15.0))
 
 COOLDOWN_PERIOD = 10
 MAX_RECORD_TIME = 60  # Maximum length of a single clip in seconds
@@ -324,7 +321,7 @@ async def background_encoder_worker():
 
                     base_name = os.path.splitext(raw_filename)[0]
                     final_dir = os.path.join(STORE_DIR, cam_id)
-                    final_filepath = os.path.join(final_dir, f"{base_name}.m3u8") # Changed to .m3u8
+                    final_filepath = os.path.join(final_dir, f"{base_name}.m3u8")
 
                     print(f"[⚙️] Packaging queue item: {raw_filename} -> {final_filepath}")
                     timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
@@ -373,9 +370,10 @@ async def background_encoder_worker():
             await asyncio.sleep(5)
 
 class CameraStream:
-    def __init__(self, cam_id, rtsp_url):
+    def __init__(self, cam_id, cam_config):
         self.cam_id = cam_id
-        self.rtsp_url = rtsp_url
+        self.rtsp_url = cam_config.get('url')
+        self.motion_threshold = str(cam_config.get('motion_threshold', '0.01'))
 
         # Ramdisk Directory for active HLS streams
         self.cam_dir = f"{BASE_DIR}/{self.cam_id}"
@@ -451,7 +449,7 @@ class CameraStream:
             "-hls_segment_filename", f"{self.cam_dir}/stream_%Y%m%d_%H%M%S.ts",
             f"{self.cam_dir}/stream.m3u8",
 
-            "-map", "0:v", "-vf", f"fps=2,scale=320:-1,select='gt(scene,{MOTION_THRESHOLD})',metadata=mode=print",
+            "-map", "0:v", "-vf", f"fps=2,scale=320:-1,select='gt(scene,{self.motion_threshold})',metadata=mode=print",
             "-f", "null", "-"
         ]
 
@@ -589,8 +587,8 @@ async def main():
 
     update_history_manifest()
 
-    for index, url in enumerate(CAMERAS):
-        cam = CameraStream(f"cam{index + 1}", url)
+    for cam_id, cam_config in CAMERAS.items():
+        cam = CameraStream(cam_id, cam_config)
 
         tasks.extend([
             asyncio.create_task(cam.start_master_pipeline()),

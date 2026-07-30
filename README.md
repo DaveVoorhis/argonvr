@@ -20,11 +20,11 @@ ArgoNVR is a lightweight, self-hosted Network Video Recorder (NVR) designed to r
 
 1. **Copy the example configuration:**
    ```bash
-   cp argonvr.cfg.example argonvr.cfg
+   cp argonvr.yaml.example argonvr.yaml
    ```
 
-2. **Edit `argonvr.cfg`:**
-   Open the file and update the `[CAMERAS]` section with your RTSP camera URLs and the `[SETTINGS]` section with your desired username, password, and configuration paths.
+2. **Edit `argonvr.yaml`:**
+   Open the file and update the `CAMERAS` section with your RTSP camera URLs and the `SETTINGS` section with your desired username, password, and configuration paths.
 
 ## Running the System (Manual Start)
 

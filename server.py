@@ -2,9 +2,9 @@ import http.server
 import socketserver
 import base64
 import os
-import configparser
 import ssl
 import json
+import yaml
 import socket
 from urllib.parse import urlparse, parse_qs
 try:
@@ -15,26 +15,24 @@ except ImportError:
 # Add ThreadingMixIn to enable concurrent request handling
 from socketserver import ThreadingMixIn
 
-config = configparser.ConfigParser()
-config.read('argonvr.cfg')
+with open('argonvr.yaml', 'r') as f:
+    config = yaml.safe_load(f)
 
-USERNAME = config['SETTINGS'].get('WEB_USER', 'admin')
-PASSWORD = config['SETTINGS'].get('WEB_PASS', 'secret')
-STORE_DIR = config['SETTINGS'].get('STORE_DIR', './recordings')
-BASE_DIR = config['SETTINGS'].get('BASE_DIR', './cameras')
-WEB_DIR = config['SETTINGS'].get('WEB_DIR', './web')
+SETTINGS = config.get('SETTINGS', {})
+CAMERAS = config.get('CAMERAS', {})
 
-PORT = int(config['SETTINGS'].get('PORT', '8000'))
+USERNAME = SETTINGS.get('WEB_USER', 'admin')
+PASSWORD = SETTINGS.get('WEB_PASS', 'secret')
+STORE_DIR = SETTINGS.get('STORE_DIR', './recordings')
+BASE_DIR = SETTINGS.get('BASE_DIR', './cameras')
+WEB_DIR = SETTINGS.get('WEB_DIR', './web')
 
-# Dynamically count the number of cameras defined in the config
-if config.has_section('CAMERAS'):
-    CAMERA_COUNT = len(config.items('CAMERAS'))
-else:
-    CAMERA_COUNT = 0
+PORT = int(SETTINGS.get('PORT', 8000))
+CAMERA_COUNT = len(CAMERAS)
 
-SSL_CERT = config['SETTINGS'].get('SSL_CERT_PATH')
-SSL_KEY = config['SETTINGS'].get('SSL_KEY_PATH')
-LOG_HTTP_REQUESTS = config.getboolean('SETTINGS', 'LOG_HTTP_REQUESTS', fallback=False)
+SSL_CERT = SETTINGS.get('SSL_CERT_PATH', '')
+SSL_KEY = SETTINGS.get('SSL_KEY_PATH', '')
+LOG_HTTP_REQUESTS = SETTINGS.get('LOG_HTTP_REQUESTS', False)
 
 # Define the new Threaded Server class
 class ThreadedHTTPServer(ThreadingMixIn, socketserver.TCPServer):

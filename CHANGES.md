@@ -28,5 +28,6 @@ This is human-written.
 14. Moved web files into Web directory for improved security.
 15. Dramatically improved multiple and single camera motion clip scrubber preview.
 16. Single-camera caching loads from the current scrubber position outward.
+17. Motion sensitivity is set per-camera
 
 ## Features

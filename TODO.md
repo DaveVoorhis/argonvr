@@ -6,8 +6,6 @@ This is human-written.
 
 ## Enhancements
 
-1. Motion sensitivity should be set per-camera
-
 ## Features
 
 1. Turn frontend into Progressive Web App. (Work in Progress)
