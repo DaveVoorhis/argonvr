@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no">
     <link rel="manifest" href="/manifest.json">
     <link rel="icon" type="image/x-icon" href="favicon.ico">
     <link rel="stylesheet" href="style.css">
@@ -22,48 +22,48 @@
     </script>
 </head>
 <body>
-    <div class="header">
-        <div class="header-brand">
-            <img src="logo.svg" alt="ArgoNVR" class="header-logo">
-            <h2 id="brand-text">ArgoNVR</h2>
+<div class="header">
+    <div class="header-brand">
+        <img src="logo.svg" alt="ArgoNVR" class="header-logo">
+        <h2 id="brand-text">ArgoNVR</h2>
+    </div>
+    <div class="date-display" id="global-date" onclick="toggleCalendar()">
+        <span>Loading...</span> 📅
+    </div>
+    <div class="calendar-popup" id="calendar-popup">
+        <div class="cal-header">
+            <button class="cal-btn" onclick="changeMonth(-1)">◀</button>
+            <div id="cal-month-label">Month</div>
+            <button class="cal-btn" onclick="changeMonth(1)">▶</button>
         </div>
-        <div class="date-display" id="global-date" onclick="toggleCalendar()">
-            <span>Loading...</span> 📅
-        </div>
-        <div class="calendar-popup" id="calendar-popup">
-            <div class="cal-header">
-                <button class="cal-btn" onclick="changeMonth(-1)">◀</button>
-                <div id="cal-month-label">Month</div>
-                <button class="cal-btn" onclick="changeMonth(1)">▶</button>
-            </div>
-            <div class="cal-grid" id="cal-grid"></div>
-            <div class="cal-quick-btns">
-                <button class="cal-btn" onclick="selectQuickDate('yesterday')">Yesterday</button>
-                <button class="cal-btn" onclick="selectQuickDate('today')">Today</button>
-            </div>
+        <div class="cal-grid" id="cal-grid"></div>
+        <div class="cal-quick-btns">
+            <button class="cal-btn" onclick="selectQuickDate('yesterday')">Yesterday</button>
+            <button class="cal-btn" onclick="selectQuickDate('today')">Today</button>
         </div>
     </div>
+</div>
 
-    <div class="video-grid" id="grid"></div>
+<div class="video-grid" id="grid"></div>
 
-    <div class="timeline-bar">
-        <button class="ctrl-btn" id="btn-play">▶ Play</button>
-        <div class="time-display" id="time-label">LIVE</div>
-        <div class="timeline-viewport" id="timeline-viewport">
-            <div class="timeline-content" id="timeline-content">
-                <div id="timeline-ruler" class="timeline-ruler"></div>
-                <div id="heatmap" class="heatmap-track"></div>
-                <input type="range" id="scrubber" min="0" max="86400" value="86400">
-            </div>
+<div class="timeline-bar">
+    <button class="ctrl-btn" id="btn-play">▶ Play</button>
+    <div class="time-display" id="time-label">LIVE</div>
+    <div class="timeline-viewport" id="timeline-viewport">
+        <div class="timeline-content" id="timeline-content">
+            <div id="timeline-ruler" class="timeline-ruler"></div>
+            <div id="heatmap" class="heatmap-track"></div>
+            <input type="range" id="scrubber" min="0" max="86400" value="86400">
         </div>
-        <div class="zoom-container" title="Zoom Timeline">
-            <span class="zoom-btn" onclick="adjustZoom(-1)">−</span>
-            <input type="range" id="zoom-slider" min="1" max="144" value="1" step="1">
-            <span class="zoom-btn" onclick="adjustZoom(1)">+</span>
-        </div>
-        <button class="ctrl-btn live-btn" id="btn-live">🔄 Reset</button>
     </div>
+    <div class="zoom-container" title="Zoom Timeline">
+        <span class="zoom-btn" onclick="adjustZoom(-1)">−</span>
+        <input type="range" id="zoom-slider" min="1" max="144" value="1" step="1">
+        <span class="zoom-btn" onclick="adjustZoom(1)">+</span>
+    </div>
+    <button class="ctrl-btn live-btn" id="btn-live">🔄 Reset</button>
+</div>
 
-    <script src="script.js"></script>
+<script src="script.js"></script>
 </body>
 </html>

@@ -90,6 +90,8 @@ body {
 .fw-controls {
     background: #1a1a1a;
     padding: 8px 15px;
+    /* Apply bottom safe area inset */
+    padding-bottom: calc(8px + env(safe-area-inset-bottom));
     display: flex;
     align-items: center;
     gap: 15px;
