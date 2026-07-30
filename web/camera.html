@@ -7,6 +7,15 @@
     <link rel="icon" type="image/x-icon" href="favicon.ico">
     <link rel="stylesheet" href="camera.css">
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+    <script>
+        // Fix mobile Chrome dvh cold-load bug by locking actual innerHeight
+        const setAppHeight = () => {
+            document.documentElement.style.setProperty('--app-height', `${window.innerHeight}px`);
+        };
+        window.addEventListener('resize', setAppHeight);
+        window.addEventListener('load', setAppHeight);
+        setAppHeight();
+    </script>
 </head>
 <body>
 <div class="camera-header">
