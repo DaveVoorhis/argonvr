@@ -71,6 +71,16 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
             return
         super().log_message(format, *args)
 
+    def end_headers(self):
+        """Intercept header generation to inject custom headers before flushing."""
+        clean_path = self.path.split('?', 1)[0].split('#', 1)[0]
+
+        # Apply no-store only to HTML files and the root directory
+        if clean_path.endswith('.html') or clean_path == '/':
+            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+
+        super().end_headers()
+
     def translate_path(self, path):
         # Strip query string and fragments for path matching
         clean_path = path.split('?', 1)[0].split('#', 1)[0]
