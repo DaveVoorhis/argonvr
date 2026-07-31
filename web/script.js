@@ -56,6 +56,15 @@ const zoomSlider = document.getElementById('zoom-slider');
 const timelineContent = document.getElementById('timeline-content');
 const timelineViewport = document.getElementById('timeline-viewport');
 
+// --- Helper for managing display classes on the camera card ---
+function setCameraState(camId, state) {
+	const card = document.getElementById(`card-${camId}`);
+	if (card) {
+		card.classList.remove('state-video', 'state-canvas', 'state-overlay');
+		card.classList.add(`state-${state}`);
+	}
+}
+
 function handleStreamError(hlsInstance) {
 	if (hlsInstance) {
 		hlsInstance.stopLoad();
@@ -254,7 +263,7 @@ function setDate(dateObj) {
 			liveBtn.classList.remove('active');
 			if (liveSyncInterval) clearInterval(liveSyncInterval);
 
-			timeLabel.style.color = "#f39c12";
+			timeLabel.classList.add('history');
 
 			// Fully clean up the HLS players when entering history scrubbing mode
 			activeCameras.forEach(camId => {
@@ -282,7 +291,6 @@ function secondsToTimeStr(seconds) {
 }
 
 function parseFilenameToSeconds(filename) {
-	// Changed regex to look for .m3u8
 	const match = filename.match(/_(\d{8})_(\d{2})(\d{2})(\d{2})\.m3u8/);
 	if (!match) return null;
 
@@ -440,8 +448,6 @@ function findClipForCamera(camId, targetSeconds) {
 function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 	activeCameras.forEach(camId => {
 		const videoEl = document.getElementById(`video-${camId}`);
-		const canvasEl = document.getElementById(`canvas-${camId}`);
-		const overlay = document.getElementById(`overlay-${camId}`);
 		const matchData = findClipForCamera(camId, targetSeconds);
 
 		if (matchData) {
@@ -454,7 +460,7 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 			// 1. Evaluate if a jump/seek is actually required
 			const srcChanged = !videoEl.src.includes(manifestRef.url.replace('./', ''));
 			const drift = srcChanged ? 0 : Math.abs(videoEl.currentTime - offset);
-			const needsSeek = srcChanged || drift > 1.0; // 1-second tolerance prevents micro-stutters during normal playback
+			const needsSeek = srcChanged || drift > 1.0;
 
 			// 2. Render the sprite into the canvas memory
 			const hasSprite = renderSpriteFrame(camId, manifestRef, offset);
@@ -462,30 +468,23 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 			if (isDragging) {
 				// --- DRAGGING MODE ---
 				if (hasSprite) {
-					canvasEl.style.display = 'block';
-					videoEl.style.display = 'none';
-					overlay.style.display = 'none';
+					setCameraState(camId, 'canvas');
 				} else {
 					videoEl.pause();
 				}
 			} else {
 				// --- RELEASE OR PLAYBACK TICK MODE ---
-				overlay.style.display = 'none';
-
 				if (needsSeek) {
 					// We are jumping to a new timestamp.
-					// Keep the canvas visible to mask the browser's buffering delay (no black screen).
 					if (hasSprite) {
-						canvasEl.style.display = 'block';
-						videoEl.style.display = 'none';
+						setCameraState(camId, 'canvas');
 					} else {
-						videoEl.style.display = 'block';
+						setCameraState(camId, 'video');
 					}
 
 					// Define the atomic swap that executes only when the video frame is fully decoded
 					const onVideoReady = () => {
-						canvasEl.style.display = 'none';
-						videoEl.style.display = 'block';
+						setCameraState(camId, 'video');
 
 						videoEl.removeEventListener('seeked', onVideoReady);
 						videoEl.removeEventListener('playing', onVideoReady);
@@ -497,7 +496,6 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 					// Command the video to fetch and seek
 					if (srcChanged) {
 						if (Hls.isSupported()) {
-							// Destroy the previous VOD HLS instance if it exists to prevent memory leaks
 							if (hlsPlayers[camId]) {
 								hlsPlayers[camId].destroy();
 							}
@@ -517,7 +515,6 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 								if (isPlayingHistory) videoEl.play().catch(e => {});
 							});
 						} else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-							// Native Safari fallback
 							videoEl.src = manifestRef.url;
 							videoEl.load();
 							videoEl.onloadedmetadata = () => {
@@ -533,9 +530,7 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 					}
 				} else {
 					// Continuous playback ticking (no jumping needed).
-					// Do not touch the displays so playback remains perfectly smooth.
-					videoEl.style.display = 'block';
-					canvasEl.style.display = 'none';
+					setCameraState(camId, 'video');
 
 					if (isPlayingHistory && videoEl.paused) {
 						videoEl.play().catch(e => {});
@@ -546,10 +541,8 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 			}
 		} else {
 			// Dead zone (No recording)
-			canvasEl.style.display = 'none';
+			setCameraState(camId, 'overlay');
 			videoEl.src = "";
-			videoEl.style.display = 'none';
-			overlay.style.display = 'flex';
 		}
 	});
 }
@@ -574,7 +567,7 @@ function returnToLive() {
 	liveBtn.classList.add('active');
 
 	timeLabel.innerText = "LIVE";
-	timeLabel.style.color = "#4cd137";
+	timeLabel.classList.remove('history');
 
 	const setScrubberToNow = () => {
 		const d = new Date();
@@ -610,22 +603,16 @@ function returnToLive() {
 		return;
 	}
 
-// Inside returnToLive(), replace the existing cleanup code with this:
 	activeCameras.forEach(camId => {
 		const videoEl = document.getElementById(`video-${camId}`);
-		const canvasEl = document.getElementById(`canvas-${camId}`);
-		const overlay = document.getElementById(`overlay-${camId}`);
-
-		canvasEl.style.display = 'none';
-		videoEl.style.display = 'block';
-		overlay.style.display = 'none';
+		setCameraState(camId, 'video');
 
 		// 1. Fully tear down the HLS instance first to abort network requests
 		if (hlsPlayers[camId]) {
-			hlsPlayers[camId].stopLoad();    // Abort all pending XHR requests instantly
-			hlsPlayers[camId].detachMedia(); // Unbind the HTML5 video element safely
-			hlsPlayers[camId].destroy();     // Clear internal listeners
-			delete hlsPlayers[camId];        // Remove reference for the JS garbage collector
+			hlsPlayers[camId].stopLoad();
+			hlsPlayers[camId].detachMedia();
+			hlsPlayers[camId].destroy();
+			delete hlsPlayers[camId];
 		}
 
 		// 2. Clear the native video element buffer
@@ -672,7 +659,7 @@ scrubber.addEventListener('input', (e) => {
 		liveBtn.classList.remove('active');
 		if (liveSyncInterval) clearInterval(liveSyncInterval);
 
-		timeLabel.style.color = "#f39c12";
+		timeLabel.classList.add('history');
 		activeCameras.forEach(camId => {
 			if (hlsPlayers[camId]) hlsPlayers[camId].detachMedia();
 		});
@@ -799,14 +786,14 @@ window.addEventListener('resize', adjustGridLayout);
 function createCameraDOM(camId, streamPath) {
 	const grid = document.getElementById('grid');
 	const card = document.createElement('div');
-	card.className = 'camera-card';
+	card.className = 'camera-card state-video';
+	card.id = `card-${camId}`;
 
 	const camColor = getCameraColor(camId);
 
-	// Injected the new specific Canvas element below the header
 	card.innerHTML = `
        <div class="camera-header">
-          <span class="camera-title" style="color: ${camColor}; text-shadow: 1px 1px 2px black;">${camId}</span>
+          <span class="camera-title" style="color: ${camColor};">${camId}</span>
        </div>
        <canvas id="canvas-${camId}" class="snapshot-canvas"></canvas>
        <video id="video-${camId}" muted playsinline preload="none"></video>

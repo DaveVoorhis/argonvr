@@ -14,24 +14,24 @@ body {
 .header-brand {
 	display: flex;
 	align-items: center;
-	gap: 12px;
+	gap: 8px;
 }
 .header-logo {
-	height: 32px;
-	width: 32px;
+	height: 24px;
+	width: 24px;
 	object-fit: contain;
 }
-.header-brand h2 { margin: 0; font-size: 1.2rem; color: #e0e0e0; letter-spacing: 1px; }
+.header-brand h2 { margin: 0; font-size: 1rem; color: #e0e0e0; letter-spacing: 1px; }
 
 .date-display {
 	color: #888;
-	font-size: 1rem;
+	font-size: 0.9rem;
 	cursor: pointer;
 	transition: color 0.2s;
 	display: flex;
 	align-items: center;
-	gap: 8px;
-	padding: 4px 10px;
+	gap: 6px;
+	padding: 2px 8px;
 	border-radius: 4px;
 	background: rgba(255,255,255,0.05);
 }
@@ -40,8 +40,8 @@ body {
 .calendar-popup {
 	display: none;
 	position: absolute;
-	bottom: 75px;
-	right: 20px;
+	bottom: 60px;
+	right: 15px;
 	background: #1a1a1a;
 	border: 1px solid #333;
 	border-radius: 6px;
@@ -100,7 +100,7 @@ body {
 	text-transform: uppercase;
 	font-size: 0.85rem;
 	color: #fff;
-	text-shadow: 1px 1px 3px rgba(0,0,0,1);
+	text-shadow: 1px 1px 2px black;
 	margin: 0;
 }
 
@@ -115,7 +115,6 @@ video {
 	width: 100%;
 	height: 100%;
 	object-fit: contain;
-	display: none;
 	image-rendering: -webkit-optimize-contrast;
 	image-rendering: crisp-edges;
 	background: #000;
@@ -125,7 +124,6 @@ video {
 	position: absolute;
 	top: 0; left: 0; right: 0; bottom: 0;
 	background: repeating-linear-gradient(45deg, #111, #111 10px, #1a1a1a 10px, #1a1a1a 20px);
-	display: none;
 	flex-direction: column;
 	justify-content: center;
 	align-items: center;
@@ -133,15 +131,27 @@ video {
 	z-index: 5;
 }
 
+/* --- State Management for Camera Cards --- */
+.camera-card .snapshot-canvas,
+.camera-card video,
+.camera-card .no-video-overlay {
+	display: none;
+}
+.camera-card.state-canvas .snapshot-canvas { display: block; }
+.camera-card.state-video video { display: block; }
+.camera-card.state-overlay .no-video-overlay { display: flex; }
+/* ----------------------------------------- */
+
+
 .timeline-bar {
 	background: #1a1a1a;
 	border-top: 1px solid #333;
-	padding: 4px 10px;
-	padding-bottom: calc(4px + env(safe-area-inset-bottom));
+	padding: 3px 8px;
+	padding-bottom: calc(3px + env(safe-area-inset-bottom));
 	display: flex;
 	align-items: center;
-	gap: 15px;
-	height: 50px;
+	gap: 8px;
+	height: 38px;
 	flex-shrink: 0;
 }
 
@@ -149,9 +159,10 @@ video {
 	background: #333;
 	border: none;
 	color: white;
-	padding: 8px 15px;
+	padding: 4px 10px;
 	border-radius: 4px;
 	cursor: pointer;
+	font-size: 0.85rem;
 	font-weight: bold;
 	transition: background 0.2s;
 	display: flex;
@@ -169,7 +180,7 @@ video {
 
 .ctrl-btn.live-btn {
 	background: #e74c3c;
-	width: 90px;
+	width: 80px;
 	justify-content: center;
 	flex-shrink: 0;
 }
@@ -180,15 +191,18 @@ video {
 
 .time-display {
 	font-family: monospace;
-	font-size: 1.2rem;
+	font-size: 1.05rem;
 	color: #4cd137;
-	width: 110px;
+	width: 90px;
 	flex-shrink: 0;
 	text-align: center;
 }
+.time-display.history {
+	color: #f39c12;
+}
 
 #btn-play {
-	width: 100px;
+	width: 85px;
 	flex-shrink: 0;
 	justify-content: center;
 }
@@ -206,19 +220,19 @@ video {
 }
 
 .timeline-viewport::-webkit-scrollbar {
-	height: 6px;
+	height: 4px;
 }
 .timeline-viewport::-webkit-scrollbar-track {
 	background: transparent;
 }
 .timeline-viewport::-webkit-scrollbar-thumb {
 	background-color: #555;
-	border-radius: 3px;
+	border-radius: 2px;
 }
 
 .timeline-content {
 	position: relative;
-	height: 20px;
+	height: 16px;
 	width: 100%;
 	flex-shrink: 0;
 	display: flex;
@@ -227,9 +241,9 @@ video {
 
 .heatmap-track {
 	position: absolute;
-	top: 3px;
+	top: 2px;
 	left: 2px; right: 2px;
-	height: 14px;
+	height: 12px;
 	background: #222;
 	border-radius: 4px;
 	pointer-events: none;
@@ -246,9 +260,9 @@ video {
 
 .timeline-ruler {
 	position: absolute;
-	top: 3px;
+	top: 2px;
 	left: 2px; right: 2px;
-	height: 14px;
+	height: 12px;
 	pointer-events: none;
 	z-index: 2;
 }
@@ -259,30 +273,30 @@ video {
 	background: rgba(255, 255, 255, 0.2);
 }
 .ruler-tick.hour {
-	height: 14px;
+	height: 12px;
 	background: rgba(255, 255, 255, 0.5);
 }
 .ruler-tick.five-min {
-	height: 6px;
+	height: 5px;
 }
 
 .zoom-container {
 	display: flex;
 	align-items: center;
-	gap: 8px;
-	min-width: 120px;
+	gap: 6px;
+	min-width: 100px;
 	background: #222;
-	padding: 4px 10px;
+	padding: 2px 8px;
 	border-radius: 4px;
 }
 
 .zoom-btn {
-	font-size: 1.2rem;
+	font-size: 1.1rem;
 	font-weight: bold;
 	color: #888;
 	cursor: pointer;
 	user-select: none;
-	padding: 0 4px;
+	padding: 0 2px;
 	transition: color 0.2s;
 }
 
@@ -297,7 +311,7 @@ input[type=range]:focus { outline: none; }
 
 #scrubber {
 	position: absolute;
-	top: 3px;
+	top: 2px;
 	width: 100%;
 	z-index: 3;
 	margin: 0;
@@ -305,27 +319,27 @@ input[type=range]:focus { outline: none; }
 }
 #scrubber::-webkit-slider-runnable-track {
 	width: 100%;
-	height: 14px;
+	height: 12px;
 	background: rgba(255, 255, 255, 0.05);
 	border-radius: 4px;
 }
 #scrubber::-moz-range-track {
 	width: 100%;
-	height: 14px;
+	height: 12px;
 	background: rgba(255, 255, 255, 0.05);
 	border-radius: 4px;
 }
 #scrubber::-webkit-slider-thumb {
-	height: 24px;
+	height: 18px;
 	width: 4px;
 	border-radius: 2px;
 	background: #f39c12;
 	-webkit-appearance: none;
-	margin-top: -5px;
+	margin-top: -3px;
 	box-shadow: 0 0 5px rgba(0,0,0,0.8);
 }
 #scrubber::-moz-range-thumb {
-	height: 24px;
+	height: 18px;
 	width: 4px;
 	border-radius: 2px;
 	background: #f39c12;
@@ -376,12 +390,12 @@ input[type=range]:focus { outline: none; }
 	}
 	.timeline-bar {
 		height: auto;
-		padding: 4px;
-		padding-bottom: calc(4px + env(safe-area-inset-bottom));
+		padding: 2px;
+		padding-bottom: calc(2px + env(safe-area-inset-bottom));
 		flex-shrink: 0;
 		display: flex;
 		flex-wrap: wrap;
-		gap: 5px;
+		gap: 4px;
 		justify-content: center;
 	}
 	.header-brand, .date-display {
@@ -395,7 +409,7 @@ input[type=range]:focus { outline: none; }
 		width: 100%;
 		order: 3;
 		flex-grow: 1;
-		height: 40px;
+		height: 30px;
 	}
 	.zoom-container {
 		display: flex;

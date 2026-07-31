@@ -1,4 +1,4 @@
-const CACHE_NAME = 'argonvr-cache-v18';
+const CACHE_NAME = 'argonvr-cache-v19';
 const urlsToCache = [];
 
 // Install the service worker
