@@ -11,17 +11,6 @@ body {
 	overflow: hidden;
 }
 
-.header {
-	background: #1a1a1a;
-	padding: 10px 20px;
-	display: flex;
-	justify-content: space-between;
-	align-items: center;
-	border-bottom: 1px solid #333;
-	height: 40px;
-	flex-shrink: 0;
-	position: relative;
-}
 .header-brand {
 	display: flex;
 	align-items: center;
@@ -32,7 +21,7 @@ body {
 	width: 32px;
 	object-fit: contain;
 }
-.header h2 { margin: 0; font-size: 1.2rem; color: #e0e0e0; letter-spacing: 1px; }
+.header-brand h2 { margin: 0; font-size: 1.2rem; color: #e0e0e0; letter-spacing: 1px; }
 
 .date-display {
 	color: #888;
@@ -51,14 +40,14 @@ body {
 .calendar-popup {
 	display: none;
 	position: absolute;
-	top: 55px;
+	bottom: 75px;
 	right: 20px;
 	background: #1a1a1a;
 	border: 1px solid #333;
 	border-radius: 6px;
 	padding: 15px;
 	z-index: 100;
-	box-shadow: 0 8px 25px rgba(0,0,0,0.8);
+	box-shadow: 0 -8px 25px rgba(0,0,0,0.8);
 	width: 260px;
 }
 .calendar-popup.visible { display: block; }
@@ -397,6 +386,9 @@ input[type=range]:focus { outline: none; }
 		flex-wrap: wrap;
 		gap: 5px;
 		justify-content: center;
+	}
+	.header-brand, .date-display {
+		order: 1; /* Keeps them grouped with the primary controls */
 	}
 	.ctrl-btn {
 		padding: 4px 8px;

@@ -45,31 +45,15 @@
     </script>
 </head>
 <body>
-<div class="header">
-    <div class="header-brand">
-        <img src="logo.svg" alt="ArgoNVR" class="header-logo">
-        <h2 id="brand-text">ArgoNVR</h2>
-    </div>
-    <div class="date-display" id="global-date" onclick="toggleCalendar()">
-        <span>Loading...</span> 📅
-    </div>
-    <div class="calendar-popup" id="calendar-popup">
-        <div class="cal-header">
-            <button class="cal-btn" onclick="changeMonth(-1)">◀</button>
-            <div id="cal-month-label">Month</div>
-            <button class="cal-btn" onclick="changeMonth(1)">▶</button>
-        </div>
-        <div class="cal-grid" id="cal-grid"></div>
-        <div class="cal-quick-btns">
-            <button class="cal-btn" onclick="selectQuickDate('yesterday')">Yesterday</button>
-            <button class="cal-btn" onclick="selectQuickDate('today')">Today</button>
-        </div>
-    </div>
-</div>
 
 <div class="video-grid" id="grid"></div>
 
 <div class="timeline-bar">
+    <div class="header-brand">
+        <img src="logo.svg" alt="ArgoNVR" class="header-logo">
+        <h2 id="brand-text">ArgoNVR</h2>
+    </div>
+
     <button class="ctrl-btn" id="btn-play">▶ Play</button>
     <div class="time-display" id="time-label">LIVE</div>
     <div class="timeline-viewport" id="timeline-viewport">
@@ -85,6 +69,22 @@
         <span class="zoom-btn" onclick="adjustZoom(1)">+</span>
     </div>
     <button class="ctrl-btn live-btn" id="btn-live">🔄 Reset</button>
+
+    <div class="date-display" id="global-date" onclick="toggleCalendar()">
+        <span>Loading...</span> 📅
+    </div>
+    <div class="calendar-popup" id="calendar-popup">
+        <div class="cal-header">
+            <button class="cal-btn" onclick="changeMonth(-1)">◀</button>
+            <div id="cal-month-label">Month</div>
+            <button class="cal-btn" onclick="changeMonth(1)">▶</button>
+        </div>
+        <div class="cal-grid" id="cal-grid"></div>
+        <div class="cal-quick-btns">
+            <button class="cal-btn" onclick="selectQuickDate('yesterday')">Yesterday</button>
+            <button class="cal-btn" onclick="selectQuickDate('today')">Today</button>
+        </div>
+    </div>
 </div>
 
 <script src="script.js"></script>
