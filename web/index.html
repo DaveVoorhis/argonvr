@@ -10,7 +10,6 @@
     <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
     <script>
         const setAppHeight = () => {
-            // Use visualViewport if available, as it accurately tracks mobile screen boxes post-bfcache
             const height = window.visualViewport ? window.visualViewport.height : window.innerHeight;
             document.documentElement.style.setProperty('--app-height', `${height}px`);
         };
@@ -23,7 +22,6 @@
         window.addEventListener('resize', setAppHeight);
 
         window.addEventListener('pageshow', (event) => {
-            // Force height recalculation after a frame settles when coming out of bfcache
             requestAnimationFrame(() => {
                 setAppHeight();
                 setTimeout(setAppHeight, 100);

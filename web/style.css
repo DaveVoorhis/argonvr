@@ -4,8 +4,8 @@ body {
 	padding: 0;
 	font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 	color: white;
-	height: 100vh; /* Fallback */
-	height: var(--app-height, 100vh); /* Uses actual window.innerHeight on cold load */
+	height: 100vh;
+	height: var(--app-height, 100vh);
 	display: flex;
 	flex-direction: column;
 	overflow: hidden;
@@ -66,8 +66,8 @@ body {
 
 .video-grid {
 	display: grid;
-	gap: 10px;
-	padding: 10px;
+	gap: 0;
+	padding: 0;
 	flex-grow: 1;
 	overflow: hidden;
 	background: #000;
@@ -77,33 +77,32 @@ body {
 .camera-card {
 	position: relative;
 	background: #111;
-	border-radius: 6px;
 	overflow: hidden;
-	border: 1px solid #2a2a2a;
+	border: none;
 	display: flex;
 	justify-content: center;
 	align-items: center;
 	box-sizing: border-box;
 	cursor: pointer;
-	transition: border-color 0.2s;
-}
-.camera-card:hover {
-	border-color: #666;
 }
 
 .camera-header {
 	position: absolute;
-	top: 0; left: 0; right: 0;
-	padding: 8px 12px;
-	background: linear-gradient(to bottom, rgba(0,0,0,0.9), rgba(0,0,0,0));
-	display: flex;
-	justify-content: space-between;
-	align-items: center;
+	top: 5px;
+	left: 5px;
+	background: transparent;
 	z-index: 10;
 	pointer-events: none;
 }
 
-.camera-title { font-weight: 600; text-transform: uppercase; font-size: 0.85rem; color: #fff; }
+.camera-title {
+	font-weight: 600;
+	text-transform: uppercase;
+	font-size: 0.85rem;
+	color: #fff;
+	text-shadow: 1px 1px 3px rgba(0,0,0,1);
+	margin: 0;
+}
 
 video {
 	width: 100%;
@@ -137,9 +136,8 @@ video {
 .timeline-bar {
 	background: #1a1a1a;
 	border-top: 1px solid #333;
-	padding: 10px 20px;
-	/* Add safe area inset for bottom navigation/gesture pill on mobile */
-	padding-bottom: calc(10px + env(safe-area-inset-bottom));
+	padding: 4px 10px;
+	padding-bottom: calc(4px + env(safe-area-inset-bottom));
 	display: flex;
 	align-items: center;
 	gap: 15px;
@@ -378,9 +376,8 @@ input[type=range]:focus { outline: none; }
 	}
 	.timeline-bar {
 		height: auto;
-		padding: 5px;
-		/* Add safe area inset for mobile responsiveness */
-		padding-bottom: calc(5px + env(safe-area-inset-bottom));
+		padding: 4px;
+		padding-bottom: calc(4px + env(safe-area-inset-bottom));
 		flex-shrink: 0;
 		display: flex;
 		flex-wrap: wrap;
@@ -388,7 +385,7 @@ input[type=range]:focus { outline: none; }
 		justify-content: center;
 	}
 	.header-brand, .date-display {
-		order: 1; /* Keeps them grouped with the primary controls */
+		order: 1;
 	}
 	.ctrl-btn {
 		padding: 4px 8px;

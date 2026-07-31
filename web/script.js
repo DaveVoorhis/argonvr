@@ -802,7 +802,6 @@ function createCameraDOM(camId, streamPath) {
 	card.className = 'camera-card';
 
 	const camColor = getCameraColor(camId);
-	card.style.borderTop = `4px solid ${camColor}`;
 
 	// Injected the new specific Canvas element below the header
 	card.innerHTML = `
