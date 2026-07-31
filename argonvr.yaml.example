@@ -7,12 +7,12 @@ CAMERAS:
         motion_threshold: 0.001
 
 SETTINGS:
-    WEB_USER: "admin
-    WEB_PASS: "ChangeMe123!
-    WEB_DIR: "./web
-    BASE_DIR: "./cameras
-    STORE_DIR: "./recordings
-    STORAGE_DEVICE: "/
+    WEB_USER: "admin"
+    WEB_PASS: "ChangeMe123!"
+    WEB_DIR: "./web"
+    BASE_DIR: "./cameras"
+    STORE_DIR: "./recordings"
+    STORAGE_DEVICE: "/"
     MIN_FREE_SPACE_PCT: 15.0
     PORT: 8000
     SSL_CERT_PATH: ""
@@ -21,3 +21,8 @@ SETTINGS:
     # Timeline preview resolution (320x180 is recommended for sharp scrubbing)
     SPRITE_WIDTH: 320
     SPRITE_HEIGHT: 180
+    # Recording & Spin-up Configuration
+    COOLDOWN_PERIOD: 10
+    MAX_RECORD_TIME: 60
+    STAGGER_SPIN_UP_SECONDS: 0
+    LOG_DAYS_TO_KEEP: 30

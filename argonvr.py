@@ -29,9 +29,11 @@ STORE_DIR = SETTINGS.get('STORE_DIR', './recordings')
 STORAGE_DEVICE = SETTINGS.get('STORAGE_DEVICE', '/')
 MIN_FREE_SPACE_PCT = float(SETTINGS.get('MIN_FREE_SPACE_PCT', 15.0))
 
-COOLDOWN_PERIOD = 10
-MAX_RECORD_TIME = 60  # Maximum length of a single clip in seconds
-STAGGER_SPIN_UP_SECONDS = 0
+# --- Recording and Process Configuration ---
+COOLDOWN_PERIOD = int(SETTINGS.get('COOLDOWN_PERIOD', 10))
+MAX_RECORD_TIME = int(SETTINGS.get('MAX_RECORD_TIME', 60))  # Maximum length of a single clip in seconds
+STAGGER_SPIN_UP_SECONDS = int(SETTINGS.get('STAGGER_SPIN_UP_SECONDS', 0))
+LOG_DAYS_TO_KEEP = int(SETTINGS.get('LOG_DAYS_TO_KEEP', 30))
 
 os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(STORE_DIR, exist_ok=True)
@@ -52,7 +54,7 @@ def cleanup_processes():
 atexit.register(cleanup_processes)
 
 def get_rotating_logger(name, log_file):
-    """Creates or retrieves a rotating logger with daily rotation, gzip compression, and 30-day retention."""
+    """Creates or retrieves a rotating logger with daily rotation, gzip compression, and configurable retention."""
     logger = logging.getLogger(name)
     if not logger.handlers:
         logger.setLevel(logging.INFO)
@@ -61,7 +63,7 @@ def get_rotating_logger(name, log_file):
             log_file,
             when="midnight",
             interval=1,
-            backupCount=30,
+            backupCount=LOG_DAYS_TO_KEEP,
             encoding='utf-8'
         )
 
