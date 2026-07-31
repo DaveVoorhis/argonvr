@@ -15,10 +15,11 @@ body {
     background: #333;
     border: none;
     color: white;
-    padding: 6px 12px; /* Reduced padding */
+    padding: 4px 8px; /* Tighter padding */
     border-radius: 4px;
     cursor: pointer;
     font-weight: bold;
+    font-size: 0.9rem;
     transition: background 0.2s;
 }
 
@@ -26,7 +27,7 @@ body {
 
 .cam-title {
     font-weight: bold;
-    font-size: 1.1rem; /* Slightly reduced font size */
+    font-size: 1rem;
     text-transform: uppercase;
 }
 
@@ -54,6 +55,10 @@ body {
     image-rendering: crisp-edges;
 }
 
+.snapshot-canvas.visible {
+    display: block;
+}
+
 .no-video-overlay {
     position: absolute;
     top: 0; left: 0; right: 0; bottom: 0;
@@ -63,30 +68,34 @@ body {
     justify-content: center;
     align-items: center;
     color: #666;
-    z-index: 8;
+    z-index: 10;
+}
+
+.no-video-overlay.hidden {
+    display: none !important;
 }
 
 .fw-timeline-bar {
     background: #1a1a1a;
-    padding: 4px 10px; /* Reduced from 8px 15px */
+    padding: 2px 6px; /* Minimized */
     display: flex;
     align-items: center;
     border-top: 1px solid #333;
     border-bottom: 1px solid #333;
-    height: 38px; /* Reduced from 44px */
+    height: 28px; /* Significantly reduced */
     flex-shrink: 0;
 }
 
 .fw-controls {
     background: #1a1a1a;
-    padding: 4px 10px; /* Reduced from 8px 15px */
-    /* Apply bottom safe area inset, adjusted for new padding */
-    padding-bottom: calc(4px + env(safe-area-inset-bottom));
+    padding: 2px 6px; /* Minimized */
+    /* Apply bottom safe area inset, adjusted for tighter padding */
+    padding-bottom: calc(2px + env(safe-area-inset-bottom));
     display: flex;
     align-items: center;
-    gap: 10px; /* Reduced from 15px */
+    gap: 6px; /* Reduced gap */
     border-top: 1px solid #333;
-    min-height: 42px; /* Reduced from 50px */
+    min-height: 34px; /* Reduced min-height */
     height: auto;
     flex-shrink: 0;
     flex-wrap: wrap;
@@ -96,16 +105,17 @@ body {
     background: #444;
     border: none;
     color: white;
-    padding: 6px 12px; /* Reduced from 8px 15px */
+    padding: 4px 8px; /* Tighter padding */
     border-radius: 4px;
     cursor: pointer;
     font-weight: bold;
+    font-size: 0.9rem;
     transition: background 0.2s;
 }
 
 .ctrl-btn.live-btn {
     background: #e74c3c;
-    width: 90px;
+    width: 80px;
     flex-shrink: 0;
 }
 
@@ -114,9 +124,9 @@ body {
 .ctrl-select {
     background-image: url("data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%23FFFFFF%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5-1.9-9.2-5.5-12.8z%22%2F%3E%3C%2Fsvg%3E");
     background-repeat: no-repeat;
-    background-position: right 10px center;
-    background-size: 10px;
-    padding-right: 30px;
+    background-position: right 6px center;
+    background-size: 8px;
+    padding-right: 24px;
     appearance: none;
     -webkit-appearance: none;
     -moz-appearance: none;
@@ -128,22 +138,31 @@ body {
 
 .fw-time-display {
     font-family: monospace;
-    font-size: 1.1rem;
-    color: #4cd137;
-    width: 80px;
+    font-size: 1rem;
+    color: white; /* Standard color for historical playback */
+    width: auto;
+    min-width: 65px;
     flex-shrink: 0;
     text-align: center;
+}
+
+.fw-time-display.time-live {
+    color: #4cd137;
+}
+
+.fw-time-display.time-scrub {
+    color: #f39c12;
 }
 
 /* Updated Slider Controls Styles to flex maximally */
 .slider-group {
     display: flex;
     align-items: center;
-    gap: 6px; /* Reduced from 8px */
-    font-size: 0.85rem;
+    gap: 4px;
+    font-size: 0.8rem;
     color: #ddd;
     flex: 1;
-    min-width: 160px; /* Reduced from 180px */
+    min-width: 130px; /* Reduced min-width */
 }
 
 .slider-group label {
@@ -157,7 +176,7 @@ body {
 .slider-group span {
     font-family: monospace;
     color: #3498db;
-    width: 45px;
+    width: 40px;
     text-align: right;
     display: inline-block;
 }
@@ -178,7 +197,7 @@ body {
 
 .fw-timeline-region {
     width: 100%;
-    height: 28px; /* Reduced from 32px to match tighter bar */
+    height: 20px; /* Tighter timeline to match overall compression */
     background: rgba(255, 255, 255, 0.08);
     border-radius: 4px;
     position: relative;
@@ -219,4 +238,9 @@ body {
     bottom: 0;
     border-right: 1px solid rgba(0,0,0,0.3);
     z-index: 1;
+    background-color: rgba(255, 255, 255, 0.25);
+}
+
+.fw-timeline-chunk.chunk-loaded {
+    background-color: rgba(76, 209, 55, 0.6);
 }

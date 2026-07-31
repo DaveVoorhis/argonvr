@@ -57,7 +57,7 @@ function parseFilenameToSeconds(filename) {
 
 // UI Initialization
 document.getElementById('cam-title').innerText = camId.toUpperCase();
-document.getElementById('cam-title').style.color = getCameraColor();
+document.getElementById('cam-title').style.color = getCameraColor(); // Kept inline as it depends on URL param
 
 const fwVideo = document.getElementById('fw-video');
 const snapshotCanvas = document.getElementById('snapshot-canvas');
@@ -250,7 +250,7 @@ function snapToCanvas() {
     snapshotCanvas.height = fwVideo.videoHeight;
     const ctx = snapshotCanvas.getContext('2d');
     ctx.drawImage(fwVideo, 0, 0, snapshotCanvas.width, snapshotCanvas.height);
-    snapshotCanvas.style.display = 'block';
+    snapshotCanvas.classList.add('visible');
 }
 
 function renderSpriteFrame(clip, offset) {
@@ -280,7 +280,7 @@ function renderSpriteFrame(clip, offset) {
             0, 0, snapshotCanvas.width, snapshotCanvas.height
         );
 
-        snapshotCanvas.style.display = 'block';
+        snapshotCanvas.classList.add('visible');
         return true;
     }
     return false;
@@ -300,18 +300,18 @@ fwVideo.addEventListener('seeked', () => {
 
     if ('requestVideoFrameCallback' in fwVideo) {
         fwVideo.requestVideoFrameCallback(() => {
-            snapshotCanvas.style.display = 'none';
+            snapshotCanvas.classList.remove('visible');
             setTimeout(performCatchUp, 50);
         });
     } else {
-        snapshotCanvas.style.display = 'none';
+        snapshotCanvas.classList.remove('visible');
         setTimeout(performCatchUp, 50);
     }
 });
 
 fwVideo.addEventListener('playing', () => {
-    if (snapshotCanvas.style.display === 'block') {
-        snapshotCanvas.style.display = 'none';
+    if (snapshotCanvas.classList.contains('visible')) {
+        snapshotCanvas.classList.remove('visible');
     }
 });
 
@@ -346,7 +346,7 @@ fwVideo.addEventListener('timeupdate', () => {
     if (playingClip) {
         const absoluteSeconds = parseFilenameToSeconds(playingClip.filename) + fwVideo.currentTime;
         fwTimeLabel.innerText = secondsToTimeStr(absoluteSeconds);
-        fwTimeLabel.style.color = "";
+        fwTimeLabel.classList.remove('time-live', 'time-scrub');
 
         const totalDuration = dayClips.reduce((sum, c) => sum + c.duration, 0);
         const progressPercentage = ((accumOffset + fwVideo.currentTime) / totalDuration) * 100;
@@ -376,7 +376,6 @@ async function loadClipMetadata(clips) {
             if (hasVtt && hasSprite) {
                 const chunkEl = document.querySelector(`.fw-timeline-chunk[data-url="${clip.url}"]`);
                 if (chunkEl && !chunkEl.classList.contains('chunk-loaded')) {
-                    chunkEl.style.backgroundColor = 'rgba(76, 209, 55, 0.6)';
                     chunkEl.classList.add('chunk-loaded');
                 }
             } else {
@@ -508,10 +507,7 @@ function drawTimelineChunks() {
         chunk.style.width = `${widthPct}%`;
 
         if (vttCache[clip.url] && spriteImages[clip.sprite_url]?.complete) {
-            chunk.style.backgroundColor = 'rgba(76, 209, 55, 0.6)';
             chunk.classList.add('chunk-loaded');
-        } else {
-            chunk.style.backgroundColor = 'rgba(255, 255, 255, 0.25)';
         }
 
         fwTimelineRegion.insertBefore(chunk, fwIndicator);
@@ -521,13 +517,14 @@ function drawTimelineChunks() {
 
 function fwGoLive() {
     fwTimeLabel.innerText = "LIVE";
-    fwTimeLabel.style.color = "#4cd137";
+    fwTimeLabel.classList.remove('time-scrub');
+    fwTimeLabel.classList.add('time-live');
     fwIndicator.style.left = '100%';
 
     fwVideo.onloadedmetadata = null;
     targetClipUrl = null;
 
-    if (snapshotCanvas.style.display !== 'block') {
+    if (!snapshotCanvas.classList.contains('visible')) {
         snapToCanvas();
     }
 
@@ -564,7 +561,7 @@ function fwGoLive() {
 
     try { fwVideo.currentTime = 0; } catch(e){}
 
-    fwOverlay.style.display = 'none';
+    fwOverlay.classList.add('hidden');
     fwVideo.muted = true;
 
     const freshPlaylistUrl = `${baseDir}/${camId}/stream.m3u8?t=${Date.now()}`;
@@ -684,13 +681,15 @@ function updateFwTimelineFromEvent(e, isRelease = false) {
     if (isAtNow && target.scrubFraction >= 0.99) {
         fwIndicator.style.left = '100%';
         fwTimeLabel.innerText = "LIVE";
-        fwTimeLabel.style.color = "#4cd137";
+        fwTimeLabel.classList.remove('time-scrub');
+        fwTimeLabel.classList.add('time-live');
         return;
     }
 
     fwIndicator.style.left = `${target.scrubFraction * 100}%`;
     fwTimeLabel.innerText = secondsToTimeStr(target.actualSec);
-    fwTimeLabel.style.color = "#f39c12";
+    fwTimeLabel.classList.remove('time-live');
+    fwTimeLabel.classList.add('time-scrub');
 
     if (!isRelease) {
         renderSpriteFrame(target.selectedClip, target.offsetInClip);
@@ -704,7 +703,7 @@ fwTimelineRegion.addEventListener('pointerdown', (e) => {
     fwVideo.pause();
     fwTimelineRegion.setPointerCapture(e.pointerId);
 
-    if (snapshotCanvas.style.display !== 'block') {
+    if (!snapshotCanvas.classList.contains('visible')) {
         snapToCanvas();
     }
 
