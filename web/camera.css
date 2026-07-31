@@ -15,7 +15,7 @@ body {
     background: #333;
     border: none;
     color: white;
-    padding: 8px 15px;
+    padding: 6px 12px; /* Reduced padding */
     border-radius: 4px;
     cursor: pointer;
     font-weight: bold;
@@ -26,7 +26,7 @@ body {
 
 .cam-title {
     font-weight: bold;
-    font-size: 1.2rem;
+    font-size: 1.1rem; /* Slightly reduced font size */
     text-transform: uppercase;
 }
 
@@ -68,25 +68,25 @@ body {
 
 .fw-timeline-bar {
     background: #1a1a1a;
-    padding: 8px 15px;
+    padding: 4px 10px; /* Reduced from 8px 15px */
     display: flex;
     align-items: center;
     border-top: 1px solid #333;
     border-bottom: 1px solid #333;
-    height: 44px;
+    height: 38px; /* Reduced from 44px */
     flex-shrink: 0;
 }
 
 .fw-controls {
     background: #1a1a1a;
-    padding: 8px 15px;
-    /* Apply bottom safe area inset */
-    padding-bottom: calc(8px + env(safe-area-inset-bottom));
+    padding: 4px 10px; /* Reduced from 8px 15px */
+    /* Apply bottom safe area inset, adjusted for new padding */
+    padding-bottom: calc(4px + env(safe-area-inset-bottom));
     display: flex;
     align-items: center;
-    gap: 15px;
+    gap: 10px; /* Reduced from 15px */
     border-top: 1px solid #333;
-    min-height: 50px;
+    min-height: 42px; /* Reduced from 50px */
     height: auto;
     flex-shrink: 0;
     flex-wrap: wrap;
@@ -96,7 +96,7 @@ body {
     background: #444;
     border: none;
     color: white;
-    padding: 8px 15px;
+    padding: 6px 12px; /* Reduced from 8px 15px */
     border-radius: 4px;
     cursor: pointer;
     font-weight: bold;
@@ -139,11 +139,11 @@ body {
 .slider-group {
     display: flex;
     align-items: center;
-    gap: 8px;
-    font-size: 0.9rem;
+    gap: 6px; /* Reduced from 8px */
+    font-size: 0.85rem;
     color: #ddd;
-    flex: 1; /* Stretch to fill horizontal space */
-    min-width: 180px;
+    flex: 1;
+    min-width: 160px; /* Reduced from 180px */
 }
 
 .slider-group label {
@@ -163,7 +163,7 @@ body {
 }
 
 .slider-group input[type="range"] {
-    flex: 1; /* Stretch the slider widget natively */
+    flex: 1;
     width: 100%;
     cursor: pointer;
     accent-color: #3498db;
@@ -178,7 +178,7 @@ body {
 
 .fw-timeline-region {
     width: 100%;
-    height: 32px;
+    height: 28px; /* Reduced from 32px to match tighter bar */
     background: rgba(255, 255, 255, 0.08);
     border-radius: 4px;
     position: relative;
