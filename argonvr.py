@@ -455,7 +455,10 @@ class CameraStream:
                     await proc.stdin.drain()
                     proc.stdin.close()
                 else:
-                    proc.terminate()
+                    try:
+                        proc.terminate()
+                    except ProcessLookupError:
+                        pass
 
                 await asyncio.wait_for(proc.wait(), timeout=10.0)
 
@@ -469,10 +472,27 @@ class CameraStream:
             except asyncio.TimeoutError:
                 print(f"[⚠️] FFmpeg hung while capturing {filepath}. Forcing SIGKILL.")
                 self.write_log_header(self.recording_logger, "CAPTURE HUNG - FORCING KILL")
-                proc.kill()
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
+
+                # Move to queued directory even if hard-killed
+                filename = os.path.basename(filepath)
+                queued_filepath = os.path.join(self.queued_dir, filename)
+                if os.path.exists(filepath):
+                    try:
+                        shutil.move(filepath, queued_filepath)
+                        print(f"[📥] Hard-killed capture queued for encoding: {queued_filepath}")
+                    except OSError as e:
+                        print(f"[❌] Failed to move hard-killed capture {filepath}: {e}")
+
             except Exception as e:
                 print(f"[❌] Error closing capture {filepath}: {type(e).__name__} {e}")
-                proc.kill()
+                try:
+                    proc.kill()
+                except ProcessLookupError:
+                    pass
 
     async def start_master_pipeline(self):
         """Pulls a single RTSP stream and splits it internally for HLS and Motion."""
