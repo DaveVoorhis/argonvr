@@ -10,6 +10,9 @@ import subprocess
 import math
 import datetime
 import glob
+import logging
+from logging.handlers import TimedRotatingFileHandler
+import gzip
 
 with open('argonvr.yaml', 'r') as f:
     config = yaml.safe_load(f)
@@ -47,6 +50,41 @@ def cleanup_processes():
             pass
 
 atexit.register(cleanup_processes)
+
+def get_rotating_logger(name, log_file):
+    """Creates or retrieves a rotating logger with daily rotation, gzip compression, and 30-day retention."""
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+
+        handler = TimedRotatingFileHandler(
+            log_file,
+            when="midnight",
+            interval=1,
+            backupCount=30,
+            encoding='utf-8'
+        )
+
+        def rotator(source, dest):
+            try:
+                with open(source, 'rb') as f_in:
+                    with gzip.open(dest + '.gz', 'wb') as f_out:
+                        shutil.copyfileobj(f_in, f_out)
+                os.remove(source)
+            except Exception as e:
+                print(f"[⚠️] Log compression failed for {source}: {e}")
+
+        def namer(name):
+            return name
+
+        handler.rotator = rotator
+        handler.namer = namer
+
+        formatter = logging.Formatter('%(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+    return logger
 
 def get_video_duration(filepath):
     """Uses ffprobe to extract the duration of a video file."""
@@ -301,7 +339,7 @@ def recover_stale_staging_files():
 
 async def background_encoder_worker():
     """A background worker that sequentially packages queued .ts files into HLS VOD."""
-    worker_log = open(os.path.join(STORE_DIR, "encoder_worker.log"), "a")
+    worker_logger = get_rotating_logger("encoder_worker", os.path.join(STORE_DIR, "encoder_worker.log"))
     print("[⚙️] Background Packager Worker started.")
 
     while True:
@@ -325,8 +363,7 @@ async def background_encoder_worker():
 
                     print(f"[⚙️] Packaging queue item: {raw_filename} -> {final_filepath}")
                     timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
-                    worker_log.write(f"\n--- [{timestamp}] PACKAGING {raw_filepath} ---\n")
-                    worker_log.flush()
+                    worker_logger.info(f"\n--- [{timestamp}] PACKAGING {raw_filepath} ---")
 
                     # Re-mux directly to HLS VOD without re-encoding
                     encode_cmd = [
@@ -345,9 +382,14 @@ async def background_encoder_worker():
                         *encode_cmd,
                         stdin=asyncio.subprocess.PIPE,
                         stdout=asyncio.subprocess.DEVNULL,
-                        stderr=worker_log
+                        stderr=asyncio.subprocess.PIPE
                     )
                     active_processes.append(proc)
+
+                    # Asynchronously read and log stderr output
+                    async for line in proc.stderr:
+                        worker_logger.info(line.decode('utf-8', errors='ignore').rstrip('\r\n'))
+
                     await proc.wait()
                     active_processes.remove(proc)
 
@@ -396,14 +438,13 @@ class CameraStream:
         os.makedirs(self.staging_dir, exist_ok=True)
         os.makedirs(self.queued_dir, exist_ok=True)
 
-        # Moved logs to persistent storage
-        self.pipeline_log = open(os.path.join(self.store_cam_dir, "pipeline.log"), "a")
-        self.recording_log = open(os.path.join(self.store_cam_dir, "recording.log"), "a")
+        # Utilize rotating loggers
+        self.pipeline_logger = get_rotating_logger(f"pipeline_{self.cam_id}", os.path.join(self.store_cam_dir, "pipeline.log"))
+        self.recording_logger = get_rotating_logger(f"recording_{self.cam_id}", os.path.join(self.store_cam_dir, "recording.log"))
 
-    def write_log_header(self, log_fd, message):
+    def write_log_header(self, logger, message):
         timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
-        log_fd.write(f"\n\n--- [{timestamp}] {message} ---\n")
-        log_fd.flush()
+        logger.info(f"\n--- [{timestamp}] {message} ---")
 
     async def finalize_recording(self, proc, filepath):
         """Finalizes the raw capture file and moves it to the encoding queue."""
@@ -427,7 +468,7 @@ class CameraStream:
 
             except asyncio.TimeoutError:
                 print(f"[⚠️] FFmpeg hung while capturing {filepath}. Forcing SIGKILL.")
-                self.write_log_header(self.recording_log, "CAPTURE HUNG - FORCING KILL")
+                self.write_log_header(self.recording_logger, "CAPTURE HUNG - FORCING KILL")
                 proc.kill()
             except Exception as e:
                 print(f"[❌] Error closing capture {filepath}: {type(e).__name__} {e}")
@@ -437,7 +478,7 @@ class CameraStream:
         """Pulls a single RTSP stream and splits it internally for HLS and Motion."""
         await asyncio.sleep(2)
 
-        self.write_log_header(self.pipeline_log, "STARTING UNIFIED MASTER PIPELINE (HLS + MOTION)")
+        self.write_log_header(self.pipeline_logger, "STARTING UNIFIED MASTER PIPELINE (HLS + MOTION)")
 
         cmd = [
             "ffmpeg", "-rtsp_transport", "tcp", "-i", self.rtsp_url,
@@ -459,16 +500,17 @@ class CameraStream:
         active_processes.append(self.master_proc)
 
         while True:
-            chunk = await self.master_proc.stderr.read(1024)
-            if not chunk: break
+            # Replaced chunk read with readline to prevent breaking string matches across chunks
+            line = await self.master_proc.stderr.readline()
+            if not line: break
 
             # Update the heartbeat timestamp
             self.last_pipeline_output_time = time.time()
 
-            self.pipeline_log.write(chunk.decode('utf-8', errors='ignore'))
-            self.pipeline_log.flush()
+            decoded_line = line.decode('utf-8', errors='ignore').rstrip('\r\n')
+            self.pipeline_logger.info(decoded_line)
 
-            if b"frame:" in chunk:
+            if "frame:" in decoded_line:
                 self.last_motion = time.time()
 
                 if not self.recording:
@@ -481,7 +523,7 @@ class CameraStream:
                         f"{self.cam_id}_{time.strftime('%Y%m%d_%H%M%S')}.ts"
                     )
 
-                    self.write_log_header(self.recording_log, "STARTING RAW STREAM CAPTURE")
+                    self.write_log_header(self.recording_logger, "STARTING RAW STREAM CAPTURE")
 
                     m3u8_path = f"{self.cam_dir}/stream.m3u8"
                     wait_time = 0
@@ -491,7 +533,7 @@ class CameraStream:
 
                     if not os.path.exists(m3u8_path):
                         print(f"[⚠️] Aborting capture on {self.cam_id}: Master stream not ready.")
-                        self.write_log_header(self.recording_log, "ABORTED: m3u8 file was never created.")
+                        self.write_log_header(self.recording_logger, "ABORTED: m3u8 file was never created.")
                         self.recording = False
                         continue
 
@@ -504,13 +546,21 @@ class CameraStream:
                         "-an",
                         "-y", self.current_output_file
                     ]
+
                     self.record_proc = await asyncio.create_subprocess_exec(
                         *record_cmd,
                         stdin=asyncio.subprocess.PIPE,
                         stdout=asyncio.subprocess.DEVNULL,
-                        stderr=self.recording_log
+                        stderr=asyncio.subprocess.PIPE
                     )
                     active_processes.append(self.record_proc)
+
+                    # Drain and log record_proc stderr asynchronously without blocking
+                    async def drain_record_stderr(stream, logger):
+                        async for log_line in stream:
+                            logger.info(log_line.decode('utf-8', errors='ignore').rstrip('\r\n'))
+
+                    asyncio.create_task(drain_record_stderr(self.record_proc.stderr, self.recording_logger))
 
     async def cooldown_manager(self):
         """Manages recording cooldown, chunking, and isolated process termination."""
@@ -553,7 +603,7 @@ class CameraStream:
             if is_dead or is_stalled:
                 reason = "died" if is_dead else "stalled"
                 print(f"[⚠️] Watchdog: Master process {reason} for {self.cam_id}. Restarting...")
-                self.write_log_header(self.pipeline_log, f"WATCHDOG TRIGGERED ({reason.upper()}) - CLEANING UP AND RESTARTING")
+                self.write_log_header(self.pipeline_logger, f"WATCHDOG TRIGGERED ({reason.upper()}) - CLEANING UP AND RESTARTING")
 
                 for proc in [self.master_proc, self.record_proc]:
                     if proc and proc.returncode is None:
