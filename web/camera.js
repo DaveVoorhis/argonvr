@@ -364,6 +364,12 @@ async function loadClipMetadata(clips) {
 
     const PARALLEL_BATCH_SIZE = 4;
 
+    // Tag each clip with its chronological index to help with distributed caching
+    // This allows us to easily select every Nth clip across the timeline later.
+    clips.forEach((c, i) => {
+        if (c._index === undefined) c._index = i;
+    });
+
     while (true) {
         if (session !== currentLoadSession) break;
 
@@ -399,7 +405,32 @@ async function loadClipMetadata(clips) {
         pendingClips.sort((a, b) => {
             const aCenter = parseFilenameToSeconds(a.filename) + ((a.duration || 0) / 2);
             const bCenter = parseFilenameToSeconds(b.filename) + ((b.duration || 0) / 2);
-            return Math.abs(aCenter - playheadTime) - Math.abs(bCenter - playheadTime);
+
+            const aDist = Math.abs(aCenter - playheadTime);
+            const bDist = Math.abs(bCenter - playheadTime);
+
+            // Tiering system balances local priority with distributed loading
+            const getTier = (clip, dist) => {
+                // Tier 0: Immediate vicinity (e.g., within 300 seconds / 5 mins of playhead)
+                if (dist < 300) return 0;
+                // Tier 1: Coarse distributed mesh (every 10th clip)
+                if (clip._index % 10 === 0) return 1;
+                // Tier 2: Fine distributed mesh (every 5th clip)
+                if (clip._index % 5 === 0) return 2;
+                // Tier 3: Everything else
+                return 3;
+            };
+
+            const aTier = getTier(a, aDist);
+            const bTier = getTier(b, bDist);
+
+            // If clips are in different tiers, the lower tier loads first
+            if (aTier !== bTier) {
+                return aTier - bTier;
+            }
+
+            // Within the same tier, prioritize clips closest to the playhead
+            return aDist - bDist;
         });
 
         const batch = pendingClips.slice(0, PARALLEL_BATCH_SIZE);
