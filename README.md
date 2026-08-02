@@ -26,6 +26,19 @@ ArgoNVR is a lightweight, self-hosted Network Video Recorder (NVR) designed to r
 2. **Edit `argonvr.yaml`:**
    Open the file and update the `CAMERAS` section with your RTSP camera URLs and the `SETTINGS` section with your desired username, password, and configuration paths.
 
+## Motion Threshold Calibration (`calibrate.py`)
+
+Finding the exact motion threshold for each camera can be tedious. ArgoNVR includes a standalone calibration tool that taps directly into FFmpeg's scene calculation to help you visually find the sweet spot between ambient noise and actual motion.
+
+1. **Run the script:**
+   ```bash
+   python calibrate.py
+   ```
+2. **Select a camera:** Choose the camera you want to calibrate from the generated list.
+3. **Observe baseline noise:** Watch the terminal output for a few moments to see the ambient scene score (e.g., wind moving trees, lighting changes).
+4. **Trigger motion:** Walk in front of the camera and observe the visual ASCII bar spike. The script will log your `Peak` score.
+5. **Save the sweet spot:** Press `Ctrl+C` to stop the visualizer. The tool will prompt you to enter a new threshold. Pick a value safely above the ambient noise but below your peak score. The script will automatically back up your `argonvr.yaml` and inject the new value.
+
 ## Running the System (Manual Start)
 
 Ensure you have `ffmpeg` installed on your system.
@@ -68,8 +81,8 @@ To ensure ArgoNVR starts automatically on boot and runs continuously in the back
 
 ## Directory Structure
 
-* /cameras: Contains live HLS streams and logs.
-* /recordings: Contains the saved `.mp4` clips and the `history.json` manifest.
+* /cameras: Contains live HLS streams.
+* /recordings: Contains the saved clips, logs and metadata.
 
 ---
 
