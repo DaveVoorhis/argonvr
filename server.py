@@ -181,24 +181,43 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                         req_date = query_params.get('date', [None])[0]
                         req_cam = query_params.get('cam', [None])[0]
 
-                        if not req_date or not req_cam:
-                            self.send_error(400, "Missing 'date' or 'cam' parameters")
+                        if not req_date:
+                            self.send_error(400, "Missing 'date' parameter")
                             return
 
-                        history_path = os.path.join(STORE_DIR, req_cam, f'history_{req_date}.json')
-                        cam_history = []
+                        response_data = {}
 
-                        if os.path.exists(history_path):
+                        if req_cam:
+                            # Specific camera history request
+                            history_path = os.path.join(STORE_DIR, req_cam, f'history_{req_date}.json')
+                            cam_history = []
+                            if os.path.exists(history_path):
+                                try:
+                                    with open(history_path, 'r') as f:
+                                        cam_history = json.load(f)
+                                except Exception as e:
+                                    print(f"Error reading {history_path}: {e}")
+                            response_data[req_cam] = cam_history
+                        else:
+                            # Bulk request: Fetch history for all available cameras
                             try:
-                                with open(history_path, 'r') as f:
-                                    cam_history = json.load(f)
+                                if os.path.exists(STORE_DIR):
+                                    for cam_dir in os.listdir(STORE_DIR):
+                                        cam_path = os.path.join(STORE_DIR, cam_dir)
+                                        if os.path.isdir(cam_path):
+                                            history_path = os.path.join(cam_path, f'history_{req_date}.json')
+                                            cam_history = []
+                                            if os.path.exists(history_path):
+                                                try:
+                                                    with open(history_path, 'r') as f:
+                                                        cam_history = json.load(f)
+                                                except Exception as e:
+                                                    print(f"Error reading {history_path}: {e}")
+                                            response_data[cam_dir] = cam_history
                             except Exception as e:
-                                print(f"Error reading {history_path}: {e}")
+                                print(f"Error reading history directories: {e}")
 
-                        # Maintain original {"cam_id": [{clip}]} payload structure
-                        response_data = {req_cam: cam_history}
                         data = json.dumps(response_data).encode('utf-8')
-
                         self.send_response(200)
                         self.send_header('Content-Type', 'application/json')
                         self.send_header('Content-Length', str(len(data)))

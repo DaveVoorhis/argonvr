@@ -249,7 +249,7 @@ function setDate(dateObj) {
 	globalManifest = {};
 	renderTimelineHeatmap();
 
-	activeCameras.forEach(camId => fetchManifest(camId));
+	fetchManifest();
 
 	if (activeCameras.length > 0) {
 		if (isPlayingHistory) playBtn.click();
@@ -300,24 +300,28 @@ function parseFilenameToSeconds(filename) {
 	return (h * 3600) + (m * 60) + s;
 }
 
-async function fetchManifest(camId) {
+async function fetchManifest(camId = null) {
+	// Centralized guard condition
+	if (activeCameras.length === 0) return;
+
 	try {
-		const url = `/history?date=${currentDayString}&cam=${camId}`;
+		const url = camId
+			? `/history?date=${currentDayString}&cam=${camId}`
+			: `/history?date=${currentDayString}`;
+
 		const response = await fetch(url, { cache: 'no-store', credentials: 'include' });
 		const allData = await response.json();
 
-		let clips = allData[camId] || [];
-		clips.sort((a, b) => (parseFilenameToSeconds(a.filename) || 0) - (parseFilenameToSeconds(b.filename) || 0));
+		Object.keys(allData).forEach(cam => {
+			let clips = allData[cam] || [];
+			clips.sort((a, b) => (parseFilenameToSeconds(a.filename) || 0) - (parseFilenameToSeconds(b.filename) || 0));
 
-		globalManifest[camId] = clips;
+			globalManifest[cam] = clips;
 
-		Object.values(allData).forEach(allClips => {
-			if (Array.isArray(allClips)) {
-				allClips.forEach(clip => {
-					const match = clip.filename.match(/_(\d{8})_/);
-					if (match) availableDates.add(match[1]);
-				});
-			}
+			clips.forEach(clip => {
+				const match = clip.filename.match(/_(\d{8})_/);
+				if (match) availableDates.add(match[1]);
+			});
 		});
 
 		renderTimelineHeatmap();
@@ -325,7 +329,7 @@ async function fetchManifest(camId) {
 			renderCalendar();
 		}
 	} catch (e) {
-		console.log(`Could not load history manifest for ${camId}. Likely an auth issue.`);
+		console.log(`Could not load history manifest${camId ? ' for ' + camId : ''}. Likely an auth issue.`);
 	}
 }
 
@@ -664,7 +668,7 @@ scrubber.addEventListener('input', (e) => {
 			if (hlsPlayers[camId]) hlsPlayers[camId].detachMedia();
 		});
 
-		activeCameras.forEach(camId => fetchManifest(camId));
+		fetchManifest();
 	}
 
 	isScrubbing = true;
@@ -740,7 +744,7 @@ document.addEventListener("visibilitychange", () => {
 		if (isLive) {
 			returnToLive();
 		} else {
-			activeCameras.forEach(camId => fetchManifest(camId));
+			fetchManifest();
 		}
 	}
 });
@@ -853,8 +857,9 @@ async function discoverCameras() {
 				const camId = `cam${index}`;
 				const streamPath = `${baseDir}/${camId}/stream.m3u8`;
 				createCameraDOM(camId, streamPath);
-				fetchManifest(camId);
 			}
+
+			fetchManifest();
 		} else {
 			setTimeout(discoverCameras, 2000);
 		}
@@ -880,7 +885,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 	returnToLive();
 
 	setInterval(() => {
-		activeCameras.forEach(camId => fetchManifest(camId));
+			fetchManifest();
 	}, 30000);
 
 	discoverCameras();
