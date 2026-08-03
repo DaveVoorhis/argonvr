@@ -232,7 +232,7 @@ video {
 
 .timeline-content {
 	position: relative;
-	height: 16px;
+	height: 100%;
 	width: 100%;
 	flex-shrink: 0;
 	display: flex;
@@ -241,9 +241,9 @@ video {
 
 .heatmap-track {
 	position: absolute;
-	top: 2px;
+	top: 0;
 	left: 2px; right: 2px;
-	height: 12px;
+	height: 100%;
 	background: #222;
 	border-radius: 4px;
 	pointer-events: none;
@@ -260,9 +260,9 @@ video {
 
 .timeline-ruler {
 	position: absolute;
-	top: 2px;
+	top: 0;
 	left: 2px; right: 2px;
-	height: 12px;
+	height: 100%;
 	pointer-events: none;
 	z-index: 2;
 }
@@ -273,11 +273,11 @@ video {
 	background: rgba(255, 255, 255, 0.2);
 }
 .ruler-tick.hour {
-	height: 12px;
+	height: 100%;
 	background: rgba(255, 255, 255, 0.5);
 }
 .ruler-tick.five-min {
-	height: 5px;
+	height: 8px;
 }
 
 .zoom-container {
@@ -311,35 +311,36 @@ input[type=range]:focus { outline: none; }
 
 #scrubber {
 	position: absolute;
-	top: 2px;
+	top: 0;
 	width: 100%;
+	height: 100%;
 	z-index: 3;
 	margin: 0;
 	padding: 0;
 }
 #scrubber::-webkit-slider-runnable-track {
 	width: 100%;
-	height: 12px;
+	height: 100%;
 	background: rgba(255, 255, 255, 0.05);
 	border-radius: 4px;
 }
 #scrubber::-moz-range-track {
 	width: 100%;
-	height: 12px;
+	height: 100%;
 	background: rgba(255, 255, 255, 0.05);
 	border-radius: 4px;
 }
 #scrubber::-webkit-slider-thumb {
-	height: 18px;
+	height: 32px;
 	width: 4px;
 	border-radius: 2px;
 	background: #f39c12;
 	-webkit-appearance: none;
-	margin-top: -3px;
+	margin-top: 0;
 	box-shadow: 0 0 5px rgba(0,0,0,0.8);
 }
 #scrubber::-moz-range-thumb {
-	height: 18px;
+	height: 32px;
 	width: 4px;
 	border-radius: 2px;
 	background: #f39c12;

@@ -337,11 +337,10 @@ function renderTimelineHeatmap() {
 	const heatmap = document.getElementById('heatmap');
 	heatmap.innerHTML = '';
 
-	const cams = Object.keys(globalManifest);
-	const numCams = cams.length || 1;
+	const numCams = activeCameras.length || 1;
 
-	cams.forEach((camId, index) => {
-		const clips = globalManifest[camId];
+	activeCameras.forEach((camId, index) => {
+		const clips = globalManifest[camId] || [];
 		const camColor = getCameraColor(camId);
 
 		clips.forEach(clip => {
@@ -885,7 +884,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 	returnToLive();
 
 	setInterval(() => {
-			fetchManifest();
+		fetchManifest();
 	}, 30000);
 
 	discoverCameras();
