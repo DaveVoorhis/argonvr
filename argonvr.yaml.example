@@ -21,6 +21,8 @@ SETTINGS:
     # Timeline preview resolution (320x180 is recommended for sharp scrubbing)
     SPRITE_WIDTH: 320
     SPRITE_HEIGHT: 180
+    # Timeline preview JPEG compression (2 is best quality/largest size, 31 is worst quality/smallest size)
+    SPRITE_QUALITY: 5
     # Recording & Spin-up Configuration
     COOLDOWN_PERIOD: 10
     MAX_RECORD_TIME: 60

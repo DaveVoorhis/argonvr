@@ -23,6 +23,7 @@ SETTINGS = config.get('SETTINGS', {})
 BASE_DIR = SETTINGS.get('BASE_DIR', './cameras')
 SPRITE_WIDTH = int(SETTINGS.get('SPRITE_WIDTH', 320))
 SPRITE_HEIGHT = int(SETTINGS.get('SPRITE_HEIGHT', 180))
+SPRITE_QUALITY = int(SETTINGS.get('SPRITE_QUALITY', 3))
 
 # --- Configurable Storage Options ---
 STORE_DIR = SETTINGS.get('STORE_DIR', './recordings')
@@ -158,11 +159,11 @@ async def generate_sprite_and_vtt(mp4_filepath, output_dir, base_name):
         # 3. FAST SPRITE GEN: Use '-skip_frame nokey' to avoid decoding P/B frames
         cmd_ffmpeg = [
             "ffmpeg",
-            "-skip_frame", "nokey", # ⬅️ Huge CPU savings here
+            "-skip_frame", "nokey",
             "-i", mp4_filepath,
             "-vf", f"select='eq(pict_type,I)',scale={width}:{height},tile={cols}x{rows}",
             "-frames:v", "1",
-            "-q:v", "3",            # Optional: slightly compresses the JPEG to save I/O overhead
+            "-q:v", str(SPRITE_QUALITY),
             "-y", jpg_filepath
         ]
         proc_ff = await asyncio.create_subprocess_exec(
