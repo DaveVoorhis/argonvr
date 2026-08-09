@@ -195,8 +195,9 @@ async def generate_sprite_and_vtt(mp4_filepath, output_dir, base_name):
         if os.path.exists(jpg_filepath): os.remove(jpg_filepath)
         if os.path.exists(vtt_filepath): os.remove(vtt_filepath)
 
-def update_history_manifest(target_cam_id=None):
-    """Scans the recordings directory and generates daily JSON manifests per camera."""
+def update_history_manifest(target_cam_id=None, target_dates=None):
+    """Scans the recordings directory and generates daily JSON manifests per camera.
+    If target_dates is provided, only those specific daily manifests are updated."""
     if not os.path.exists(STORE_DIR):
         return
 
@@ -216,20 +217,40 @@ def update_history_manifest(target_cam_id=None):
                     parts = f.split('_')
                     if len(parts) >= 2:
                         date_str = parts[1]
+
+                        # Filter by target_dates to save processing time
+                        if target_dates and date_str not in target_dates:
+                            continue
+
                         if date_str not in daily_files:
                             daily_files[date_str] = []
                         daily_files[date_str].append(f)
                 except IndexError:
                     continue
 
+        # Determine which dates need to be processed
+        dates_to_process = target_dates if target_dates else daily_files.keys()
+
+        active_manifests = set()
+
         # Generate or update manifest for each active date
-        active_dates = set()
-        for date_str, files in daily_files.items():
+        for date_str in dates_to_process:
+            files = daily_files.get(date_str, [])
             manifest_name = f"history_{date_str}.json"
-            active_dates.add(manifest_name)
+            active_manifests.add(manifest_name)
             manifest_path = os.path.join(cam_path, manifest_name)
 
+            # If all files for this date were deleted, remove the orphaned manifest
+            if not files:
+                if os.path.exists(manifest_path):
+                    try:
+                        os.remove(manifest_path)
+                    except OSError:
+                        pass
+                continue
+
             existing_data = {}
+            old_manifest = None
             if os.path.exists(manifest_path):
                 try:
                     with open(manifest_path, 'r') as mf:
@@ -265,16 +286,19 @@ def update_history_manifest(target_cam_id=None):
 
             manifest_data.sort(key=lambda x: x['filename'], reverse=True)
 
-            with open(manifest_path, 'w') as mf:
-                json.dump(manifest_data, mf)
+            # Only write to disk if the content actually changed
+            if manifest_data != old_manifest:
+                with open(manifest_path, 'w') as mf:
+                    json.dump(manifest_data, mf)
 
-        # Clean up orphaned history files
-        for f in os.listdir(cam_path):
-            if f.startswith('history_') and f.endswith('.json') and f not in active_dates:
-                try:
-                    os.remove(os.path.join(cam_path, f))
-                except OSError:
-                    pass
+        # Only clean up entirely orphaned history files during a full scan
+        if not target_dates:
+            for f in os.listdir(cam_path):
+                if f.startswith('history_') and f.endswith('.json') and f not in active_manifests:
+                    try:
+                        os.remove(os.path.join(cam_path, f))
+                    except OSError:
+                        pass
 
 def get_free_space_pct(path):
     try:
@@ -302,9 +326,19 @@ async def storage_manager():
                 all_files.sort(key=os.path.getmtime)
 
                 deleted_count = 0
+                affected_dates = set()
+
                 while all_files and get_free_space_pct(STORAGE_DEVICE) < MIN_FREE_SPACE_PCT:
                     target_m3u8 = all_files.pop(0)
                     base_path = os.path.splitext(target_m3u8)[0]
+
+                    try:
+                        filename = os.path.basename(target_m3u8)
+                        parts = filename.split('_')
+                        if len(parts) >= 2:
+                            affected_dates.add(parts[1])
+                    except Exception:
+                        pass
 
                     # Glob catches the .m3u8, all _xxx.ts chunks, .jpg, and .vtt
                     for f_to_delete in glob.glob(f"{base_path}*"):
@@ -316,7 +350,7 @@ async def storage_manager():
 
                 if deleted_count > 0:
                     print(f"[🧹] Purged {deleted_count} files/chunks. Updating history manifests.")
-                    update_history_manifest()
+                    update_history_manifest(target_dates=list(affected_dates))
         except Exception as e:
             print(f"[⚠️] Storage Manager error: {e}")
 
@@ -402,7 +436,15 @@ async def background_encoder_worker():
                         # FFprobe/FFmpeg will seamlessly read the .m3u8 to generate the sprite sheet
                         await generate_sprite_and_vtt(final_filepath, final_dir, base_name)
 
-                        update_history_manifest(cam_id)
+                        try:
+                            parts = base_name.split('_')
+                            if len(parts) >= 2:
+                                target_date = parts[1]
+                                update_history_manifest(cam_id, target_dates=[target_date])
+                            else:
+                                update_history_manifest(cam_id)
+                        except Exception:
+                            update_history_manifest(cam_id)
                     else:
                         print(f"[❌] Error packaging {raw_filename}. See encoder_worker.log")
                         os.rename(raw_filepath, raw_filepath + ".failed")
