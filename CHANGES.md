@@ -10,6 +10,7 @@ This is human-written.
 6. Calendar popup only indicates there are clips for current day and doesn't immediately update timeline when day is changed. Fixed.
 7. Camera colour passed from script.js to camera.js.
 8. Slow camera view recovery when pressing Reset or gaining focus should now be fixed.
+9. Fix looping on single camera playback.
 
 ## Enhancements
 

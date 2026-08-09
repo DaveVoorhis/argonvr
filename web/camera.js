@@ -57,7 +57,7 @@ function parseFilenameToSeconds(filename) {
 
 // UI Initialization
 document.getElementById('cam-title').innerText = camId.toUpperCase();
-document.getElementById('cam-title').style.color = getCameraColor(); // Kept inline as it depends on URL param
+document.getElementById('cam-title').style.color = getCameraColor();
 
 const fwVideo = document.getElementById('fw-video');
 const snapshotCanvas = document.getElementById('snapshot-canvas');
@@ -77,7 +77,7 @@ let fwHlsPlayer = null;
 let fwIsScrubbing = false;
 let currentClipUrl = null;
 let targetClipUrl = null;
-let targetClipOffset = 0;
+let targetClipOffset = -1;
 let currentLoadSession = 0;
 
 let timelineStartSec = 0;
@@ -106,12 +106,10 @@ function updateSliderMaxBounds() {
     endSlider.max = maxSec;
 }
 
-// Tolerance Helper to handle browser resizing/reflow snapping
 function isEndSliderAtNow() {
     if (currentDayString !== getTodayString()) return false;
     const val = parseInt(endSlider.value, 10);
     const max = parseInt(endSlider.max, 10);
-    // If within one 60s step of the absolute maximum time, consider it "NOW"
     return val >= (max - 60);
 }
 
@@ -208,7 +206,6 @@ endSlider.addEventListener('input', () => {
 
 endSlider.addEventListener('change', () => {
     if (isEndSliderAtNow()) {
-        // Dragging the slider back to MAX forces it back onto the Live stream
         fwGoLive();
     } else {
         timelineEndSec = parseInt(endSlider.value, 10);
@@ -288,12 +285,16 @@ function renderSpriteFrame(clip, offset) {
 
 // --- Video Sync Listeners ---
 fwVideo.addEventListener('seeked', () => {
-    if (targetClipUrl !== currentClipUrl) return;
+    if (targetClipUrl !== currentClipUrl || targetClipOffset < 0) return;
 
     const performCatchUp = () => {
         if (currentClipUrl !== null && targetClipUrl === currentClipUrl) {
-            if (Math.abs(fwVideo.currentTime - targetClipOffset) > 0.1) {
-                fwVideo.currentTime = targetClipOffset;
+            if (targetClipOffset >= 0 && Math.abs(fwVideo.currentTime - targetClipOffset) > 0.1) {
+                const target = targetClipOffset;
+                targetClipOffset = -1;
+                fwVideo.currentTime = target;
+            } else {
+                targetClipOffset = -1;
             }
         }
     };
@@ -364,8 +365,6 @@ async function loadClipMetadata(clips) {
 
     const PARALLEL_BATCH_SIZE = 4;
 
-    // Tag each clip with its chronological index to help with distributed caching
-    // This allows us to easily select every Nth clip across the timeline later.
     clips.forEach((c, i) => {
         if (c._index === undefined) c._index = i;
     });
@@ -409,27 +408,19 @@ async function loadClipMetadata(clips) {
             const aDist = Math.abs(aCenter - playheadTime);
             const bDist = Math.abs(bCenter - playheadTime);
 
-            // Tiering system balances local priority with distributed loading
             const getTier = (clip, dist) => {
-                // Tier 0: Immediate vicinity (e.g., within 300 seconds / 5 mins of playhead)
                 if (dist < 300) return 0;
-                // Tier 1: Coarse distributed mesh (every 10th clip)
                 if (clip._index % 10 === 0) return 1;
-                // Tier 2: Fine distributed mesh (every 5th clip)
                 if (clip._index % 5 === 0) return 2;
-                // Tier 3: Everything else
                 return 3;
             };
 
             const aTier = getTier(a, aDist);
             const bTier = getTier(b, bDist);
 
-            // If clips are in different tiers, the lower tier loads first
             if (aTier !== bTier) {
                 return aTier - bTier;
             }
-
-            // Within the same tier, prioritize clips closest to the playhead
             return aDist - bDist;
         });
 
@@ -664,7 +655,7 @@ function calculateScrubTarget(e) {
 
 function applyVideoScrub(selectedClip, offsetInClip) {
     targetClipUrl = selectedClip.url;
-    targetClipOffset = offsetInClip;
+    targetClipOffset = offsetInClip; // FIX: Ensure this resets smoothly on every new scrub
 
     if (currentClipUrl === selectedClip.url) {
         if (fwVideo.readyState > 1) {
@@ -767,7 +758,6 @@ fwTimelineRegion.addEventListener('pointerup', (e) => {
     }
 });
 
-// Guard visual sync on resize
 window.addEventListener('resize', () => {
     if (!fwIsScrubbing) updateSliderLabels();
 });
