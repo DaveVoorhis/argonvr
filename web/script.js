@@ -752,6 +752,22 @@ document.addEventListener("visibilitychange", () => {
 		} else {
 			fetchManifest();
 		}
+	} else if (document.visibilityState === "hidden") {
+		// Suspend heavy operations when minimized to prevent CPU warnings
+		if (liveSyncInterval) clearInterval(liveSyncInterval);
+		if (playbackInterval) clearInterval(playbackInterval);
+
+		// Pause all native video elements and detach HLS streams
+		activeCameras.forEach(camId => {
+			const videoEl = document.getElementById(`video-${camId}`);
+			if (videoEl && !videoEl.paused) {
+				videoEl.pause();
+			}
+			if (hlsPlayers[camId]) {
+				hlsPlayers[camId].stopLoad();   // Stop background network fetching
+				hlsPlayers[camId].detachMedia(); // Detach to save memory
+			}
+		});
 	}
 });
 

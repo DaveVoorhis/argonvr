@@ -11,6 +11,8 @@ This is human-written.
 7. Camera colour passed from script.js to camera.js.
 8. Slow camera view recovery when pressing Reset or gaining focus should now be fixed.
 9. Fix looping on single camera playback.
+10. Implemented per-camera watchdog checking and reset if camera view fails.
+11. Stopped frontend processing when visibility is minimised.
 
 ## Enhancements
 
