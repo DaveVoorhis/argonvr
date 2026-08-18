@@ -555,6 +555,55 @@ function openCameraPage(camId) {
 	window.location.href = `camera.html?cam=${camId}&date=${currentDayString}&color=${hexColor}`;
 }
 
+// --- Reset single camera safely ---
+function resetIndividualCamera(camId) {
+	const videoEl = document.getElementById(`video-${camId}`);
+	if (!videoEl) return;
+
+	setCameraState(camId, 'video');
+
+	// 1. Fully tear down the HLS instance first to abort network requests
+	if (hlsPlayers[camId]) {
+		hlsPlayers[camId].stopLoad();
+		hlsPlayers[camId].detachMedia();
+		hlsPlayers[camId].destroy();
+		delete hlsPlayers[camId];
+	}
+
+	// 2. Clear the native video element buffer
+	videoEl.pause();
+	videoEl.removeAttribute('src');
+	videoEl.load();
+
+	const freshPlaylistUrl = `${baseDir}/${camId}/stream.m3u8?t=${Date.now()}`;
+
+	if (Hls.isSupported()) {
+		const hls = new Hls({
+			liveDurationInfinity: true,
+			manifestLoadingMaxRetry: 5,
+			xhrSetup: function(xhr) {
+				xhr.withCredentials = true;
+			}
+		});
+		hlsPlayers[camId] = hls;
+		hls.loadSource(freshPlaylistUrl);
+		hls.attachMedia(videoEl);
+
+		hls.on(Hls.Events.MANIFEST_PARSED, () => videoEl.play().catch(e => {}));
+
+		hls.on(Hls.Events.ERROR, (event, data) => {
+			if (data.fatal && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+				handleStreamError(hls);
+			}
+		});
+
+	} else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+		videoEl.src = freshPlaylistUrl;
+		videoEl.play().catch(e => {});
+		videoEl.onerror = () => handleStreamError(null);
+	}
+}
+
 function returnToLive() {
 	if (liveSyncInterval) clearInterval(liveSyncInterval);
 
@@ -607,49 +656,7 @@ function returnToLive() {
 	}
 
 	activeCameras.forEach(camId => {
-		const videoEl = document.getElementById(`video-${camId}`);
-		setCameraState(camId, 'video');
-
-		// 1. Fully tear down the HLS instance first to abort network requests
-		if (hlsPlayers[camId]) {
-			hlsPlayers[camId].stopLoad();
-			hlsPlayers[camId].detachMedia();
-			hlsPlayers[camId].destroy();
-			delete hlsPlayers[camId];
-		}
-
-		// 2. Clear the native video element buffer
-		videoEl.pause();
-		videoEl.removeAttribute('src');
-		videoEl.load();
-
-		const freshPlaylistUrl = `${baseDir}/${camId}/stream.m3u8?t=${Date.now()}`;
-
-		if (Hls.isSupported()) {
-			const hls = new Hls({
-				liveDurationInfinity: true,
-				manifestLoadingMaxRetry: 5,
-				xhrSetup: function(xhr) {
-					xhr.withCredentials = true;
-				}
-			});
-			hlsPlayers[camId] = hls;
-			hls.loadSource(freshPlaylistUrl);
-			hls.attachMedia(videoEl);
-
-			hls.on(Hls.Events.MANIFEST_PARSED, () => videoEl.play().catch(e => {}));
-
-			hls.on(Hls.Events.ERROR, (event, data) => {
-				if (data.fatal && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-					handleStreamError(hls);
-				}
-			});
-
-		} else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-			videoEl.src = freshPlaylistUrl;
-			videoEl.play().catch(e => {});
-			videoEl.onerror = () => handleStreamError(null);
-		}
+		resetIndividualCamera(camId);
 	});
 }
 
@@ -866,6 +873,47 @@ async function discoverCameras() {
 		setTimeout(discoverCameras, 2000);
 	}
 }
+
+// --- Watchdog to detect locked/frozen cameras ---
+const cameraWatchdog = {
+	lastTime: {},
+	freezeCount: {}
+};
+
+setInterval(() => {
+	// Only monitor for freezes during live playback
+	if (!isLive) return;
+
+	activeCameras.forEach(camId => {
+		const videoEl = document.getElementById(`video-${camId}`);
+		if (!videoEl || videoEl.paused) return;
+
+		// Initialize trackers if they don't exist
+		if (cameraWatchdog.lastTime[camId] === undefined) {
+			cameraWatchdog.lastTime[camId] = -1;
+		}
+		if (cameraWatchdog.freezeCount[camId] === undefined) {
+			cameraWatchdog.freezeCount[camId] = 0;
+		}
+
+		// If the video's current playback time hasn't advanced, increment the freeze counter
+		if (videoEl.currentTime === cameraWatchdog.lastTime[camId]) {
+			cameraWatchdog.freezeCount[camId]++;
+
+			// If it's been frozen for 2 consecutive checks (approx 8 seconds)
+			if (cameraWatchdog.freezeCount[camId] >= 2) {
+				console.warn(`[Watchdog] Camera ${camId} appears frozen. Resetting individually...`);
+				resetIndividualCamera(camId);
+				cameraWatchdog.freezeCount[camId] = 0; // Reset counter after triggering fix
+			}
+		} else {
+			// Video is playing normally
+			cameraWatchdog.freezeCount[camId] = 0;
+		}
+
+		cameraWatchdog.lastTime[camId] = videoEl.currentTime;
+	});
+}, 4000); // Check every 4 seconds
 
 document.addEventListener('DOMContentLoaded', async () => {
 	try {
