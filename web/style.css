@@ -381,9 +381,6 @@ input[type=range]:focus { outline: none; }
 }
 
 @media (max-width: 800px) {
-	body {
-		height: 100dvh;
-	}
 	.video-grid {
 		flex-grow: 1;
 		overflow-y: auto;
