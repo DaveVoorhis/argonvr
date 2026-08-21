@@ -33,6 +33,7 @@ This is human-written.
 16. Single-camera caching loads from the current scrubber position outward.
 17. Motion sensitivity is set per-camera.
 18. Implemented log rolling.
+19. Implemented as SPA.
 
 ## Features
 

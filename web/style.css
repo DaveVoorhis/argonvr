@@ -1,3 +1,13 @@
+/* --- SPA View Wrappers --- */
+#dashboard-view, #camera-view {
+	display: flex;
+	flex-direction: column;
+	height: 100%;
+	width: 100%;
+	flex-grow: 1;
+	overflow: hidden;
+}
+
 body {
 	background: #0a0a0a;
 	margin: 0;
@@ -415,4 +425,217 @@ input[type=range]:focus { outline: none; }
 		min-width: 90px;
 		padding: 2px 5px;
 	}
+}
+
+/* --- Camera View Styles --- */
+.back-btn {
+	background: #333;
+	border: none;
+	color: white;
+	padding: 4px 8px;
+	border-radius: 4px;
+	cursor: pointer;
+	font-weight: bold;
+	font-size: 0.9rem;
+	transition: background 0.2s;
+}
+
+.back-btn:hover { background: #444; }
+
+.cam-title {
+	font-weight: bold;
+	font-size: 1rem;
+	text-transform: uppercase;
+}
+
+.video-container {
+	flex-grow: 1;
+	position: relative;
+	background: #000;
+	min-height: 0;
+}
+
+.video-container video,
+.video-container .snapshot-canvas {
+	position: absolute;
+	top: 0;
+	left: 0;
+	width: 100%;
+	height: 100%;
+	object-fit: contain;
+}
+
+.video-container .snapshot-canvas {
+	z-index: 5;
+	display: none;
+	image-rendering: -webkit-optimize-contrast;
+	image-rendering: crisp-edges;
+}
+
+.video-container .snapshot-canvas.visible {
+	display: block;
+}
+
+.video-container .no-video-overlay {
+	position: absolute;
+	top: 0; left: 0; right: 0; bottom: 0;
+	background: repeating-linear-gradient(45deg, #111, #111 10px, #1a1a1a 10px, #1a1a1a 20px);
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+	align-items: center;
+	color: #666;
+	z-index: 10;
+}
+
+.video-container .no-video-overlay.hidden {
+	display: none !important;
+}
+
+.fw-timeline-bar {
+	background: #1a1a1a;
+	padding: 2px 6px;
+	display: flex;
+	align-items: center;
+	border-top: 1px solid #333;
+	border-bottom: 1px solid #333;
+	height: 28px;
+	flex-shrink: 0;
+}
+
+.fw-controls {
+	background: #1a1a1a;
+	padding: 2px 6px;
+	padding-bottom: calc(2px + env(safe-area-inset-bottom));
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	border-top: 1px solid #333;
+	min-height: 34px;
+	height: auto;
+	flex-shrink: 0;
+	flex-wrap: wrap;
+}
+
+.ctrl-select {
+	background-image: url("data:image/svg+xml;charset=US-ASCII,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20width%3D%22292.4%22%20height%3D%22292.4%22%3E%3Cpath%20fill%3D%22%23FFFFFF%22%20d%3D%22M287%2069.4a17.6%2017.6%200%200%200-13-5.4H18.4c-5%200-9.3%201.8-12.9%205.4A17.6%2017.6%200%200%200%200%2082.2c0%205%201.8%209.3%205.4%2012.9l128%20127.9c3.6%203.6%207.8%205.4%2012.8%205.4s9.2-1.8%2012.8-5.4L287%2095c3.5-3.5%205.4-7.8%205.4-12.8%200-5-1.9-9.2-5.5-12.8z%22%2F%3E%3C%2Fsvg%3E");
+	background-repeat: no-repeat;
+	background-position: right 6px center;
+	background-size: 8px;
+	padding-right: 24px;
+	appearance: none;
+	-webkit-appearance: none;
+	-moz-appearance: none;
+}
+
+.ctrl-select:focus {
+	outline: 2px solid #3498db;
+}
+
+.fw-time-display {
+	font-family: monospace;
+	font-size: 1rem;
+	color: white;
+	width: auto;
+	min-width: 65px;
+	flex-shrink: 0;
+	text-align: center;
+}
+
+.fw-time-display.time-live {
+	color: #4cd137;
+}
+
+.fw-time-display.time-scrub {
+	color: #f39c12;
+}
+
+.slider-group {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	font-size: 0.8rem;
+	color: #ddd;
+	flex: 1;
+	min-width: 130px;
+}
+
+.slider-group label {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	font-weight: 500;
+	white-space: nowrap;
+}
+
+.slider-group span {
+	font-family: monospace;
+	color: #3498db;
+	width: 40px;
+	text-align: right;
+	display: inline-block;
+}
+
+.slider-group input[type="range"] {
+	flex: 1;
+	width: 100%;
+	cursor: pointer;
+	accent-color: #3498db;
+}
+
+.fw-timeline-container {
+	width: 100%;
+	height: 100%;
+	display: flex;
+	align-items: center;
+}
+
+.fw-timeline-region {
+	width: 100%;
+	height: 20px;
+	background: rgba(255, 255, 255, 0.08);
+	border-radius: 4px;
+	position: relative;
+	cursor: pointer;
+	touch-action: none;
+	border: 1px solid #333;
+	box-sizing: border-box;
+	transition: background-color 0.4s ease;
+}
+
+.fw-timeline-region:hover { background: rgba(255, 255, 255, 0.12); }
+
+.fw-timeline-region.sprites-loaded {
+	background: rgba(46, 204, 113, 0.4);
+}
+
+.fw-timeline-region.sprites-loaded:hover {
+	background: rgba(46, 204, 113, 0.6);
+}
+
+.fw-timeline-indicator {
+	position: absolute;
+	top: -4px;
+	bottom: -4px;
+	width: 4px;
+	background: #f39c12;
+	border-radius: 2px;
+	left: 100%;
+	transform: translateX(-50%);
+	pointer-events: none;
+	z-index: 3;
+	box-shadow: 0 0 5px rgba(0,0,0,0.5);
+}
+
+.fw-timeline-chunk {
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	border-right: 1px solid rgba(0,0,0,0.3);
+	z-index: 1;
+	background-color: rgba(255, 255, 255, 0.25);
+}
+
+.fw-timeline-chunk.chunk-loaded {
+	background-color: rgba(76, 209, 55, 0.6);
 }

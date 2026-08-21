@@ -44,47 +44,98 @@
 </head>
 <body>
 
-<div class="video-grid" id="grid"></div>
+<!-- DASHBOARD VIEW -->
+<div id="dashboard-view">
+    <div class="video-grid" id="grid"></div>
 
-<div class="timeline-bar">
-    <div class="header-brand">
-        <img src="logo.svg" alt="ArgoNVR" class="header-logo">
-        <h2 id="brand-text">ArgoNVR</h2>
-    </div>
+    <div class="timeline-bar">
+        <div class="header-brand">
+            <img src="logo.svg" alt="ArgoNVR" class="header-logo">
+            <h2 id="brand-text">ArgoNVR</h2>
+        </div>
 
-    <button class="ctrl-btn" id="btn-play">▶ Play</button>
-    <div class="time-display" id="time-label">LIVE</div>
-    <div class="timeline-viewport" id="timeline-viewport">
-        <div class="timeline-content" id="timeline-content">
-            <div id="timeline-ruler" class="timeline-ruler"></div>
-            <div id="heatmap" class="heatmap-track"></div>
-            <input type="range" id="scrubber" min="0" max="86400" value="86400">
+        <button class="ctrl-btn" id="btn-play">▶ Play</button>
+        <div class="time-display" id="time-label">LIVE</div>
+        <div class="timeline-viewport" id="timeline-viewport">
+            <div class="timeline-content" id="timeline-content">
+                <div id="timeline-ruler" class="timeline-ruler"></div>
+                <div id="heatmap" class="heatmap-track"></div>
+                <input type="range" id="scrubber" min="0" max="86400" value="86400">
+            </div>
+        </div>
+        <div class="zoom-container" title="Zoom Timeline">
+            <span class="zoom-btn" onclick="adjustZoom(-1)">−</span>
+            <input type="range" id="zoom-slider" min="1" max="144" value="1" step="1">
+            <span class="zoom-btn" onclick="adjustZoom(1)">+</span>
+        </div>
+        <button class="ctrl-btn live-btn" id="btn-live">🔄 Reset</button>
+
+        <div class="date-display" id="global-date" onclick="toggleCalendar()">
+            <span>Loading...</span> 📅
+        </div>
+        <div class="calendar-popup" id="calendar-popup">
+            <div class="cal-header">
+                <button class="cal-btn" onclick="changeMonth(-1)">◀</button>
+                <div id="cal-month-label">Month</div>
+                <button class="cal-btn" onclick="changeMonth(1)">▶</button>
+            </div>
+            <div class="cal-grid" id="cal-grid"></div>
+            <div class="cal-quick-btns">
+                <button class="cal-btn" onclick="selectQuickDate('yesterday')">Yesterday</button>
+                <button class="cal-btn" onclick="selectQuickDate('today')">Today</button>
+            </div>
         </div>
     </div>
-    <div class="zoom-container" title="Zoom Timeline">
-        <span class="zoom-btn" onclick="adjustZoom(-1)">−</span>
-        <input type="range" id="zoom-slider" min="1" max="144" value="1" step="1">
-        <span class="zoom-btn" onclick="adjustZoom(1)">+</span>
-    </div>
-    <button class="ctrl-btn live-btn" id="btn-live">🔄 Reset</button>
+</div>
 
-    <div class="date-display" id="global-date" onclick="toggleCalendar()">
-        <span>Loading...</span> 📅
-    </div>
-    <div class="calendar-popup" id="calendar-popup">
-        <div class="cal-header">
-            <button class="cal-btn" onclick="changeMonth(-1)">◀</button>
-            <div id="cal-month-label">Month</div>
-            <button class="cal-btn" onclick="changeMonth(1)">▶</button>
+<!-- SINGLE CAMERA VIEW (Initially Hidden) -->
+<div id="camera-view" style="display: none;">
+    <div class="video-container">
+        <canvas id="snapshot-canvas" class="snapshot-canvas"></canvas>
+        <video id="fw-video" muted playsinline preload="auto"></video>
+
+        <div class="no-video-overlay" id="fw-overlay">
+            <div>No Motion Detected / Stream Offline</div>
         </div>
-        <div class="cal-grid" id="cal-grid"></div>
-        <div class="cal-quick-btns">
-            <button class="cal-btn" onclick="selectQuickDate('yesterday')">Yesterday</button>
-            <button class="cal-btn" onclick="selectQuickDate('today')">Today</button>
+    </div>
+
+    <div class="fw-timeline-bar" id="fw-timeline-bar">
+        <div class="fw-timeline-container">
+            <div class="fw-timeline-region" id="fw-timeline-region" title="Sweep across recorded clips">
+                <div class="fw-timeline-indicator" id="fw-timeline-indicator"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="fw-controls" id="fw-controls">
+        <button class="back-btn" onclick="closeCameraPage()">◀ Back</button>
+        <span id="cam-title" class="cam-title">CAM</span>
+        <button class="ctrl-btn live-btn" id="fw-btn-live" onclick="fwGoLive()">Go Live</button>
+        <div class="fw-time-display time-live" id="fw-time-label">LIVE</div>
+
+        <select id="fw-scale-select" class="ctrl-btn ctrl-select" onchange="handleScaleChange()">
+            <option value="1" selected>1 Hour</option>
+            <option value="2">2 Hours</option>
+            <option value="4">4 Hours</option>
+            <option value="6">6 Hours</option>
+            <option value="8">8 Hours</option>
+            <option value="12">12 Hours</option>
+            <option value="all">Full Day</option>
+            <option value="custom" hidden>Custom</option>
+        </select>
+
+        <div class="slider-group">
+            <label>Start: <span id="start-val">00:00</span></label>
+            <input type="range" id="fw-start-slider" min="0" max="86400" step="60" value="0">
+        </div>
+        <div class="slider-group">
+            <label>End: <span id="end-val">NOW</span></label>
+            <input type="range" id="fw-end-slider" min="0" max="86400" step="60" value="86400">
         </div>
     </div>
 </div>
 
 <script src="script.js"></script>
+<script src="camera.js"></script>
 </body>
 </html>
