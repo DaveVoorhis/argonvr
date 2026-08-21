@@ -21,7 +21,7 @@ body {
 	width: 24px;
 	object-fit: contain;
 }
-.header-brand h2 { margin: 0; font-size: 1rem; color: #e0e0e0; letter-spacing: 1px; }
+.header-brand h2 { margin: 0; font-size: 1rem; color: #e0e0e0; letter-spacing: 1px; min-width: 85px; }
 
 .date-display {
 	color: #888;
