@@ -38,7 +38,7 @@ let baseDir = './cameras';
 
 let isLive = true;
 let isPlayingHistory = false;
-let isScrubbing = false; // Tracks if the user is currently dragging the timeline
+let isScrubbing = false;
 let playbackInterval = null;
 let liveSyncInterval = null;
 let currentDayString = "";
@@ -56,7 +56,6 @@ const zoomSlider = document.getElementById('zoom-slider');
 const timelineContent = document.getElementById('timeline-content');
 const timelineViewport = document.getElementById('timeline-viewport');
 
-// --- Helper for managing display classes on the camera card ---
 function setCameraState(camId, state) {
 	const card = document.getElementById(`card-${camId}`);
 	if (card) {
@@ -107,7 +106,7 @@ function parseVTTTime(timeStr) {
 		(parseInt(secParts[1], 10) / 1000);
 }
 
-const pendingMetadata = new Set(); // Tracks in-flight requests
+const pendingMetadata = new Set();
 
 async function ensureClipMetadata(clip) {
 	if (!clip || pendingMetadata.has(clip.url)) return;
@@ -265,7 +264,6 @@ function setDate(dateObj) {
 
 			timeLabel.classList.add('history');
 
-			// Fully clean up the HLS players when entering history scrubbing mode
 			activeCameras.forEach(camId => {
 				if (hlsPlayers[camId]) {
 					hlsPlayers[camId].stopLoad();
@@ -301,7 +299,6 @@ function parseFilenameToSeconds(filename) {
 }
 
 async function fetchManifest(camId = null) {
-	// Centralized guard condition
 	if (activeCameras.length === 0) return;
 
 	try {
@@ -457,38 +454,30 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 			const manifestRef = matchData.manifestRef;
 			const offset = matchData.offset;
 
-			// JIT fetch metadata if we don't have it yet
 			ensureClipMetadata(manifestRef);
 
-			// 1. Evaluate if a jump/seek is actually required
 			const srcChanged = !videoEl.src.includes(manifestRef.url.replace('./', ''));
 			const drift = srcChanged ? 0 : Math.abs(videoEl.currentTime - offset);
 			const needsSeek = srcChanged || drift > 1.0;
 
-			// 2. Render the sprite into the canvas memory
 			const hasSprite = renderSpriteFrame(camId, manifestRef, offset);
 
 			if (isDragging) {
-				// --- DRAGGING MODE ---
 				if (hasSprite) {
 					setCameraState(camId, 'canvas');
 				} else {
 					videoEl.pause();
 				}
 			} else {
-				// --- RELEASE OR PLAYBACK TICK MODE ---
 				if (needsSeek) {
-					// We are jumping to a new timestamp.
 					if (hasSprite) {
 						setCameraState(camId, 'canvas');
 					} else {
 						setCameraState(camId, 'video');
 					}
 
-					// Define the atomic swap that executes only when the video frame is fully decoded
 					const onVideoReady = () => {
 						setCameraState(camId, 'video');
-
 						videoEl.removeEventListener('seeked', onVideoReady);
 						videoEl.removeEventListener('playing', onVideoReady);
 					};
@@ -496,7 +485,6 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 					videoEl.addEventListener('seeked', onVideoReady);
 					videoEl.addEventListener('playing', onVideoReady);
 
-					// Command the video to fetch and seek
 					if (srcChanged) {
 						if (Hls.isSupported()) {
 							if (hlsPlayers[camId]) {
@@ -532,7 +520,6 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 						}
 					}
 				} else {
-					// Continuous playback ticking (no jumping needed).
 					setCameraState(camId, 'video');
 
 					if (isPlayingHistory && videoEl.paused) {
@@ -543,26 +530,55 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 				}
 			}
 		} else {
-			// Dead zone (No recording)
 			setCameraState(camId, 'overlay');
 			videoEl.src = "";
 		}
 	});
 }
 
+// --- SPA Navigational Hooks ---
 function openCameraPage(camId) {
 	const hexColor = getCameraColor(camId).replace('#', '');
-	window.location.href = `camera.html?cam=${camId}&date=${currentDayString}&color=${hexColor}`;
+
+	// 1. Swap Views
+	document.getElementById('dashboard-view').style.display = 'none';
+	document.getElementById('camera-view').style.display = 'flex';
+
+	// 2. Pause dashboard HLS players to free up network/CPU for the single camera
+	activeCameras.forEach(id => {
+		const videoEl = document.getElementById(`video-${id}`);
+		if (videoEl && !videoEl.paused) {
+			videoEl.pause();
+		}
+	});
+
+	// 3. Initialize single camera view
+	if (window.initCameraView) {
+		window.initCameraView(camId, currentDayString, hexColor);
+	}
 }
 
-// --- Reset single camera safely ---
+window.closeCameraPage = function() {
+	document.getElementById('camera-view').style.display = 'none';
+	document.getElementById('dashboard-view').style.display = 'flex';
+
+	if (window.stopCameraView) {
+		window.stopCameraView();
+	}
+
+	if (isLive) {
+		returnToLive();
+	} else {
+		updateCamerasToScrubber(parseInt(scrubber.value, 10), false);
+	}
+};
+
 function resetIndividualCamera(camId) {
 	const videoEl = document.getElementById(`video-${camId}`);
 	if (!videoEl) return;
 
 	setCameraState(camId, 'video');
 
-	// 1. Fully tear down the HLS instance first to abort network requests
 	if (hlsPlayers[camId]) {
 		hlsPlayers[camId].stopLoad();
 		hlsPlayers[camId].detachMedia();
@@ -570,7 +586,6 @@ function resetIndividualCamera(camId) {
 		delete hlsPlayers[camId];
 	}
 
-	// 2. Clear the native video element buffer
 	videoEl.pause();
 	videoEl.removeAttribute('src');
 	videoEl.load();
@@ -660,7 +675,6 @@ function returnToLive() {
 	});
 }
 
-// 1. INPUT event: Fires continuously while dragging the slider
 scrubber.addEventListener('input', (e) => {
 	if (isLive) {
 		isLive = false;
@@ -681,7 +695,6 @@ scrubber.addEventListener('input', (e) => {
 	const targetSeconds = parseInt(e.target.value, 10);
 	timeLabel.innerText = secondsToTimeStr(targetSeconds);
 
-	// Pass true to signify we are actively dragging (renders the Sprite Canvas)
 	updateCamerasToScrubber(targetSeconds, true);
 
 	const scrubberX = (targetSeconds / 86400) * timelineContent.clientWidth;
@@ -693,12 +706,9 @@ scrubber.addEventListener('input', (e) => {
 	}
 });
 
-// 2. CHANGE event: Fires once when the user releases the mouse click / touch
 scrubber.addEventListener('change', (e) => {
 	isScrubbing = false;
 	const targetSeconds = parseInt(e.target.value, 10);
-
-	// Pass false to signify release (hides canvas, loads video)
 	updateCamerasToScrubber(targetSeconds, false);
 });
 
@@ -709,7 +719,6 @@ playBtn.addEventListener('click', () => {
 	if (isPlayingHistory) {
 		playBtn.innerText = "⏸ Pause";
 		playbackInterval = setInterval(() => {
-			// Do not fight the user if they are currently scrubbing
 			if (isScrubbing) return;
 
 			let currentVal = parseInt(scrubber.value, 10);
@@ -753,19 +762,17 @@ document.addEventListener("visibilitychange", () => {
 			fetchManifest();
 		}
 	} else if (document.visibilityState === "hidden") {
-		// Suspend heavy operations when minimized to prevent CPU warnings
 		if (liveSyncInterval) clearInterval(liveSyncInterval);
 		if (playbackInterval) clearInterval(playbackInterval);
 
-		// Pause all native video elements and detach HLS streams
 		activeCameras.forEach(camId => {
 			const videoEl = document.getElementById(`video-${camId}`);
 			if (videoEl && !videoEl.paused) {
 				videoEl.pause();
 			}
 			if (hlsPlayers[camId]) {
-				hlsPlayers[camId].stopLoad();   // Stop background network fetching
-				hlsPlayers[camId].detachMedia(); // Detach to save memory
+				hlsPlayers[camId].stopLoad();
+				hlsPlayers[camId].detachMedia();
 			}
 		});
 	}
@@ -890,21 +897,18 @@ async function discoverCameras() {
 	}
 }
 
-// --- Watchdog to detect locked/frozen cameras ---
 const cameraWatchdog = {
 	lastTime: {},
 	freezeCount: {}
 };
 
 setInterval(() => {
-	// Only monitor for freezes during live playback
 	if (!isLive) return;
 
 	activeCameras.forEach(camId => {
 		const videoEl = document.getElementById(`video-${camId}`);
 		if (!videoEl || videoEl.paused) return;
 
-		// Initialize trackers if they don't exist
 		if (cameraWatchdog.lastTime[camId] === undefined) {
 			cameraWatchdog.lastTime[camId] = -1;
 		}
@@ -912,24 +916,21 @@ setInterval(() => {
 			cameraWatchdog.freezeCount[camId] = 0;
 		}
 
-		// If the video's current playback time hasn't advanced, increment the freeze counter
 		if (videoEl.currentTime === cameraWatchdog.lastTime[camId]) {
 			cameraWatchdog.freezeCount[camId]++;
 
-			// If it's been frozen for 2 consecutive checks (approx 8 seconds)
 			if (cameraWatchdog.freezeCount[camId] >= 2) {
 				console.warn(`[Watchdog] Camera ${camId} appears frozen. Resetting individually...`);
 				resetIndividualCamera(camId);
-				cameraWatchdog.freezeCount[camId] = 0; // Reset counter after triggering fix
+				cameraWatchdog.freezeCount[camId] = 0;
 			}
 		} else {
-			// Video is playing normally
 			cameraWatchdog.freezeCount[camId] = 0;
 		}
 
 		cameraWatchdog.lastTime[camId] = videoEl.currentTime;
 	});
-}, 4000); // Check every 4 seconds
+}, 4000);
 
 document.addEventListener('DOMContentLoaded', async () => {
 	try {
@@ -943,7 +944,6 @@ document.addEventListener('DOMContentLoaded', async () => {
 	}
 
 	fetchAvailableDates();
-
 	renderTimelineRuler();
 	returnToLive();
 
