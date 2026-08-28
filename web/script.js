@@ -952,4 +952,32 @@ document.addEventListener('DOMContentLoaded', async () => {
 	}, 30000);
 
 	discoverCameras();
+
+	// Setup toolbar toggle
+	const toggleBtn = document.getElementById('toolbar-toggle');
+	const iconHide = document.getElementById('icon-hide');
+	const iconShow = document.getElementById('icon-show');
+
+	if (toggleBtn) {
+		toggleBtn.addEventListener('click', () => {
+			document.body.classList.toggle('toolbars-hidden');
+			const isHidden = document.body.classList.contains('toolbars-hidden');
+
+			if (isHidden) {
+				iconHide.style.display = 'none';
+				iconShow.style.display = 'block';
+			} else {
+				iconHide.style.display = 'block';
+				iconShow.style.display = 'none';
+			}
+
+			// Dispatch resize event to ensure grids calculate accurate layout parameters
+			window.dispatchEvent(new Event('resize'));
+
+			// Center timeline gracefully if layout shift occurred
+			if (!isHidden) {
+				setTimeout(centerViewportOnScrubber, 50);
+			}
+		});
+	}
 });

@@ -639,3 +639,41 @@ input[type=range]:focus { outline: none; }
 .fw-timeline-chunk.chunk-loaded {
 	background-color: rgba(76, 209, 55, 0.6);
 }
+
+/* --- Floating Toolbar Toggle --- */
+.toolbar-toggle-btn {
+	position: fixed;
+	bottom: 60px; /* Floats just above the ~44px toolbar */
+	left: 15px;   /* Shifted to the left-hand side */
+	z-index: 9999;
+	background: rgba(0, 0, 0, 0.5);
+	color: #fff;
+	border: 1px solid rgba(255, 255, 255, 0.2);
+	border-radius: 50%;
+	width: 36px;
+	height: 36px;
+	display: flex;
+	justify-content: center;
+	align-items: center;
+	cursor: pointer;
+	transition: all 0.3s ease;
+	opacity: 0.25;
+}
+
+.toolbar-toggle-btn:hover {
+	opacity: 1;
+	background: rgba(0, 0, 0, 0.8);
+	border-color: rgba(255, 255, 255, 0.5);
+	box-shadow: 0 0 10px rgba(0,0,0,0.5);
+}
+
+/* Drops the button to the bottom corner when toolbars are hidden */
+body.toolbars-hidden .toolbar-toggle-btn {
+	bottom: 15px;
+}
+
+body.toolbars-hidden .timeline-bar,
+body.toolbars-hidden .fw-timeline-bar,
+body.toolbars-hidden .fw-controls {
+	display: none !important;
+}
