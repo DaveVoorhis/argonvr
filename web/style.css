@@ -199,6 +199,14 @@ video {
 .ctrl-btn.live-btn.active { background: #2ecc71; }
 .ctrl-btn.live-btn.active:hover { background: #27ae60; }
 
+.ctrl-btn.warning-btn {
+	background: #d35400;
+	justify-content: center;
+}
+.ctrl-btn.warning-btn:hover {
+	background: #e67e22;
+}
+
 .time-display {
 	font-family: monospace;
 	font-size: 1.05rem;

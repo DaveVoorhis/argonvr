@@ -612,7 +612,7 @@ function resetIndividualCamera(camId) {
 			}
 		});
 
-	} else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+	} else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
 		videoEl.src = freshPlaylistUrl;
 		videoEl.play().catch(e => {});
 		videoEl.onerror = () => handleStreamError(null);
@@ -977,6 +977,31 @@ document.addEventListener('DOMContentLoaded', async () => {
 			// Center timeline gracefully if layout shift occurred
 			if (!isHidden) {
 				setTimeout(centerViewportOnScrubber, 50);
+			}
+		});
+	}
+
+	// Reboot button logic
+	const rebootBtn = document.getElementById('btn-reboot');
+	if (rebootBtn) {
+		rebootBtn.addEventListener('click', () => {
+			if (confirm("Are you sure you want to reboot the system?")) {
+				fetch('/api/system/reboot', {
+					method: 'POST',
+					headers: {
+						'Content-Type': 'application/json'
+					}
+				})
+					.then(response => {
+						if (!response.ok) {
+							throw new Error('Reboot request failed');
+						}
+						alert("System is rebooting...");
+					})
+					.catch(err => {
+						console.error(err);
+						alert("Failed to initiate reboot.");
+					});
 			}
 		});
 	}

@@ -40,3 +40,4 @@ This is human-written.
 
 1. Turned frontend into Progressive Web App.
 2. On single camera view, can now specify displayed time range with sliders.
+3. Added Reboot button to restart server remotely.
