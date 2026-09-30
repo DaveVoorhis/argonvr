@@ -6,6 +6,7 @@ import ssl
 import json
 import yaml
 import socket
+import subprocess
 from urllib.parse import urlparse, parse_qs
 try:
     import sdnotify
@@ -277,6 +278,50 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                     return
         except Exception:
             pass
+        self.do_AUTHHEAD()
+        self.wfile.write(b"Invalid username or password.")
+
+    def do_POST(self):
+        parsed_url = urlparse(self.path)
+        path_no_query = parsed_url.path
+
+        auth_header = self.headers.get('Authorization')
+        if not auth_header:
+            self.do_AUTHHEAD()
+            self.wfile.write(b"Authentication required.")
+            return
+
+        try:
+            auth_type, encoded_credentials = auth_header.split(' ', 1)
+            if auth_type.lower() == 'basic':
+                decoded_credentials = base64.b64decode(encoded_credentials).decode('utf-8')
+                username, password = decoded_credentials.split(':', 1)
+
+                if username == USERNAME and password == PASSWORD:
+                    if path_no_query == '/api/system/reboot':
+                        try:
+                            # Issues the system reboot command
+                            subprocess.run(["sudo", "reboot"], check=True)
+                            data = json.dumps({"message": "Rebooting host machine..."}).encode('utf-8')
+                            self.send_response(200)
+                        except subprocess.CalledProcessError as e:
+                            data = json.dumps({"error": f"Failed to execute reboot: {str(e)}"}).encode('utf-8')
+                            self.send_response(500)
+                        except Exception as e:
+                            data = json.dumps({"error": str(e)}).encode('utf-8')
+                            self.send_response(500)
+
+                        self.send_header('Content-Type', 'application/json')
+                        self.send_header('Content-Length', str(len(data)))
+                        self.end_headers()
+                        self.wfile.write(data)
+                        return
+                    else:
+                        self.send_error(404, "Endpoint not found")
+                        return
+        except Exception:
+            pass
+
         self.do_AUTHHEAD()
         self.wfile.write(b"Invalid username or password.")
 
