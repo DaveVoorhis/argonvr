@@ -7,8 +7,11 @@ Type=notify
 NotifyAccess=all
 User=root
 WorkingDirectory=/home/dave/argonvr
-# Execute launch.sh directly
 ExecStart=/bin/bash -c '/usr/bin/python3 /home/dave/argonvr/server.py & /usr/bin/python3 /home/dave/argonvr/watchdog.py & /usr/bin/python3 /home/dave/argonvr/argonvr.py & wait -n'
+
+# Cleanly signal the main process and ensure all child FFmpeg processes are reaped on stop/restart
+KillMode=mixed
+TimeoutStopSec=15
 
 # Automatically restart if the script crashes
 Restart=always

@@ -8,17 +8,47 @@ CONFIG_FILE = 'argonvr.yaml'
 
 def load_config():
     try:
-        with open(CONFIG_FILE, 'r') as f:
+        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
             return yaml.safe_load(f)
     except FileNotFoundError:
         print(f"❌ Could not find {CONFIG_FILE}")
         sys.exit(1)
 
 def save_config(config):
-    shutil.copy(CONFIG_FILE, CONFIG_FILE + '.bak') # Create a quick backup
-    with open(CONFIG_FILE, 'w') as f:
+    shutil.copy(CONFIG_FILE, CONFIG_FILE + '.bak')  # Create a quick backup
+    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
     print(f"✅ Saved updated configuration to {CONFIG_FILE}")
+
+def iter_lines_cr_lf(stream):
+    """Yields lines split on either CR or LF from a binary stream without buffering lag."""
+    buffer = b""
+    while True:
+        chunk = stream.read1(1024) if hasattr(stream, 'read1') else stream.read(256)
+        if not chunk:
+            if buffer:
+                yield buffer.decode('utf-8', errors='ignore')
+            break
+        buffer += chunk
+        while True:
+            idx_r = buffer.find(b'\r')
+            idx_n = buffer.find(b'\n')
+            if idx_r == -1 and idx_n == -1:
+                break
+            if idx_r == -1:
+                sep_idx = idx_n
+            elif idx_n == -1:
+                sep_idx = idx_r
+            else:
+                sep_idx = min(idx_r, idx_n)
+
+            line = buffer[:sep_idx]
+            if sep_idx == idx_r and len(buffer) > sep_idx + 1 and buffer[sep_idx + 1:sep_idx + 2] == b'\n':
+                buffer = buffer[sep_idx + 2:]
+            else:
+                buffer = buffer[sep_idx + 1:]
+
+            yield line.decode('utf-8', errors='ignore')
 
 def main():
     config = load_config()
@@ -50,8 +80,6 @@ def main():
     print("👀 Watch the output below. Walk in front of the camera to see the score spike.")
     print("🛑 Press Ctrl+C when you are ready to set the new threshold.\n")
 
-    # Added -nostats to prevent FFmpeg's carriage returns from jamming Python's read buffer
-    # Swapped showinfo for metadata=mode=print to match your ArgoNVR engine
     cmd = [
         "ffmpeg", "-nostats", "-rtsp_transport", "tcp", "-i", rtsp_url,
         "-map", "0:v", "-an",
@@ -59,20 +87,24 @@ def main():
         "-f", "null", "-"
     ]
 
-    proc = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True, universal_newlines=True)
+    proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)
 
     peak_score = 0.0
     error_log = []
 
     try:
-        for line in proc.stderr:
+        for line in iter_lines_cr_lf(proc.stderr):
+            stripped = line.strip()
+            if not stripped:
+                continue
+
             # Keep a rolling buffer of the last 15 lines of stderr in case FFmpeg crashes
-            error_log.append(line.strip())
+            error_log.append(stripped)
             if len(error_log) > 15:
                 error_log.pop(0)
 
-            # Parse the scene score out of FFmpeg's showinfo output
-            match = re.search(r'lavfi\.scene_score=([0-9.]+)', line)
+            # Parse the scene score out of FFmpeg's metadata output
+            match = re.search(r'lavfi\.scene_score=([0-9.]+)', stripped)
             if match:
                 score = float(match.group(1))
                 if score > peak_score:
@@ -96,7 +128,11 @@ def main():
     except KeyboardInterrupt:
         # User hit Ctrl+C to stop calibrating
         proc.terminate()
-        proc.wait()
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
 
         print("\n\n🛑 Calibration stopped.")
         print(f"Highest observed score during this session: {peak_score:.5f}")

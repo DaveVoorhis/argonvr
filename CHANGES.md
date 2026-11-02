@@ -35,6 +35,7 @@ This is human-written.
 18. Implemented log rolling.
 19. Implemented as SPA.
 20. Toolbar can be hidden/displayed via button for distraction-free maximised camera view.
+21. General reliability and robustness improvement.
 
 ## Features
 
