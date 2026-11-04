@@ -1,10 +1,8 @@
-const CACHE_NAME = 'argonvr-cache-v31';
+const CACHE_NAME = 'argonvr-cache-v34';
 const urlsToCache = [];
 
 // Install the service worker
 self.addEventListener('install', event => {
-    // Force this new service worker to take over immediately,
-    // rather than waiting for all tabs of the PWA to close.
     self.skipWaiting();
 
     event.waitUntil(
@@ -24,7 +22,6 @@ self.addEventListener('activate', event => {
                     .map(name => caches.delete(name))
             );
         }).then(() => {
-            // Ensure the service worker takes control of the page immediately
             return self.clients.claim();
         })
     );
@@ -32,11 +29,28 @@ self.addEventListener('activate', event => {
 
 // Fetch resources
 self.addEventListener('fetch', event => {
-    // 1. Strict Network-First for HTML navigation (Hitting the Back button or refreshing)
+    if (event.request.method !== 'GET') return;
+
+    const url = new URL(event.request.url);
+
+    // Bypass Service Worker interception for live/recorded media streams, sprites, and dynamic API endpoints
+    if (
+        url.pathname.endsWith('.m3u8') ||
+        url.pathname.endsWith('.ts') ||
+        url.pathname.endsWith('.vtt') ||
+        url.pathname.endsWith('.jpg') ||
+        url.pathname.startsWith('/history') ||
+        url.pathname.startsWith('/cameracount') ||
+        url.pathname.startsWith('/basedir') ||
+        url.pathname.startsWith('/available_dates') ||
+        url.pathname.startsWith('/api/')
+    ) {
+        return;
+    }
+
+    // 1. Strict Network-First for HTML navigation
     if (event.request.mode === 'navigate') {
         event.respondWith(
-            // The { cache: 'no-store' } override forces the browser to ignore its
-            // internal HTTP disk cache and actually ask the server for the file.
             fetch(event.request, { cache: 'no-store' }).catch(() => {
                 return caches.match(event.request);
             })
@@ -44,10 +58,11 @@ self.addEventListener('fetch', event => {
         return;
     }
 
-    // 2. Standard Network-First fallback for everything else (scripts, styles, etc.)
+    // 2. Standard Network-First fallback for static assets
     event.respondWith(
-        fetch(event.request).catch(() => {
-            return caches.match(event.request);
+        fetch(event.request).catch(async () => {
+            const cached = await caches.match(event.request);
+            return cached || Response.error();
         })
     );
 });

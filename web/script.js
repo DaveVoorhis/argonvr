@@ -30,22 +30,23 @@ function getCameraColor(camId) {
 // --- Global State & Caches ---
 let globalManifest = {};
 const hlsPlayers = {};
+const cameraReconnectTimers = {};
 const activeCameras = [];
-const vttCache = {};
-const spriteImages = {};
+let vttCache = {};
+let spriteImages = {};
 
 let baseDir = './cameras';
 
 let isLive = true;
 let isPlayingHistory = false;
 let isScrubbing = false;
+let isSingleCameraOpen = false;
 let playbackInterval = null;
 let liveSyncInterval = null;
 let currentDayString = "";
 
 let availableDates = new Set();
 let calViewDate = new Date();
-let reconnectTimer = null;
 
 const scrubber = document.getElementById('scrubber');
 const timeLabel = document.getElementById('time-label');
@@ -64,19 +65,44 @@ function setCameraState(camId, state) {
 	}
 }
 
-function handleStreamError(hlsInstance) {
+function clearCameraReconnectTimer(camId) {
+	if (cameraReconnectTimers[camId]) {
+		clearTimeout(cameraReconnectTimers[camId]);
+		delete cameraReconnectTimers[camId];
+	}
+}
+
+function destroyHlsPlayer(camId) {
+	clearCameraReconnectTimer(camId);
+	if (hlsPlayers[camId]) {
+		try {
+			hlsPlayers[camId].stopLoad();
+			hlsPlayers[camId].detachMedia();
+			hlsPlayers[camId].destroy();
+		} catch (e) {}
+		delete hlsPlayers[camId];
+	}
+}
+
+function handleStreamError(camId, hlsInstance) {
 	if (hlsInstance) {
-		hlsInstance.stopLoad();
-		hlsInstance.detachMedia();
-		hlsInstance.destroy();
+		try {
+			hlsInstance.stopLoad();
+			hlsInstance.detachMedia();
+			hlsInstance.destroy();
+		} catch (e) {}
+		if (hlsPlayers[camId] === hlsInstance) {
+			delete hlsPlayers[camId];
+		}
 	}
 
-	if (isLive && !reconnectTimer) {
-		console.warn("Connection lost. ArgoNVR backend may have rebooted. Retrying in 5s...");
-		reconnectTimer = setTimeout(() => {
-			reconnectTimer = null;
-			if (isLive) returnToLive();
-		}, 5000);
+	if (isLive && !isSingleCameraOpen && !cameraReconnectTimers[camId]) {
+		cameraReconnectTimers[camId] = setTimeout(() => {
+			delete cameraReconnectTimers[camId];
+			if (isLive && !isSingleCameraOpen && document.visibilityState === "visible") {
+				resetIndividualCamera(camId);
+			}
+		}, 3000);
 	}
 }
 
@@ -116,6 +142,14 @@ async function ensureClipMetadata(clip) {
 
 	if (!needsSprite && !needsVtt) return;
 
+	// Cap in-memory sprite cache to prevent unbounded memory growth over days of uptime
+	const spriteKeys = Object.keys(spriteImages);
+	if (spriteKeys.length > 80) {
+		for (let i = 0; i < 20; i++) {
+			delete spriteImages[spriteKeys[i]];
+		}
+	}
+
 	pendingMetadata.add(clip.url);
 	const promises = [];
 
@@ -123,7 +157,10 @@ async function ensureClipMetadata(clip) {
 		promises.push(new Promise((resolve) => {
 			const img = new Image();
 			img.onload = resolve;
-			img.onerror = resolve;
+			img.onerror = () => {
+				delete spriteImages[clip.sprite_url];
+				resolve();
+			};
 			img.src = clip.sprite_url;
 			spriteImages[clip.sprite_url] = img;
 		}));
@@ -131,7 +168,7 @@ async function ensureClipMetadata(clip) {
 
 	if (needsVtt) {
 		promises.push(
-			fetch(clip.vtt_url)
+			fetch(clip.vtt_url, { credentials: 'include' })
 				.then(resp => resp.text())
 				.then(text => {
 					const cues = [];
@@ -174,12 +211,12 @@ function renderSpriteFrame(camId, clip, offset) {
 			}
 		}
 
-		canvas.width = 1920;
-		canvas.height = 1080;
+		// Match canvas buffer to native tile dimensions and only resize when changed
+		if (canvas.width !== targetCue.w || canvas.height !== targetCue.h) {
+			canvas.width = targetCue.w;
+			canvas.height = targetCue.h;
+		}
 		const ctx = canvas.getContext('2d');
-
-		ctx.fillStyle = '#000';
-		ctx.fillRect(0, 0, canvas.width, canvas.height);
 
 		ctx.drawImage(img,
 			targetCue.x, targetCue.y, targetCue.w, targetCue.h,
@@ -204,6 +241,7 @@ function renderTimelineRuler() {
 	const ruler = document.getElementById('timeline-ruler');
 	ruler.innerHTML = '';
 
+	const frag = document.createDocumentFragment();
 	for (let sec = 0; sec <= 86400; sec += 300) {
 		const isHour = (sec % 3600 === 0);
 		const leftPct = (sec / 86400) * 100;
@@ -212,8 +250,9 @@ function renderTimelineRuler() {
 		tick.className = `ruler-tick ${isHour ? 'hour' : 'five-min'}`;
 		tick.style.left = `${leftPct}%`;
 
-		ruler.appendChild(tick);
+		frag.appendChild(tick);
 	}
+	ruler.appendChild(frag);
 }
 
 function centerViewportOnScrubber() {
@@ -242,7 +281,14 @@ function setDate(dateObj) {
 	const yyyy = dateObj.getFullYear();
 	const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
 	const dd = String(dateObj.getDate()).padStart(2, '0');
-	currentDayString = `${yyyy}${mm}${dd}`;
+	const nextDayString = `${yyyy}${mm}${dd}`;
+
+	if (currentDayString && currentDayString !== nextDayString) {
+		spriteImages = {};
+		vttCache = {};
+	}
+
+	currentDayString = nextDayString;
 	dateDisplay.innerHTML = `<span>${dd}/${mm}/${yyyy}</span> 📅`;
 
 	globalManifest = {};
@@ -260,17 +306,15 @@ function setDate(dateObj) {
 			liveBtn.innerText = "Go Live";
 			playBtn.disabled = false;
 			liveBtn.classList.remove('active');
-			if (liveSyncInterval) clearInterval(liveSyncInterval);
+			if (liveSyncInterval) {
+				clearInterval(liveSyncInterval);
+				liveSyncInterval = null;
+			}
 
 			timeLabel.classList.add('history');
 
 			activeCameras.forEach(camId => {
-				if (hlsPlayers[camId]) {
-					hlsPlayers[camId].stopLoad();
-					hlsPlayers[camId].detachMedia();
-					hlsPlayers[camId].destroy();
-					delete hlsPlayers[camId];
-				}
+				destroyHlsPlayer(camId);
 			});
 
 			scrubber.value = 43200;
@@ -307,6 +351,7 @@ async function fetchManifest(camId = null) {
 			: `/history?date=${currentDayString}`;
 
 		const response = await fetch(url, { cache: 'no-store', credentials: 'include' });
+		if (!response.ok) return;
 		const allData = await response.json();
 
 		Object.keys(allData).forEach(cam => {
@@ -335,10 +380,13 @@ function renderTimelineHeatmap() {
 	heatmap.innerHTML = '';
 
 	const numCams = activeCameras.length || 1;
+	const frag = document.createDocumentFragment();
 
 	activeCameras.forEach((camId, index) => {
 		const clips = globalManifest[camId] || [];
 		const camColor = getCameraColor(camId);
+		const laneHeight = 100 / numCams;
+		const topPct = index * laneHeight;
 
 		clips.forEach(clip => {
 			const startSec = parseFilenameToSeconds(clip.filename);
@@ -354,14 +402,14 @@ function renderTimelineHeatmap() {
 			tick.style.left = `${leftPct}%`;
 			tick.style.width = `${widthPct}%`;
 			tick.style.backgroundColor = camColor;
-
-			const laneHeight = 100 / numCams;
-			tick.style.top = `${index * laneHeight}%`;
+			tick.style.top = `${topPct}%`;
 			tick.style.height = `${laneHeight}%`;
 
-			heatmap.appendChild(tick);
+			frag.appendChild(tick);
 		});
 	});
+
+	heatmap.appendChild(frag);
 }
 
 function toggleCalendar() {
@@ -448,6 +496,8 @@ function findClipForCamera(camId, targetSeconds) {
 function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 	activeCameras.forEach(camId => {
 		const videoEl = document.getElementById(`video-${camId}`);
+		if (!videoEl) return;
+
 		const matchData = findClipForCamera(camId, targetSeconds);
 
 		if (matchData) {
@@ -456,7 +506,8 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 
 			ensureClipMetadata(manifestRef);
 
-			const srcChanged = !videoEl.src.includes(manifestRef.url.replace('./', ''));
+			const activeUrl = videoEl.dataset.clipUrl || "";
+			const srcChanged = activeUrl !== manifestRef.url;
 			const drift = srcChanged ? 0 : Math.abs(videoEl.currentTime - offset);
 			const needsSeek = srcChanged || drift > 1.0;
 
@@ -476,20 +527,27 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 						setCameraState(camId, 'video');
 					}
 
+					if (videoEl._onVideoReady) {
+						videoEl.removeEventListener('seeked', videoEl._onVideoReady);
+						videoEl.removeEventListener('playing', videoEl._onVideoReady);
+					}
+
 					const onVideoReady = () => {
 						setCameraState(camId, 'video');
 						videoEl.removeEventListener('seeked', onVideoReady);
 						videoEl.removeEventListener('playing', onVideoReady);
+						videoEl._onVideoReady = null;
 					};
+					videoEl._onVideoReady = onVideoReady;
 
 					videoEl.addEventListener('seeked', onVideoReady);
 					videoEl.addEventListener('playing', onVideoReady);
 
 					if (srcChanged) {
+						videoEl.dataset.clipUrl = manifestRef.url;
+
 						if (Hls.isSupported()) {
-							if (hlsPlayers[camId]) {
-								hlsPlayers[camId].destroy();
-							}
+							destroyHlsPlayer(camId);
 
 							const hls = new Hls({
 								manifestLoadingMaxRetry: 5,
@@ -531,7 +589,18 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 			}
 		} else {
 			setCameraState(camId, 'overlay');
-			videoEl.src = "";
+			if (videoEl._onVideoReady) {
+				videoEl.removeEventListener('seeked', videoEl._onVideoReady);
+				videoEl.removeEventListener('playing', videoEl._onVideoReady);
+				videoEl._onVideoReady = null;
+			}
+			destroyHlsPlayer(camId);
+			if (videoEl.dataset.clipUrl || videoEl.hasAttribute('src')) {
+				delete videoEl.dataset.clipUrl;
+				videoEl.pause();
+				videoEl.removeAttribute('src');
+				videoEl.load();
+			}
 		}
 	});
 }
@@ -539,16 +608,21 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 // --- SPA Navigational Hooks ---
 function openCameraPage(camId) {
 	const hexColor = getCameraColor(camId).replace('#', '');
+	isSingleCameraOpen = true;
 
 	// 1. Swap Views
 	document.getElementById('dashboard-view').style.display = 'none';
 	document.getElementById('camera-view').style.display = 'flex';
 
-	// 2. Pause dashboard HLS players to free up network/CPU for the single camera
+	// 2. Pause and stop loading dashboard HLS players to free up network/CPU for the single camera
 	activeCameras.forEach(id => {
+		clearCameraReconnectTimer(id);
 		const videoEl = document.getElementById(`video-${id}`);
 		if (videoEl && !videoEl.paused) {
 			videoEl.pause();
+		}
+		if (hlsPlayers[id]) {
+			hlsPlayers[id].stopLoad();
 		}
 	});
 
@@ -559,6 +633,7 @@ function openCameraPage(camId) {
 }
 
 window.closeCameraPage = function() {
+	isSingleCameraOpen = false;
 	document.getElementById('camera-view').style.display = 'none';
 	document.getElementById('dashboard-view').style.display = 'flex';
 
@@ -578,13 +653,11 @@ function resetIndividualCamera(camId) {
 	if (!videoEl) return;
 
 	setCameraState(camId, 'video');
+	cameraWatchdog.lastTime[camId] = -1;
+	cameraWatchdog.freezeCount[camId] = 0;
 
-	if (hlsPlayers[camId]) {
-		hlsPlayers[camId].stopLoad();
-		hlsPlayers[camId].detachMedia();
-		hlsPlayers[camId].destroy();
-		delete hlsPlayers[camId];
-	}
+	destroyHlsPlayer(camId);
+	delete videoEl.dataset.clipUrl;
 
 	videoEl.pause();
 	videoEl.removeAttribute('src');
@@ -607,25 +680,37 @@ function resetIndividualCamera(camId) {
 		hls.on(Hls.Events.MANIFEST_PARSED, () => videoEl.play().catch(e => {}));
 
 		hls.on(Hls.Events.ERROR, (event, data) => {
-			if (data.fatal && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-				handleStreamError(hls);
+			if (data.fatal) {
+				if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+					hls.recoverMediaError();
+				} else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+					handleStreamError(camId, hls);
+				} else {
+					handleStreamError(camId, hls);
+				}
 			}
 		});
 
-	} else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
+	} else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
 		videoEl.src = freshPlaylistUrl;
-		videoEl.play().catch(e => {});
-		videoEl.onerror = () => handleStreamError(null);
+		videoEl.onloadedmetadata = () => videoEl.play().catch(e => {});
+		videoEl.onerror = () => handleStreamError(camId, null);
 	}
 }
 
 function returnToLive() {
-	if (liveSyncInterval) clearInterval(liveSyncInterval);
+	if (liveSyncInterval) {
+		clearInterval(liveSyncInterval);
+		liveSyncInterval = null;
+	}
 
 	isLive = true;
 	isPlayingHistory = false;
 	isScrubbing = false;
-	if (playbackInterval) clearInterval(playbackInterval);
+	if (playbackInterval) {
+		clearInterval(playbackInterval);
+		playbackInterval = null;
+	}
 
 	playBtn.innerText = "▶ Play";
 	playBtn.disabled = true;
@@ -670,9 +755,11 @@ function returnToLive() {
 		return;
 	}
 
-	activeCameras.forEach(camId => {
-		resetIndividualCamera(camId);
-	});
+	if (!isSingleCameraOpen) {
+		activeCameras.forEach(camId => {
+			resetIndividualCamera(camId);
+		});
+	}
 }
 
 scrubber.addEventListener('input', (e) => {
@@ -681,11 +768,14 @@ scrubber.addEventListener('input', (e) => {
 		liveBtn.innerText = "Go Live";
 		playBtn.disabled = false;
 		liveBtn.classList.remove('active');
-		if (liveSyncInterval) clearInterval(liveSyncInterval);
+		if (liveSyncInterval) {
+			clearInterval(liveSyncInterval);
+			liveSyncInterval = null;
+		}
 
 		timeLabel.classList.add('history');
 		activeCameras.forEach(camId => {
-			if (hlsPlayers[camId]) hlsPlayers[camId].detachMedia();
+			destroyHlsPlayer(camId);
 		});
 
 		fetchManifest();
@@ -718,6 +808,7 @@ playBtn.addEventListener('click', () => {
 	isPlayingHistory = !isPlayingHistory;
 	if (isPlayingHistory) {
 		playBtn.innerText = "⏸ Pause";
+		if (playbackInterval) clearInterval(playbackInterval);
 		playbackInterval = setInterval(() => {
 			if (isScrubbing) return;
 
@@ -739,41 +830,50 @@ playBtn.addEventListener('click', () => {
 		}, 1000);
 	} else {
 		playBtn.innerText = "▶ Play";
-		clearInterval(playbackInterval);
+		if (playbackInterval) {
+			clearInterval(playbackInterval);
+			playbackInterval = null;
+		}
 		activeCameras.forEach(camId => {
-			document.getElementById(`video-${camId}`).pause();
+			const videoEl = document.getElementById(`video-${camId}`);
+			if (videoEl) videoEl.pause();
 		});
 	}
 });
 
 liveBtn.addEventListener('click', () => {
-	if (isLive) {
-		returnToLive();
-	} else {
-		returnToLive();
-	}
+	returnToLive();
 });
 
 document.addEventListener("visibilitychange", () => {
 	if (document.visibilityState === "visible") {
-		if (isLive) {
-			returnToLive();
-		} else {
-			fetchManifest();
+		if (!isSingleCameraOpen) {
+			if (isLive) {
+				returnToLive();
+			} else {
+				fetchManifest();
+			}
 		}
 	} else if (document.visibilityState === "hidden") {
-		if (liveSyncInterval) clearInterval(liveSyncInterval);
-		if (playbackInterval) clearInterval(playbackInterval);
+		if (liveSyncInterval) {
+			clearInterval(liveSyncInterval);
+			liveSyncInterval = null;
+		}
+		if (playbackInterval) {
+			clearInterval(playbackInterval);
+			playbackInterval = null;
+		}
+		if (isPlayingHistory) {
+			isPlayingHistory = false;
+			playBtn.innerText = "▶ Play";
+		}
 
 		activeCameras.forEach(camId => {
 			const videoEl = document.getElementById(`video-${camId}`);
 			if (videoEl && !videoEl.paused) {
 				videoEl.pause();
 			}
-			if (hlsPlayers[camId]) {
-				hlsPlayers[camId].stopLoad();
-				hlsPlayers[camId].detachMedia();
-			}
+			destroyHlsPlayer(camId);
 		});
 	}
 });
@@ -816,7 +916,7 @@ function adjustGridLayout() {
 
 window.addEventListener('resize', adjustGridLayout);
 
-function createCameraDOM(camId, streamPath) {
+function createCameraDOM(camId) {
 	const grid = document.getElementById('grid');
 	const card = document.createElement('div');
 	card.className = 'camera-card state-video';
@@ -841,32 +941,7 @@ function createCameraDOM(camId, streamPath) {
 	activeCameras.push(camId);
 	adjustGridLayout();
 
-	const videoElement = document.getElementById(`video-${camId}`);
-
-	if (Hls.isSupported()) {
-		const hls = new Hls({
-			liveDurationInfinity: true,
-			manifestLoadingMaxRetry: 5,
-			xhrSetup: function(xhr) {
-				xhr.withCredentials = true;
-			}
-		});
-		hlsPlayers[camId] = hls;
-		hls.loadSource(streamPath);
-		hls.attachMedia(videoElement);
-		hls.on(Hls.Events.MANIFEST_PARSED, () => videoElement.play().catch(e => {}));
-
-		hls.on(Hls.Events.ERROR, (event, data) => {
-			if (data.fatal && data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-				handleStreamError(hls);
-			}
-		});
-
-	} else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
-		videoElement.src = streamPath;
-		videoElement.addEventListener('loadedmetadata', () => videoElement.play().catch(e => {}));
-		videoElement.onerror = () => handleStreamError(null);
-	}
+	resetIndividualCamera(camId);
 }
 
 async function discoverCameras() {
@@ -884,8 +959,7 @@ async function discoverCameras() {
 
 			for (let index = 1; index <= count; index++) {
 				const camId = `cam${index}`;
-				const streamPath = `${baseDir}/${camId}/stream.m3u8`;
-				createCameraDOM(camId, streamPath);
+				createCameraDOM(camId);
 			}
 
 			fetchManifest();
@@ -903,7 +977,7 @@ const cameraWatchdog = {
 };
 
 setInterval(() => {
-	if (!isLive) return;
+	if (!isLive || isSingleCameraOpen || document.visibilityState === "hidden") return;
 
 	activeCameras.forEach(camId => {
 		const videoEl = document.getElementById(`video-${camId}`);
@@ -948,7 +1022,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 	returnToLive();
 
 	setInterval(() => {
-		fetchManifest();
+		if (document.visibilityState === "visible") {
+			fetchManifest();
+		}
 	}, 30000);
 
 	discoverCameras();
@@ -988,6 +1064,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 			if (confirm("Are you sure you want to reboot the system?")) {
 				fetch('/api/system/reboot', {
 					method: 'POST',
+					credentials: 'include',
 					headers: {
 						'Content-Type': 'application/json'
 					}

@@ -5,10 +5,10 @@
     let dateParam = null;
     let colorParam = null;
 
-// vttCache, spriteImages, and baseDir inherit cleanly from script.js global scope
+    // vttCache, spriteImages, and baseDir inherit cleanly from script.js global scope
     const vttInFlight = new Map();
 
-// Helper Functions
+    // Helper Functions
     function getTodayString() {
         const now = new Date();
         const yyyy = now.getFullYear();
@@ -70,6 +70,7 @@
     let globalManifest = {};
     let fwHlsPlayer = null;
     let fwIsScrubbing = false;
+    let isViewActive = false;
     let currentClipUrl = null;
     let targetClipUrl = null;
     let targetClipOffset = -1;
@@ -78,7 +79,18 @@
     let timelineStartSec = 0;
     let timelineEndSec = 86400;
 
-// --- Range & Boundary Logic ---
+    function destroyFwHlsPlayer() {
+        if (fwHlsPlayer) {
+            try {
+                fwHlsPlayer.stopLoad();
+                fwHlsPlayer.detachMedia();
+                fwHlsPlayer.destroy();
+            } catch (e) {}
+            fwHlsPlayer = null;
+        }
+    }
+
+    // --- Range & Boundary Logic ---
     function getMaxSecOfTheDay() {
         if (currentDayString === getTodayString()) {
             const now = new Date();
@@ -144,14 +156,16 @@
                     fwGoLive();
                 } else if (dayClips.length > 0) {
                     const first = dayClips[0];
-                    currentClipUrl = first.url;
-                    fwVideo.src = first.url;
-                    fwVideo.currentTime = 0;
-                    fwVideo.play().catch(e=>{});
+                    currentClipUrl = null;
+                    applyVideoScrub(first, 0);
+                    setTimeout(() => fwVideo.play().catch(e => {}), 50);
                 } else {
+                    destroyFwHlsPlayer();
+                    currentClipUrl = null;
                     fwVideo.pause();
                     fwVideo.removeAttribute('src');
                     fwVideo.load();
+                    fwOverlay.classList.remove('hidden');
                 }
             } else {
                 fwVideo.dispatchEvent(new Event('timeupdate'));
@@ -234,11 +248,13 @@
         return firstClipSeconds + targetOffset;
     }
 
-// --- Canvas & Sprite Logic ---
+    // --- Canvas & Sprite Logic ---
     function snapToCanvas() {
         if (fwVideo.readyState < 2 || !fwVideo.videoWidth) return;
-        snapshotCanvas.width = fwVideo.videoWidth;
-        snapshotCanvas.height = fwVideo.videoHeight;
+        if (snapshotCanvas.width !== fwVideo.videoWidth || snapshotCanvas.height !== fwVideo.videoHeight) {
+            snapshotCanvas.width = fwVideo.videoWidth;
+            snapshotCanvas.height = fwVideo.videoHeight;
+        }
         const ctx = snapshotCanvas.getContext('2d');
         ctx.drawImage(fwVideo, 0, 0, snapshotCanvas.width, snapshotCanvas.height);
         snapshotCanvas.classList.add('visible');
@@ -260,12 +276,12 @@
                 }
             }
 
-            snapshotCanvas.width = 1920;
-            snapshotCanvas.height = 1080;
+            if (snapshotCanvas.width !== targetCue.w || snapshotCanvas.height !== targetCue.h) {
+                snapshotCanvas.width = targetCue.w;
+                snapshotCanvas.height = targetCue.h;
+            }
             const ctx = snapshotCanvas.getContext('2d');
 
-            ctx.fillStyle = '#000';
-            ctx.fillRect(0, 0, snapshotCanvas.width, snapshotCanvas.height);
             ctx.drawImage(img,
                 targetCue.x, targetCue.y, targetCue.w, targetCue.h,
                 0, 0, snapshotCanvas.width, snapshotCanvas.height
@@ -277,7 +293,7 @@
         return false;
     }
 
-// --- Video Sync Listeners ---
+    // --- Video Sync Listeners ---
     fwVideo.addEventListener('seeked', () => {
         if (targetClipUrl !== currentClipUrl || targetClipOffset < 0) return;
 
@@ -305,6 +321,7 @@
     });
 
     fwVideo.addEventListener('playing', () => {
+        fwOverlay.classList.add('hidden');
         if (snapshotCanvas.classList.contains('visible')) {
             snapshotCanvas.classList.remove('visible');
         }
@@ -315,9 +332,8 @@
         const currentIndex = dayClips.findIndex(c => c.url === currentClipUrl);
         if (currentIndex >= 0 && currentIndex < dayClips.length - 1) {
             const nextClip = dayClips[currentIndex + 1];
-            currentClipUrl = nextClip.url;
-            fwVideo.src = nextClip.url;
-            fwVideo.play().catch(e=>{});
+            applyVideoScrub(nextClip, 0);
+            setTimeout(() => fwVideo.play().catch(e => {}), 50);
         }
     });
 
@@ -344,12 +360,14 @@
             fwTimeLabel.classList.remove('time-live', 'time-scrub');
 
             const totalDuration = dayClips.reduce((sum, c) => sum + c.duration, 0);
-            const progressPercentage = ((accumOffset + fwVideo.currentTime) / totalDuration) * 100;
-            fwIndicator.style.left = `${progressPercentage}%`;
+            if (totalDuration > 0) {
+                const progressPercentage = ((accumOffset + fwVideo.currentTime) / totalDuration) * 100;
+                fwIndicator.style.left = `${progressPercentage}%`;
+            }
         }
     });
 
-// --- Background Data Loaders ---
+    // --- Background Data Loaders ---
     async function loadClipMetadata(clips) {
         const session = ++currentLoadSession;
 
@@ -363,9 +381,7 @@
             if (c._index === undefined) c._index = i;
         });
 
-        while (true) {
-            if (session !== currentLoadSession) break;
-
+        while (isViewActive && session === currentLoadSession) {
             let allComplete = true;
 
             for (const clip of clips) {
@@ -444,7 +460,7 @@
                     if (!vttInFlight.has(targetClip.url)) {
                         const p = (async () => {
                             try {
-                                const resp = await fetch(targetClip.vtt_url);
+                                const resp = await fetch(targetClip.vtt_url, { credentials: 'include' });
                                 if (!resp.ok) throw new Error("Fetch failed");
                                 const text = await resp.text();
                                 const cues = [];
@@ -489,6 +505,7 @@
         try {
             const url = `/history?date=${currentDayString}&cam=${camId}`;
             const response = await fetch(url, { cache: 'no-store', credentials: 'include' });
+            if (!response.ok) return;
             const newManifest = await response.json();
 
             Object.keys(newManifest).forEach(id => {
@@ -510,8 +527,10 @@
         if (dayClips.length === 0) return;
 
         const totalDuration = dayClips.reduce((sum, c) => sum + c.duration, 0);
+        if (totalDuration <= 0) return;
         let accum = 0;
 
+        const frag = document.createDocumentFragment();
         dayClips.forEach(clip => {
             const startPct = (accum / totalDuration) * 100;
             const widthPct = (clip.duration / totalDuration) * 100;
@@ -526,9 +545,10 @@
                 chunk.classList.add('chunk-loaded');
             }
 
-            fwTimelineRegion.insertBefore(chunk, fwIndicator);
+            frag.appendChild(chunk);
             accum += clip.duration;
         });
+        fwTimelineRegion.insertBefore(frag, fwIndicator);
     }
 
     function fwGoLive() {
@@ -539,16 +559,14 @@
 
         fwVideo.onloadedmetadata = null;
         targetClipUrl = null;
+        fwWatchdogLastTime = -1;
+        fwWatchdogFreezeCount = 0;
 
         if (!snapshotCanvas.classList.contains('visible')) {
             snapToCanvas();
         }
 
-        if (fwHlsPlayer) {
-            fwHlsPlayer.destroy();
-            fwHlsPlayer = null;
-        }
-
+        destroyFwHlsPlayer();
         currentClipUrl = null;
 
         updateSliderMaxBounds();
@@ -603,7 +621,7 @@
                             fwHlsPlayer.recoverMediaError();
                             break;
                         default:
-                            fwHlsPlayer.destroy();
+                            destroyFwHlsPlayer();
                             break;
                     }
                 }
@@ -616,6 +634,7 @@
 
     function calculateScrubTarget(e) {
         const rect = fwTimelineRegion.getBoundingClientRect();
+        if (rect.width <= 0) return null;
         let x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
         const scrubFraction = x / rect.width;
 
@@ -649,6 +668,7 @@
     function applyVideoScrub(selectedClip, offsetInClip) {
         targetClipUrl = selectedClip.url;
         targetClipOffset = offsetInClip;
+        fwOverlay.classList.add('hidden');
 
         if (currentClipUrl === selectedClip.url) {
             if (fwVideo.readyState > 1) {
@@ -658,9 +678,7 @@
             currentClipUrl = selectedClip.url;
 
             if (typeof Hls !== 'undefined' && Hls.isSupported()) {
-                if (fwHlsPlayer) {
-                    fwHlsPlayer.destroy();
-                }
+                destroyFwHlsPlayer();
 
                 fwHlsPlayer = new Hls({
                     manifestLoadingMaxRetry: 5,
@@ -689,7 +707,12 @@
 
     function updateFwTimelineFromEvent(e, isRelease = false) {
         const target = calculateScrubTarget(e);
-        if (!target) return;
+        if (!target) {
+            if (isRelease && fwTimeLabel.innerText !== "LIVE") {
+                fwOverlay.classList.remove('hidden');
+            }
+            return;
+        }
 
         const isAtNow = isEndSliderAtNow();
 
@@ -713,6 +736,29 @@
         }
     }
 
+    function finishPointerScrub(e) {
+        if (!fwIsScrubbing) return;
+        fwIsScrubbing = false;
+        try {
+            fwTimelineRegion.releasePointerCapture(e.pointerId);
+        } catch (err) {}
+
+        updateFwTimelineFromEvent(e, true);
+
+        const rect = fwTimelineRegion.getBoundingClientRect();
+        const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+
+        const isAtNow = isEndSliderAtNow();
+
+        if (isAtNow && rect.width > 0 && (x / rect.width) >= 0.99) {
+            fwGoLive();
+        } else {
+            setTimeout(() => {
+                fwVideo.play().catch(err => {});
+            }, 50);
+        }
+    }
+
     fwTimelineRegion.addEventListener('pointerdown', (e) => {
         fwIsScrubbing = true;
         fwVideo.pause();
@@ -731,36 +777,60 @@
         }
     });
 
-    fwTimelineRegion.addEventListener('pointerup', (e) => {
-        fwIsScrubbing = false;
-        fwTimelineRegion.releasePointerCapture(e.pointerId);
-
-        updateFwTimelineFromEvent(e, true);
-
-        const rect = fwTimelineRegion.getBoundingClientRect();
-        const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
-
-        const isAtNow = isEndSliderAtNow();
-
-        if (isAtNow && (x / rect.width) >= 0.99) {
-            fwGoLive();
-        } else {
-            setTimeout(() => {
-                fwVideo.play().catch(e => {});
-            }, 50);
-        }
-    });
+    fwTimelineRegion.addEventListener('pointerup', finishPointerScrub);
+    fwTimelineRegion.addEventListener('pointercancel', finishPointerScrub);
 
     window.addEventListener('resize', () => {
         if (!fwIsScrubbing) updateSliderLabels();
     });
 
-// SPA Initialization & Cleanup Hooks Exposed to Global Scope
+    // Live freeze watchdog & visibility handling for Single-Camera View
+    let fwWatchdogLastTime = -1;
+    let fwWatchdogFreezeCount = 0;
+
+    setInterval(() => {
+        if (!isViewActive || document.visibilityState === "hidden") return;
+        if (fwTimeLabel.innerText !== "LIVE" || fwIsScrubbing) return;
+        if (!fwVideo || fwVideo.paused) return;
+
+        if (fwVideo.currentTime === fwWatchdogLastTime) {
+            fwWatchdogFreezeCount++;
+            if (fwWatchdogFreezeCount >= 2) {
+                console.warn(`[Watchdog] Single camera ${camId} appears frozen. Resetting...`);
+                fwWatchdogFreezeCount = 0;
+                fwGoLive();
+            }
+        } else {
+            fwWatchdogFreezeCount = 0;
+        }
+        fwWatchdogLastTime = fwVideo.currentTime;
+    }, 4000);
+
+    document.addEventListener("visibilitychange", () => {
+        if (!isViewActive) return;
+        if (document.visibilityState === "visible") {
+            if (fwTimeLabel.innerText === "LIVE") {
+                fwGoLive();
+            } else {
+                fetchManifest();
+            }
+        } else if (document.visibilityState === "hidden") {
+            if (fwVideo && !fwVideo.paused) {
+                fwVideo.pause();
+            }
+            if (fwTimeLabel.innerText === "LIVE") {
+                destroyFwHlsPlayer();
+            }
+        }
+    });
+
+    // SPA Initialization & Cleanup Hooks Exposed to Global Scope
     window.initCameraView = async function(selectedCamId, selectedDate, selectedColor) {
         camId = selectedCamId;
         dateParam = selectedDate;
         colorParam = selectedColor;
         currentDayString = dateParam || getTodayString();
+        isViewActive = true;
 
         document.getElementById('cam-title').innerText = camId.toUpperCase();
         document.getElementById('cam-title').style.color = colorParam ? '#' + colorParam : '#3498db';
@@ -770,31 +840,40 @@
         targetClipUrl = null;
         targetClipOffset = -1;
 
-        if (fwHlsPlayer) {
-            fwHlsPlayer.destroy();
-            fwHlsPlayer = null;
-        }
+        destroyFwHlsPlayer();
 
         await fetchManifest();
 
+        if (!isViewActive) return;
+
         if (dateParam && dateParam !== getTodayString()) {
             fwTimeLabel.innerText = "LOADING";
-            setTimeout(() => updateFwTimelineFromEvent({ clientX: 0 }, true), 300);
+            setTimeout(() => {
+                if (isViewActive) {
+                    updateFwTimelineFromEvent({ clientX: 0 }, true);
+                    setTimeout(() => fwVideo.play().catch(e => {}), 50);
+                }
+            }, 300);
         } else {
             fwGoLive();
         }
     };
 
     window.stopCameraView = function() {
+        isViewActive = false;
+        currentLoadSession++;
+        fwIsScrubbing = false;
+        currentClipUrl = null;
+        targetClipUrl = null;
+        targetClipOffset = -1;
+
         if (fwVideo) {
             fwVideo.pause();
             fwVideo.removeAttribute('src');
             fwVideo.load();
         }
-        if (fwHlsPlayer) {
-            fwHlsPlayer.destroy();
-            fwHlsPlayer = null;
-        }
+        destroyFwHlsPlayer();
+        snapshotCanvas.classList.remove('visible');
     };
 
     window.fwGoLive = fwGoLive;
