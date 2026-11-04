@@ -5,7 +5,7 @@
     let dateParam = null;
     let colorParam = null;
 
-    // vttCache, spriteImages, and baseDir inherit cleanly from script.js global scope
+    // vttCache, spriteImages, baseDir, and window.networkMonitor inherit cleanly from script.js global scope
     const vttInFlight = new Map();
 
     // Helper Functions
@@ -18,10 +18,6 @@
     }
 
     let currentDayString = getTodayString();
-
-    function getCameraColor() {
-        return colorParam ? '#' + colorParam : '#3498db';
-    }
 
     function parseVTTTime(timeStr) {
         const parts = timeStr.split(':');
@@ -75,9 +71,45 @@
     let targetClipUrl = null;
     let targetClipOffset = -1;
     let currentLoadSession = 0;
+    let pointerScrubRafId = null;
+    let priorityClipUrl = null;
+    let activeLiveSubStream = false;
 
     let timelineStartSec = 0;
     let timelineEndSec = 86400;
+
+    function getNetTier() {
+        return (window.networkMonitor && window.networkMonitor.tier) ? window.networkMonitor.tier : 'high';
+    }
+
+    function getAdaptiveSingleHlsConfig(isLiveStream) {
+        if (window.networkMonitor && typeof window.networkMonitor.getHlsConfig === 'function') {
+            return window.networkMonitor.getHlsConfig(isLiveStream, true);
+        }
+        return {
+            manifestLoadingMaxRetry: 5,
+            xhrSetup: function(xhr) { xhr.withCredentials = true; },
+            liveSyncDurationCount: 3,
+            liveMaxLatencyDurationCount: 10
+        };
+    }
+
+    function attachSingleHlsTelemetry(hls) {
+        if (window.networkMonitor && typeof window.networkMonitor.attachHlsTelemetry === 'function') {
+            window.networkMonitor.attachHlsTelemetry(hls);
+        }
+    }
+
+    function updateCameraHeaderBadge(isLiveMode = false) {
+        const titleEl = document.getElementById('cam-title');
+        if (!titleEl) return;
+        const hasSub = Boolean(window.cameraSubStreams && window.cameraSubStreams[camId]);
+        if (isLiveMode && hasSub) {
+            titleEl.innerText = `${camId.toUpperCase()} (${activeLiveSubStream ? 'SD' : 'HD'})`;
+        } else {
+            titleEl.innerText = camId.toUpperCase();
+        }
+    }
 
     function destroyFwHlsPlayer() {
         if (fwHlsPlayer) {
@@ -88,6 +120,19 @@
             } catch (e) {}
             fwHlsPlayer = null;
         }
+    }
+
+    // Automatically switch between SD sub-stream and HD main stream when network tier changes during LIVE view
+    if (window.networkMonitor && typeof window.networkMonitor.onChange === 'function') {
+        window.networkMonitor.onChange(() => {
+            if (!isViewActive || document.visibilityState === 'hidden') return;
+            if (fwTimeLabel.innerText === "LIVE" && !fwIsScrubbing) {
+                const shouldSub = window.networkMonitor.shouldUseSubStream(camId, true);
+                if (shouldSub !== activeLiveSubStream) {
+                    fwGoLive();
+                }
+            }
+        });
     }
 
     // --- Range & Boundary Logic ---
@@ -367,7 +412,7 @@
         }
     });
 
-    // --- Background Data Loaders ---
+    // --- Adaptive Background Data Loader ---
     async function loadClipMetadata(clips) {
         const session = ++currentLoadSession;
 
@@ -375,13 +420,19 @@
             await new Promise(r => setTimeout(r, 800));
         }
 
-        const PARALLEL_BATCH_SIZE = 4;
-
         clips.forEach((c, i) => {
             if (c._index === undefined) c._index = i;
         });
 
         while (isViewActive && session === currentLoadSession) {
+            const netTier = getNetTier();
+
+            if (netTier === 'low' && fwTimeLabel.innerText === "LIVE" && !fwIsScrubbing && !priorityClipUrl) {
+                await new Promise(r => setTimeout(r, 1000));
+                continue;
+            }
+
+            const batchSize = netTier === 'low' ? 1 : (netTier === 'medium' ? 2 : 4);
             let allComplete = true;
 
             for (const clip of clips) {
@@ -400,18 +451,36 @@
 
             if (allComplete) break;
 
-            const pendingClips = clips.filter(c =>
+            const playheadTime = getPlayheadAbsoluteSeconds(clips);
+
+            let pendingClips = clips.filter(c =>
                 (c.sprite_url && (!spriteImages[c.sprite_url] || !spriteImages[c.sprite_url].complete)) ||
                 (c.vtt_url && !vttCache[c.url])
             );
 
+            if (netTier === 'low') {
+                pendingClips = pendingClips.filter(c => {
+                    if (c.url === priorityClipUrl) return true;
+                    const center = parseFilenameToSeconds(c.filename) + ((c.duration || 0) / 2);
+                    return Math.abs(center - playheadTime) <= 180;
+                });
+            } else if (netTier === 'medium') {
+                pendingClips = pendingClips.filter(c => {
+                    if (c.url === priorityClipUrl || c._index % 10 === 0) return true;
+                    const center = parseFilenameToSeconds(c.filename) + ((c.duration || 0) / 2);
+                    return Math.abs(center - playheadTime) <= 900;
+                });
+            }
+
             if (pendingClips.length === 0) {
-                await new Promise(r => setTimeout(r, 200));
+                await new Promise(r => setTimeout(r, 400));
                 continue;
             }
 
-            const playheadTime = getPlayheadAbsoluteSeconds(clips);
             pendingClips.sort((a, b) => {
+                if (a.url === priorityClipUrl) return -1;
+                if (b.url === priorityClipUrl) return 1;
+
                 const aCenter = parseFilenameToSeconds(a.filename) + ((a.duration || 0) / 2);
                 const bCenter = parseFilenameToSeconds(b.filename) + ((b.duration || 0) / 2);
 
@@ -434,10 +503,14 @@
                 return aDist - bDist;
             });
 
-            const batch = pendingClips.slice(0, PARALLEL_BATCH_SIZE);
+            const batch = pendingClips.slice(0, batchSize);
             const batchPromises = [];
 
             for (const targetClip of batch) {
+                if (targetClip.url === priorityClipUrl) {
+                    priorityClipUrl = null;
+                }
+
                 if (targetClip.sprite_url) {
                     if (!spriteImages[targetClip.sprite_url]) {
                         const img = new Image();
@@ -496,7 +569,7 @@
             if (batchPromises.length > 0) {
                 await Promise.allSettled(batchPromises);
             } else {
-                await new Promise(r => setTimeout(r, 100));
+                await new Promise(r => setTimeout(r, 150));
             }
         }
     }
@@ -504,7 +577,7 @@
     async function fetchManifest() {
         try {
             const url = `/history?date=${currentDayString}&cam=${camId}`;
-            const response = await fetch(url, { cache: 'no-store', credentials: 'include' });
+            const response = await fetch(url, { cache: 'no-cache', credentials: 'include' });
             if (!response.ok) return;
             const newManifest = await response.json();
 
@@ -598,21 +671,38 @@
         fwOverlay.classList.add('hidden');
         fwVideo.muted = true;
 
-        const freshPlaylistUrl = `${baseDir}/${camId}/stream.m3u8?t=${Date.now()}`;
+        activeLiveSubStream = Boolean(
+            window.networkMonitor && window.networkMonitor.shouldUseSubStream(camId, true)
+        );
+        updateCameraHeaderBadge(true);
+
+        const freshPlaylistUrl = window.networkMonitor
+            ? window.networkMonitor.getLiveStreamUrl(baseDir, camId, true)
+            : `${baseDir}/${camId}/stream.m3u8?t=${Date.now()}`;
 
         if (typeof Hls !== 'undefined' && Hls.isSupported()) {
-            fwHlsPlayer = new Hls({
-                xhrSetup: function(xhr) { xhr.withCredentials = true; },
-                liveSyncDurationCount: 3,
-                liveMaxLatencyDurationCount: 10
-            });
+            fwHlsPlayer = new Hls(getAdaptiveSingleHlsConfig(true));
+            attachSingleHlsTelemetry(fwHlsPlayer);
 
             fwHlsPlayer.attachMedia(fwVideo);
             fwHlsPlayer.on(Hls.Events.MEDIA_ATTACHED, () => fwHlsPlayer.loadSource(freshPlaylistUrl));
-            fwHlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => fwVideo.play().catch(e=>{}));
+            fwHlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => {
+                if (activeLiveSubStream && window.networkMonitor) {
+                    window.networkMonitor.clearSubStreamFailure(camId);
+                }
+                fwVideo.play().catch(e => {});
+            });
 
             fwHlsPlayer.on(Hls.Events.ERROR, (event, data) => {
                 if (data.fatal) {
+                    if (activeLiveSubStream && data.type === Hls.ErrorTypes.NETWORK_ERROR && window.networkMonitor) {
+                        const lockedOut = window.networkMonitor.markSubStreamFailure(camId);
+                        if (lockedOut) {
+                            console.warn(`[SubStream] Single view sub-stream failed for ${camId}, falling back to HD stream.`);
+                            fwGoLive();
+                            return;
+                        }
+                    }
                     switch (data.type) {
                         case Hls.ErrorTypes.NETWORK_ERROR:
                             fwHlsPlayer.startLoad();
@@ -628,6 +718,17 @@
             });
         } else if (fwVideo.canPlayType('application/vnd.apple.mpegurl')) {
             fwVideo.src = freshPlaylistUrl;
+            fwVideo.onloadedmetadata = () => {
+                if (activeLiveSubStream && window.networkMonitor) {
+                    window.networkMonitor.clearSubStreamFailure(camId);
+                }
+            };
+            fwVideo.onerror = () => {
+                if (activeLiveSubStream && window.networkMonitor) {
+                    window.networkMonitor.markSubStreamFailure(camId);
+                    fwGoLive();
+                }
+            };
             fwVideo.play().catch(e=>{});
         }
     }
@@ -668,6 +769,8 @@
     function applyVideoScrub(selectedClip, offsetInClip) {
         targetClipUrl = selectedClip.url;
         targetClipOffset = offsetInClip;
+        activeLiveSubStream = false;
+        updateCameraHeaderBadge(false);
         fwOverlay.classList.add('hidden');
 
         if (currentClipUrl === selectedClip.url) {
@@ -680,10 +783,8 @@
             if (typeof Hls !== 'undefined' && Hls.isSupported()) {
                 destroyFwHlsPlayer();
 
-                fwHlsPlayer = new Hls({
-                    manifestLoadingMaxRetry: 5,
-                    xhrSetup: function(xhr) { xhr.withCredentials = true; }
-                });
+                fwHlsPlayer = new Hls(getAdaptiveSingleHlsConfig(false));
+                attachSingleHlsTelemetry(fwHlsPlayer);
 
                 fwHlsPlayer.loadSource(selectedClip.url);
                 fwHlsPlayer.attachMedia(fwVideo);
@@ -729,6 +830,8 @@
         fwTimeLabel.classList.remove('time-live');
         fwTimeLabel.classList.add('time-scrub');
 
+        priorityClipUrl = target.selectedClip.url;
+
         if (!isRelease) {
             renderSpriteFrame(target.selectedClip, target.offsetInClip);
         } else {
@@ -739,6 +842,10 @@
     function finishPointerScrub(e) {
         if (!fwIsScrubbing) return;
         fwIsScrubbing = false;
+        if (pointerScrubRafId) {
+            cancelAnimationFrame(pointerScrubRafId);
+            pointerScrubRafId = null;
+        }
         try {
             fwTimelineRegion.releasePointerCapture(e.pointerId);
         } catch (err) {}
@@ -773,7 +880,12 @@
 
     fwTimelineRegion.addEventListener('pointermove', (e) => {
         if (fwIsScrubbing) {
-            updateFwTimelineFromEvent(e, false);
+            const clientX = e.clientX;
+            if (pointerScrubRafId) cancelAnimationFrame(pointerScrubRafId);
+            pointerScrubRafId = requestAnimationFrame(() => {
+                pointerScrubRafId = null;
+                updateFwTimelineFromEvent({ clientX }, false);
+            });
         }
     });
 
@@ -797,6 +909,7 @@
             fwWatchdogFreezeCount++;
             if (fwWatchdogFreezeCount >= 2) {
                 console.warn(`[Watchdog] Single camera ${camId} appears frozen. Resetting...`);
+                if (window.networkMonitor) window.networkMonitor.recordStall();
                 fwWatchdogFreezeCount = 0;
                 fwGoLive();
             }
@@ -831,9 +944,14 @@
         colorParam = selectedColor;
         currentDayString = dateParam || getTodayString();
         isViewActive = true;
+        activeLiveSubStream = false;
 
-        document.getElementById('cam-title').innerText = camId.toUpperCase();
+        if (window.networkMonitor && typeof window.networkMonitor.clearSubStreamFailure === 'function') {
+            window.networkMonitor.clearSubStreamFailure(camId);
+        }
+
         document.getElementById('cam-title').style.color = colorParam ? '#' + colorParam : '#3498db';
+        updateCameraHeaderBadge(false);
 
         fwIsScrubbing = false;
         currentClipUrl = null;
@@ -866,6 +984,7 @@
         currentClipUrl = null;
         targetClipUrl = null;
         targetClipOffset = -1;
+        activeLiveSubStream = false;
 
         if (fwVideo) {
             fwVideo.pause();

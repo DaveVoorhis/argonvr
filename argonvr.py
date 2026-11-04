@@ -24,6 +24,8 @@ BASE_DIR = SETTINGS.get('BASE_DIR', './cameras')
 SPRITE_WIDTH = int(SETTINGS.get('SPRITE_WIDTH', 320))
 SPRITE_HEIGHT = int(SETTINGS.get('SPRITE_HEIGHT', 180))
 SPRITE_QUALITY = int(SETTINGS.get('SPRITE_QUALITY', 3))
+LIVE_SNAPSHOT_FPS = float(SETTINGS.get('LIVE_SNAPSHOT_FPS', 1.0))
+LIVE_SNAPSHOT_QUALITY = int(SETTINGS.get('LIVE_SNAPSHOT_QUALITY', 6))
 
 # --- Configurable Storage Options ---
 STORE_DIR = SETTINGS.get('STORE_DIR', './recordings')
@@ -144,7 +146,20 @@ def get_rotating_logger(name, log_file):
     return logger
 
 def get_video_duration(filepath):
-    """Uses ffprobe to extract the duration of a video file."""
+    """Extracts duration rapidly from HLS .m3u8 #EXTINF tags in Python, falling back to ffprobe."""
+    if filepath.endswith('.m3u8') and os.path.exists(filepath):
+        try:
+            total_dur = 0.0
+            with open(filepath, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.startswith('#EXTINF:'):
+                        val = line.split(':', 1)[1].split(',', 1)[0].strip()
+                        total_dur += float(val)
+            if total_dur > 0:
+                return round(total_dur, 2)
+        except Exception:
+            pass
+
     try:
         cmd = [
             "ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -281,7 +296,6 @@ def update_history_manifest(target_cam_id=None, target_dates=None):
         if not os.path.isdir(cam_path):
             continue
 
-        # Group files by date
         daily_files = {}
         try:
             dir_entries = os.listdir(cam_path)
@@ -289,14 +303,12 @@ def update_history_manifest(target_cam_id=None, target_dates=None):
             continue
 
         for f in dir_entries:
-            # Target VOD playlists, ignore the live master stream
-            if f.endswith('.m3u8') and f != 'stream.m3u8':
+            if f.endswith('.m3u8') and f not in ('stream.m3u8', 'stream_sub.m3u8'):
                 try:
                     parts = f.split('_')
                     if len(parts) >= 2:
                         date_str = parts[1]
 
-                        # Filter by target_dates to save processing time
                         if target_dates and date_str not in target_dates:
                             continue
 
@@ -306,19 +318,16 @@ def update_history_manifest(target_cam_id=None, target_dates=None):
                 except IndexError:
                     continue
 
-        # Determine which dates need to be processed
         dates_to_process = target_dates if target_dates else daily_files.keys()
 
         active_manifests = set()
 
-        # Generate or update manifest for each active date
         for date_str in dates_to_process:
             files = daily_files.get(date_str, [])
             manifest_name = f"history_{date_str}.json"
             active_manifests.add(manifest_name)
             manifest_path = os.path.join(cam_path, manifest_name)
 
-            # If all files for this date were deleted, remove the orphaned manifest
             if not files:
                 if os.path.exists(manifest_path):
                     try:
@@ -347,7 +356,6 @@ def update_history_manifest(target_cam_id=None, target_dates=None):
                 has_sprite = os.path.exists(os.path.join(cam_path, jpg_filename))
                 has_vtt = os.path.exists(os.path.join(cam_path, vtt_filename))
 
-                # Use cached data if available AND if sprite/vtt status hasn't changed and duration > 0
                 cached = existing_data.get(f)
                 if (
                         cached
@@ -368,7 +376,6 @@ def update_history_manifest(target_cam_id=None, target_dates=None):
 
             manifest_data.sort(key=lambda x: x['filename'], reverse=True)
 
-            # Write atomically only if the content actually changed
             if manifest_data != old_manifest:
                 tmp_manifest_path = manifest_path + ".tmp"
                 try:
@@ -378,7 +385,6 @@ def update_history_manifest(target_cam_id=None, target_dates=None):
                 except OSError as e:
                     print(f"[⚠️] Failed to write manifest {manifest_path}: {e}")
 
-        # Only clean up entirely orphaned history files during a full scan
         if not target_dates:
             for f in dir_entries:
                 if f.startswith('history_') and f.endswith('.json') and f not in active_manifests:
@@ -392,14 +398,14 @@ def get_free_space_pct(path):
         total, used, free = shutil.disk_usage(path)
         return (free / total) * 100
     except Exception:
-        return 100.0  # Fail safe if mount isn't readable
+        return 100.0
 
 def _purge_oldest_files_sync():
     """Synchronous helper to purge oldest recordings without blocking the asyncio loop."""
     all_files = []
     for root, _, files in os.walk(STORE_DIR):
         for f in files:
-            if f.endswith('.m3u8') and f != 'stream.m3u8':
+            if f.endswith('.m3u8') and f not in ('stream.m3u8', 'stream_sub.m3u8'):
                 full_path = os.path.join(root, f)
                 try:
                     mtime = os.path.getmtime(full_path)
@@ -424,7 +430,6 @@ def _purge_oldest_files_sync():
         except Exception:
             pass
 
-        # Glob catches the .m3u8, all _xxx.ts chunks, .jpg, and .vtt
         for f_to_delete in glob.glob(f"{glob.escape(base_path)}*"):
             try:
                 os.remove(f_to_delete)
@@ -504,7 +509,6 @@ async def background_encoder_worker():
                     timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
                     worker_logger.info(f"\n--- [{timestamp}] PACKAGING {raw_filepath} ---")
 
-                    # Re-mux directly to HLS VOD without re-encoding
                     encode_cmd = [
                         "ffmpeg",
                         "-i", raw_filepath,
@@ -513,6 +517,7 @@ async def background_encoder_worker():
                         "-f", "hls",
                         "-hls_time", "2",
                         "-hls_playlist_type", "vod",
+                        "-hls_flags", "independent_segments",
                         "-hls_segment_filename", os.path.join(final_dir, f"{base_name}_%03d.ts"),
                         "-y", final_filepath
                     ]
@@ -525,7 +530,6 @@ async def background_encoder_worker():
                     )
                     active_processes.add(proc)
 
-                    # Asynchronously read and log stderr output
                     async for line in read_lines_cr_lf(proc.stderr):
                         if not line.startswith("frame="):
                             worker_logger.info(line)
@@ -540,7 +544,6 @@ async def background_encoder_worker():
                         except OSError:
                             pass
 
-                        # FFprobe/FFmpeg will seamlessly read the .m3u8 to generate the sprite sheet
                         await generate_sprite_and_vtt(final_filepath, final_dir, base_name)
 
                         try:
@@ -569,6 +572,7 @@ class CameraStream:
     def __init__(self, cam_id, cam_config):
         self.cam_id = cam_id
         self.rtsp_url = cam_config.get('url')
+        self.sub_rtsp_url = cam_config.get('sub_url')
         self.motion_threshold = str(cam_config.get('motion_threshold', '0.01'))
 
         # Ramdisk Directory for active HLS streams
@@ -585,14 +589,15 @@ class CameraStream:
         self.current_output_file = ""
         self.record_proc = None
         self.master_proc = None
+        self.sub_proc = None
         self.last_pipeline_output_time = time.time()
+        self.last_sub_output_time = time.time()
 
         os.makedirs(self.cam_dir, exist_ok=True)
         os.makedirs(self.store_cam_dir, exist_ok=True)
         os.makedirs(self.staging_dir, exist_ok=True)
         os.makedirs(self.queued_dir, exist_ok=True)
 
-        # Utilize rotating loggers
         self.pipeline_logger = get_rotating_logger(f"pipeline_{self.cam_id}", os.path.join(self.store_cam_dir, "pipeline.log"))
         self.recording_logger = get_rotating_logger(f"recording_{self.cam_id}", os.path.join(self.store_cam_dir, "recording.log"))
 
@@ -601,10 +606,24 @@ class CameraStream:
         logger.info(f"\n--- [{timestamp}] {message} ---")
 
     def _clean_stale_ramdisk_segments(self):
-        """Removes leftover HLS segments in the camera's live directory before starting a fresh master pipeline."""
+        """Removes leftover main HLS segments without deleting live.jpg or sub-stream files."""
         try:
             for f in os.listdir(self.cam_dir):
-                if f.endswith('.ts') or f.endswith('.m3u8') or f.endswith('.tmp'):
+                if f.startswith('stream_sub') or f == 'live.jpg':
+                    continue
+                if f.endswith(('.ts', '.m3u8', '.tmp', '.jpg')):
+                    try:
+                        os.remove(os.path.join(self.cam_dir, f))
+                    except OSError:
+                        pass
+        except OSError:
+            pass
+
+    def _clean_stale_sub_segments(self):
+        """Removes leftover sub-stream HLS segments before starting a fresh sub-stream pipeline."""
+        try:
+            for f in os.listdir(self.cam_dir):
+                if f.startswith('stream_sub') and f.endswith(('.ts', '.m3u8', '.tmp')):
                     try:
                         os.remove(os.path.join(self.cam_dir, f))
                     except OSError:
@@ -672,8 +691,63 @@ class CameraStream:
             except OSError as e:
                 print(f"[❌] Failed to move capture {filepath}: {e}")
 
+    async def start_sub_pipeline(self):
+        """Dedicated lightweight supervisor loop that remuxes the camera's RTSP sub-stream into stream_sub.m3u8."""
+        if not self.sub_rtsp_url:
+            return
+
+        # Stagger initial connection by 1.5s so main and sub RTSP handshakes never collide on the camera
+        await asyncio.sleep(1.5)
+
+        first_run = True
+        while True:
+            if not first_run:
+                await asyncio.sleep(3)
+            first_run = False
+
+            self._clean_stale_sub_segments()
+            print(f"[📱] Starting low-bandwidth sub-stream pipeline for {self.cam_id}...")
+            self.write_log_header(self.pipeline_logger, "STARTING SUB-STREAM HLS PIPELINE")
+            self.last_sub_output_time = time.time()
+
+            cmd = [
+                "ffmpeg", "-rtsp_transport", "tcp",
+                "-i", self.sub_rtsp_url,
+                "-map", "0:v", "-c:v", "copy", "-an",
+                "-f", "hls", "-hls_time", "2", "-hls_list_size", "10",
+                "-hls_flags", "delete_segments+independent_segments+temp_file",
+                "-strftime", "1",
+                "-hls_segment_filename", f"{self.cam_dir}/stream_sub_%Y%m%d_%H%M%S.ts",
+                f"{self.cam_dir}/stream_sub.m3u8"
+            ]
+
+            last_stderr_line = ""
+            try:
+                self.sub_proc = await asyncio.create_subprocess_exec(
+                    *cmd, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE
+                )
+                active_processes.add(self.sub_proc)
+
+                async for decoded_line in read_lines_cr_lf(self.sub_proc.stderr):
+                    self.last_sub_output_time = time.time()
+                    if not decoded_line.startswith("frame="):
+                        last_stderr_line = decoded_line
+                        self.pipeline_logger.info(f"[SUB] {decoded_line}")
+
+                await self.sub_proc.wait()
+                if self.sub_proc.returncode != 0:
+                    print(f"[⚠️] Sub-stream FFmpeg for {self.cam_id} exited (code {self.sub_proc.returncode}): {last_stderr_line}")
+
+            except Exception as e:
+                print(f"[⚠️] Sub-stream pipeline error on {self.cam_id}: {e}")
+
+            finally:
+                if self.sub_proc:
+                    await safe_kill_process(self.sub_proc)
+                    self.sub_proc = None
+
     async def start_master_pipeline(self):
-        """Persistent supervisor loop that pulls a single RTSP stream and splits it internally for HLS and Motion."""
+        """Persistent supervisor loop that pulls the main RTSP stream for HLS, Motion, and Live Snapshots."""
         first_run = True
         while True:
             if not first_run:
@@ -684,21 +758,32 @@ class CameraStream:
                 self._clean_stale_ramdisk_segments()
 
             print(f"[📷] Starting master pipeline for {self.cam_id}...")
-            self.write_log_header(self.pipeline_logger, "STARTING UNIFIED MASTER PIPELINE (HLS + MOTION)")
+            self.write_log_header(self.pipeline_logger, "STARTING UNIFIED MASTER PIPELINE (HLS + MOTION + SNAPSHOT)")
             self.last_pipeline_output_time = time.time()
 
+            filter_graph = (
+                f"[0:v]fps=2,scale=320:-2,split=2[motion_in][thumb_in];"
+                f"[motion_in]select='gt(scene,{self.motion_threshold})',metadata=mode=print[motion_out];"
+                f"[thumb_in]fps={LIVE_SNAPSHOT_FPS}[thumb_out]"
+            )
+
             cmd = [
-                "ffmpeg", "-rtsp_transport", "tcp", "-i", self.rtsp_url,
+                "ffmpeg", "-rtsp_transport", "tcp",
+                "-i", self.rtsp_url,
 
                 "-map", "0:v", "-c:v", "copy", "-an",
                 "-f", "hls", "-hls_time", "2", "-hls_list_size", "10",
-                "-hls_flags", "delete_segments",
+                "-hls_flags", "delete_segments+independent_segments+temp_file",
                 "-strftime", "1",
                 "-hls_segment_filename", f"{self.cam_dir}/stream_%Y%m%d_%H%M%S.ts",
                 f"{self.cam_dir}/stream.m3u8",
 
-                "-map", "0:v", "-vf", f"fps=2,scale=320:-1,select='gt(scene,{self.motion_threshold})',metadata=mode=print",
-                "-f", "null", "-"
+                "-filter_complex", filter_graph,
+                "-map", "[motion_out]", "-f", "null", "-",
+                "-map", "[thumb_out]", "-f", "image2",
+                "-update", "1", "-atomic_writing", "1",
+                "-q:v", str(LIVE_SNAPSHOT_QUALITY),
+                "-y", f"{self.cam_dir}/live.jpg"
             ]
 
             last_stderr_line = ""
@@ -739,7 +824,6 @@ class CameraStream:
                                 self.recording = False
                                 continue
 
-                            # Direct Stream Copy: Negligible CPU footprint
                             record_cmd = [
                                 "ffmpeg",
                                 "-i", m3u8_path,
@@ -779,7 +863,6 @@ class CameraStream:
                     await safe_kill_process(self.master_proc)
                     self.master_proc = None
 
-                # If master pipeline exited while recording, cleanly finalize the partial clip so it isn't lost
                 if self.recording or self.record_proc:
                     old_proc = self.record_proc
                     old_file = self.current_output_file
@@ -813,42 +896,47 @@ class CameraStream:
                         asyncio.create_task(self.finalize_recording(old_proc, old_file))
 
     async def watchdog(self):
-        """Monitors FFmpeg health and forces the supervisor loop to restart if the pipeline hangs."""
-        stall_timeout = 30  # Seconds without output before considering it hung
+        """Monitors master and sub-stream FFmpeg health and restarts stalled pipelines."""
+        stall_timeout = 30
 
         while True:
-            await asyncio.sleep(15)  # Check every 15 seconds
+            await asyncio.sleep(15)
 
-            is_stalled = (
+            now = time.time()
+            is_master_stalled = (
                     self.master_proc is not None
                     and self.master_proc.returncode is None
-                    and (time.time() - self.last_pipeline_output_time) > stall_timeout
+                    and (now - self.last_pipeline_output_time) > stall_timeout
             )
 
-            if is_stalled:
+            if is_master_stalled:
                 print(f"[⚠️] Watchdog: Master process stalled for {self.cam_id}. Restarting...")
-                self.write_log_header(self.pipeline_logger, "WATCHDOG TRIGGERED (STALLED) - CLEANING UP AND RESTARTING")
-
-                self.last_pipeline_output_time = time.time()
+                self.write_log_header(self.pipeline_logger, "WATCHDOG TRIGGERED (MASTER STALLED) - RESTARTING")
+                self.last_pipeline_output_time = now
                 await safe_kill_process(self.master_proc)
+
+            is_sub_stalled = (
+                    self.sub_proc is not None
+                    and self.sub_proc.returncode is None
+                    and (now - self.last_sub_output_time) > stall_timeout
+            )
+
+            if is_sub_stalled:
+                print(f"[⚠️] Watchdog: Sub-stream process stalled for {self.cam_id}. Restarting...")
+                self.write_log_header(self.pipeline_logger, "WATCHDOG TRIGGERED (SUB STALLED) - RESTARTING")
+                self.last_sub_output_time = now
+                await safe_kill_process(self.sub_proc)
 
 async def main():
     print("🚀 Initializing Engine...")
     tasks = []
 
-    # 1. Recover any orphaned .ts files from previous unclean shutdowns
     recover_stale_staging_files()
 
-    # 2. Start the background storage manager
     tasks.append(asyncio.create_task(storage_manager()))
-
-    # 3. Start the singular background encoding queue worker
     tasks.append(asyncio.create_task(background_encoder_worker()))
-
-    # 4. Run initial manifest scan concurrently so it never delays camera spin-up
     tasks.append(asyncio.create_task(asyncio.to_thread(update_history_manifest)))
 
-    # 5. Spin up camera pipelines immediately
     for cam_id, cam_config in CAMERAS.items():
         cam = CameraStream(cam_id, cam_config)
 
@@ -857,6 +945,9 @@ async def main():
             asyncio.create_task(cam.cooldown_manager()),
             asyncio.create_task(cam.watchdog())
         ])
+
+        if cam.sub_rtsp_url:
+            tasks.append(asyncio.create_task(cam.start_sub_pipeline()))
 
         if STAGGER_SPIN_UP_SECONDS > 0:
             await asyncio.sleep(STAGGER_SPIN_UP_SECONDS)
