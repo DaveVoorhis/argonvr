@@ -1,6 +1,7 @@
 CAMERAS:
     cam1:
         url: "rtsp://user:password@192.168.1.11:554/stream"
+        sub_url: "rtsp://user:password@192.168.1.11:554/stream_sub"
         motion_threshold: 0.001
     cam2:
         url: "rtsp://user:password@192.168.1.12:554/stream"

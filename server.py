@@ -9,6 +9,9 @@ import yaml
 import socket
 import subprocess
 import threading
+import gzip
+import hashlib
+import time
 from urllib.parse import urlparse, parse_qs, unquote
 try:
     import sdnotify
@@ -37,10 +40,49 @@ BASE_DIR_NAME = os.path.basename(os.path.normpath(BASE_DIR))
 
 PORT = int(SETTINGS.get('PORT', 8000))
 CAMERA_COUNT = len(CAMERAS)
+SUB_STREAMS = {
+    cam_id: bool(cam_cfg.get('sub_url'))
+    for cam_id, cam_cfg in CAMERAS.items()
+    if isinstance(cam_cfg, dict)
+}
 
 SSL_CERT = SETTINGS.get('SSL_CERT_PATH', '')
 SSL_KEY = SETTINGS.get('SSL_KEY_PATH', '')
 LOG_HTTP_REQUESTS = SETTINGS.get('LOG_HTTP_REQUESTS', False)
+
+# In-memory cache for parsed camera history files keyed by path -> ((mtime_ns, size), parsed_data)
+_HISTORY_FILE_CACHE = {}
+_HISTORY_CACHE_LOCK = threading.Lock()
+
+# In-memory cache for available dates with short TTL
+_DATES_CACHE = {"timestamp": 0.0, "dates": [], "etag": ""}
+_DATES_CACHE_LOCK = threading.Lock()
+
+
+def _load_cached_history_file(history_path):
+    """Reads and caches a camera's daily history JSON file based on its mtime_ns and size."""
+    try:
+        st = os.stat(history_path)
+    except OSError:
+        return []
+
+    key = (st.st_mtime_ns, st.st_size)
+    with _HISTORY_CACHE_LOCK:
+        cached = _HISTORY_FILE_CACHE.get(history_path)
+        if cached and cached[0] == key:
+            return cached[1]
+
+    try:
+        with open(history_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        with _HISTORY_CACHE_LOCK:
+            if len(_HISTORY_FILE_CACHE) > 512:
+                _HISTORY_FILE_CACHE.clear()
+            _HISTORY_FILE_CACHE[history_path] = (key, data)
+        return data
+    except Exception as e:
+        print(f"Error reading {history_path}: {e}")
+        return []
 
 
 class ThreadedHTTPServer(ThreadingMixIn, socketserver.TCPServer):
@@ -60,6 +102,10 @@ class ThreadedHTTPServer(ThreadingMixIn, socketserver.TCPServer):
         with self._thread_sema:
             try:
                 request.settimeout(10)
+                try:
+                    request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                except OSError:
+                    pass
                 if self.ssl_context is not None:
                     request = self.ssl_context.wrap_socket(request, server_side=True)
                 self.finish_request(request, client_address)
@@ -72,6 +118,9 @@ class ThreadedHTTPServer(ThreadingMixIn, socketserver.TCPServer):
 
 
 class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
+
+    # Enable HTTP/1.1 persistent connections (Keep-Alive) to avoid repeated TCP/TLS handshakes on mobile
+    protocol_version = "HTTP/1.1"
 
     # Kills zombie threads if the client hangs for 10 seconds
     timeout = 10
@@ -87,8 +136,9 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
         '.json': 'application/json',
     }
 
+    COMPRESSIBLE_EXTENSIONS = ('.json', '.vtt', '.m3u8', '.js', '.css', '.html', '.svg')
+
     def __init__(self, *args, **kwargs):
-        # Override the default directory to strictly serve static files from WEB_DIR
         super().__init__(*args, directory=WEB_DIR, **kwargs)
 
     def address_string(self):
@@ -105,23 +155,32 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
 
     def log_message(self, format, *args):
         request_path = getattr(self, 'path', '')
-        quiet_extensions = ('.ts', '.m3u8', '.mp4', '.json', '.jpg', '.vtt', '.js')
+        quiet_extensions = ('.ts', '.m3u8', '.mp4', '.json', '.jpg', '.vtt', '.js', '/health')
         if not LOG_HTTP_REQUESTS and any(ext in request_path for ext in quiet_extensions):
             return
         super().log_message(format, *args)
 
+    def _accepts_gzip(self):
+        accept_enc = self.headers.get('Accept-Encoding', '')
+        return 'gzip' in accept_enc.lower()
+
     def end_headers(self):
-        """Intercept header generation to inject custom headers before flushing."""
+        """Intercept header generation to inject custom cache headers before flushing."""
         clean_path = getattr(self, 'path', '').split('?', 1)[0].split('#', 1)[0]
 
-        # Apply no-store to HTML, root, live HLS playlists, and dynamic JSON endpoints
         if (
                 clean_path.endswith('.html')
                 or clean_path == '/'
-                or clean_path.endswith('/stream.m3u8')
-                or clean_path in ('/history', '/available_dates', '/cameracount', '/basedir')
+                or clean_path.endswith(('/stream.m3u8', '/stream_sub.m3u8'))
+                or clean_path.endswith('/live.jpg')
+                or clean_path in ('/history', '/available_dates', '/cameracount', '/basedir', '/health')
         ):
-            self.send_header('Cache-Control', 'no-store, no-cache, must-revalidate, max-age=0')
+            self.send_header('Cache-Control', 'no-cache, must-revalidate, max-age=0')
+        elif (
+                clean_path.startswith('/recordings/')
+                or (STORE_DIR_NAME != 'recordings' and clean_path.startswith(f'/{STORE_DIR_NAME}/'))
+        ) and clean_path.endswith(('.ts', '.jpg', '.vtt', '.m3u8')):
+            self.send_header('Cache-Control', 'public, max-age=86400, immutable')
 
         super().end_headers()
 
@@ -153,11 +212,14 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
         # 3. Everything else defaults to being securely served out of WEB_DIR
         return super().translate_path(path)
 
-    def do_AUTHHEAD(self):
+    def do_AUTHHEAD(self, body=b"Authentication required."):
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="ArgoNVR Secure Access"')
-        self.send_header("Content-type", "text/html")
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
+        if body:
+            self.wfile.write(body)
 
     def _is_authenticated(self):
         auth_header = self.headers.get('Authorization')
@@ -176,13 +238,84 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
         except Exception:
             return False
 
-    def _send_json(self, payload, status=200):
-        data = json.dumps(payload).encode('utf-8')
+    def _send_json(self, payload, status=200, etag=None):
+        raw_bytes = json.dumps(payload, separators=(',', ':')).encode('utf-8')
+        if etag is None and status == 200:
+            etag = f'"{hashlib.md5(raw_bytes).hexdigest()}"'
+
+        if status == 200 and etag and self.headers.get('If-None-Match') == etag:
+            self.send_response(304)
+            self.send_header('ETag', etag)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+
+        use_gzip = self._accepts_gzip() and len(raw_bytes) > 256
+        body = gzip.compress(raw_bytes, compresslevel=6) if use_gzip else raw_bytes
+
         self.send_response(status)
         self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', str(len(data)))
+        if etag:
+            self.send_header('ETag', etag)
+        if use_gzip:
+            self.send_header('Content-Encoding', 'gzip')
+            self.send_header('Vary', 'Accept-Encoding')
+        self.send_header('Content-Length', str(len(body)))
         self.end_headers()
-        self.wfile.write(data)
+        self.wfile.write(body)
+
+    def _serve_optimized_file(self, filepath, clean_path):
+        """Serves static/media files with ETag/304 support, Gzip compression, and strict Content-Length safety."""
+        try:
+            with open(filepath, 'rb') as f:
+                st = os.fstat(f.fileno())
+                etag = f'"{st.st_mtime_ns:x}-{st.st_size:x}"'
+
+                if self.headers.get('If-None-Match') == etag:
+                    self.send_response(304)
+                    self.send_header('ETag', etag)
+                    self.send_header('Content-Length', '0')
+                    self.end_headers()
+                    return
+
+                ctype = self.guess_type(filepath)
+                should_compress = (
+                        clean_path.endswith(self.COMPRESSIBLE_EXTENSIONS)
+                        and self._accepts_gzip()
+                        and 256 < st.st_size <= 2 * 1024 * 1024
+                )
+
+                # Buffer small/mutable files (<= 1 MB, including live.jpg, .m3u8, .vtt) in RAM first
+                # so Content-Length is guaranteed to match the exact bytes written on HTTP/1.1 Keep-Alive
+                if should_compress or st.st_size <= 1024 * 1024:
+                    raw_data = f.read()
+                    body = gzip.compress(raw_data, compresslevel=6) if should_compress else raw_data
+                    self.send_response(200)
+                    self.send_header('Content-Type', ctype)
+                    self.send_header('ETag', etag)
+                    if should_compress:
+                        self.send_header('Content-Encoding', 'gzip')
+                        self.send_header('Vary', 'Accept-Encoding')
+                    self.send_header('Content-Length', str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    self.send_response(200)
+                    self.send_header('Content-Type', ctype)
+                    self.send_header('ETag', etag)
+                    self.send_header('Content-Length', str(st.st_size))
+                    self.end_headers()
+                    remaining = st.st_size
+                    while remaining > 0:
+                        chunk = f.read(min(65536, remaining))
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+        except FileNotFoundError:
+            self.send_error(404)
+        except (ConnectionResetError, BrokenPipeError, socket.timeout, ssl.SSLError, OSError):
+            pass
 
     def serve_range(self, filepath, range_header):
         try:
@@ -234,8 +367,6 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         # --- PWA Whitelist ---
-        # Allow manifest, service worker, and icons to bypass Basic Auth
-        # so the browser can validate the PWA in the background.
         if path_no_query in ('/manifest.json', '/sw.js') or path_no_query.startswith('/icons/'):
             super().do_GET()
             return
@@ -243,7 +374,6 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
 
         if not self._is_authenticated():
             self.do_AUTHHEAD()
-            self.wfile.write(b"Authentication required.")
             return
 
         if path_no_query == '/history':
@@ -260,29 +390,19 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
             if req_cam:
                 safe_cam = os.path.basename(req_cam)
                 history_path = os.path.join(ABS_STORE_DIR, safe_cam, f'history_{safe_date}.json')
-                cam_history = []
-                if os.path.exists(history_path):
-                    try:
-                        with open(history_path, 'r', encoding='utf-8') as f:
-                            cam_history = json.load(f)
-                    except Exception as e:
-                        print(f"Error reading {history_path}: {e}")
-                response_data[safe_cam] = cam_history
+                response_data[safe_cam] = _load_cached_history_file(history_path) if os.path.exists(history_path) else []
             else:
                 try:
                     if os.path.exists(ABS_STORE_DIR):
-                        for cam_dir in os.listdir(ABS_STORE_DIR):
+                        for cam_dir in sorted(os.listdir(ABS_STORE_DIR)):
                             cam_path = os.path.join(ABS_STORE_DIR, cam_dir)
                             if os.path.isdir(cam_path):
                                 history_path = os.path.join(cam_path, f'history_{safe_date}.json')
-                                cam_history = []
-                                if os.path.exists(history_path):
-                                    try:
-                                        with open(history_path, 'r', encoding='utf-8') as f:
-                                            cam_history = json.load(f)
-                                    except Exception as e:
-                                        print(f"Error reading {history_path}: {e}")
-                                response_data[cam_dir] = cam_history
+                                response_data[cam_dir] = (
+                                    _load_cached_history_file(history_path)
+                                    if os.path.exists(history_path)
+                                    else []
+                                )
                 except Exception as e:
                     print(f"Error reading history directories: {e}")
 
@@ -290,34 +410,51 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
             return
 
         if path_no_query == '/available_dates':
-            dates = set()
-            try:
-                if os.path.exists(ABS_STORE_DIR):
-                    for cam_dir in os.listdir(ABS_STORE_DIR):
-                        cam_path = os.path.join(ABS_STORE_DIR, cam_dir)
-                        if os.path.isdir(cam_path):
-                            for file in os.listdir(cam_path):
-                                if file.startswith('history_') and file.endswith('.json'):
-                                    date_str = file[8:16]
-                                    if date_str.isdigit():
-                                        dates.add(date_str)
-            except Exception as e:
-                print(f"Error reading available dates: {e}")
+            now = time.time()
+            with _DATES_CACHE_LOCK:
+                if now - _DATES_CACHE["timestamp"] < 10.0 and _DATES_CACHE["dates"]:
+                    cached_dates = _DATES_CACHE["dates"]
+                    cached_etag = _DATES_CACHE["etag"]
+                else:
+                    cached_dates = None
+                    cached_etag = None
 
-            self._send_json(sorted(dates))
+            if cached_dates is None:
+                dates = set()
+                try:
+                    if os.path.exists(ABS_STORE_DIR):
+                        for cam_dir in os.listdir(ABS_STORE_DIR):
+                            cam_path = os.path.join(ABS_STORE_DIR, cam_dir)
+                            if os.path.isdir(cam_path):
+                                for file in os.listdir(cam_path):
+                                    if file.startswith('history_') and file.endswith('.json'):
+                                        date_str = file[8:16]
+                                        if date_str.isdigit():
+                                            dates.add(date_str)
+                except Exception as e:
+                    print(f"Error reading available dates: {e}")
+
+                cached_dates = sorted(dates)
+                cached_etag = f'"{hashlib.md5(json.dumps(cached_dates).encode()).hexdigest()}"'
+                with _DATES_CACHE_LOCK:
+                    _DATES_CACHE["timestamp"] = now
+                    _DATES_CACHE["dates"] = cached_dates
+                    _DATES_CACHE["etag"] = cached_etag
+
+            self._send_json(cached_dates, etag=cached_etag)
             return
 
         if path_no_query == '/cameracount':
-            self._send_json({"count": CAMERA_COUNT})
+            self._send_json({"count": CAMERA_COUNT, "subStreams": SUB_STREAMS})
             return
 
         if path_no_query == '/basedir':
-            self._send_json({"baseDir": BASE_DIR})
+            self._send_json({"baseDir": BASE_DIR, "subStreams": SUB_STREAMS})
             return
 
         filepath = self.translate_path(path_no_query)
 
-        if path_no_query.endswith(('.m3u8', '.ts', '.mp4', '.json', '.jpg', '.vtt')):
+        if path_no_query.endswith(('.m3u8', '.ts', '.mp4', '.json', '.jpg', '.vtt', '.js', '.css')):
             if not os.path.exists(filepath):
                 self.send_error(404)
                 return
@@ -325,6 +462,10 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
         range_header = self.headers.get('Range')
         if path_no_query.endswith('.mp4') and range_header:
             self.serve_range(filepath, range_header)
+            return
+
+        if os.path.isfile(filepath):
+            self._serve_optimized_file(filepath, path_no_query)
             return
 
         super().do_GET()
@@ -335,7 +476,6 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
 
         if not self._is_authenticated():
             self.do_AUTHHEAD()
-            self.wfile.write(b"Authentication required.")
             return
 
         if path_no_query == '/api/system/reboot':
@@ -370,9 +510,8 @@ if __name__ == "__main__":
             print(f"🔓 ArgoNVR server running on port {PORT} (No SSL configured)")
 
         print(f"📂 Storage mapped to: {STORE_DIR}")
-        print(f"📷 Cameras discovered from config: {CAMERA_COUNT}")
+        print(f"📷 Cameras discovered from config: {CAMERA_COUNT} (Sub-streams: {sum(SUB_STREAMS.values())})")
 
-        # Notify systemd that the boot process is complete
         if sdnotify is not None:
             try:
                 notifier = sdnotify.SystemdNotifier()

@@ -2,14 +2,17 @@ function runEasterEgg() {
 	const brand = document.getElementById('brand-text');
 	if (!brand) return;
 	if (Math.random() < 0.15) {
-		const originalText = brand.innerText;
-		brand.innerText = (originalText === "ArgoNVR") ? "ArgonVR" : "ArgoNVR";
-		setTimeout(() => { brand.innerText = originalText; }, 3000);
+		brand.innerText = "ArgonVR";
+		setTimeout(() => { brand.innerText = "ArgoNVR"; }, 3000);
 	}
 }
 setInterval(runEasterEgg, 10000);
 
 let CAMERA_COLORS = ['#3498db'];
+window.cameraSubStreams = {};
+window.cameraSubStreamFailed = {};
+window.cameraSubStreamFailCount = {};
+const cameraSubStreamHealTimers = {};
 
 function hslToHex(h, s, l) {
 	l /= 100;
@@ -27,10 +30,371 @@ function getCameraColor(camId) {
 	return CAMERA_COLORS[(num - 1) % CAMERA_COLORS.length];
 }
 
+// --- Dynamic Network Speed & Latency Monitor ---
+const networkMonitor = {
+	tier: 'high', // 'high' | 'medium' | 'low'
+	modeOverride: sessionStorage.getItem('argonvr_net_mode') || 'auto', // 'auto' | 'low' | 'medium' | 'high'
+	rttMs: 60,
+	downlinkMbps: 10.0,
+	stallCount: 0,
+	lastStallTs: 0,
+	lastTierChangeTs: 0,
+	suppressPenaltiesUntil: 0,
+	listeners: new Set(),
+	badgeEl: null,
+
+	init() {
+		const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+		if (conn) {
+			if (typeof conn.rtt === 'number' && conn.rtt > 0) this.rttMs = conn.rtt;
+			if (typeof conn.downlink === 'number' && conn.downlink > 0) this.downlinkMbps = Math.max(this.downlinkMbps, conn.downlink);
+			conn.addEventListener('change', () => {
+				if (typeof conn.rtt === 'number' && conn.rtt > 0) {
+					this.rttMs = Math.round((this.rttMs * 0.5) + (conn.rtt * 0.5));
+				}
+				if (typeof conn.downlink === 'number' && conn.downlink > 0) {
+					this.downlinkMbps = (this.downlinkMbps * 0.5) + (conn.downlink * 0.5);
+				}
+				this.evaluateTier();
+			});
+		}
+
+		this.createBadge();
+		this.evaluateTier();
+		this.probeLatency();
+
+		setInterval(() => {
+			if (document.visibilityState === 'visible') {
+				this.probeLatency();
+			}
+		}, 15000);
+	},
+
+	resetAfterWake(graceMs = 10000) {
+		this.suppressPenaltiesUntil = performance.now() + graceMs;
+		this.stallCount = 0;
+		this.downlinkMbps = Math.max(this.downlinkMbps, 8.0);
+		this.rttMs = Math.min(this.rttMs, 100);
+		if (this.modeOverride === 'auto' && this.tier !== 'high') {
+			this.tier = 'high';
+			this.lastTierChangeTs = performance.now();
+		}
+		this.updateBadgeUI();
+	},
+
+	createBadge() {
+		if (this.badgeEl) return;
+		const badge = document.createElement('button');
+		badge.id = 'net-quality-badge';
+		badge.type = 'button';
+		badge.title = 'Click to cycle Bandwidth Mode (Auto / Low Data / High Quality)';
+		badge.style.cssText = [
+			'background: rgba(20, 25, 35, 0.85)',
+			'color: #ecf0f1',
+			'border: 1px solid rgba(255, 255, 255, 0.2)',
+			'border-radius: 4px',
+			'padding: 3px 8px',
+			'font-size: 11px',
+			'font-family: monospace',
+			'cursor: pointer',
+			'margin-left: 8px',
+			'white-space: nowrap',
+			'transition: border-color 0.2s, color 0.2s'
+		].join(';');
+
+		badge.addEventListener('click', (e) => {
+			e.stopPropagation();
+			const order = ['auto', 'low', 'high'];
+			const nextIdx = (order.indexOf(this.modeOverride) + 1) % order.length;
+			this.modeOverride = order[nextIdx];
+			sessionStorage.setItem('argonvr_net_mode', this.modeOverride);
+			this.stallCount = 0;
+			this.lastTierChangeTs = 0;
+			this.evaluateTier(true);
+		});
+
+		const dateEl = document.getElementById('global-date');
+		if (dateEl && dateEl.parentNode) {
+			dateEl.parentNode.insertBefore(badge, dateEl.nextSibling);
+		} else {
+			document.body.appendChild(badge);
+		}
+		this.badgeEl = badge;
+		this.updateBadgeUI();
+	},
+
+	updateBadgeUI() {
+		if (!this.badgeEl) return;
+		const colors = {
+			high: '#2ecc71',
+			medium: '#f39c12',
+			low: '#e67e22'
+		};
+		const color = colors[this.tier] || '#3498db';
+		const modeLabel = this.modeOverride === 'auto' ? `AUTO:${this.tier.toUpperCase()}` : `LOCK:${this.modeOverride.toUpperCase()}`;
+		const mbpsStr = this.downlinkMbps >= 10 ? Math.round(this.downlinkMbps) : this.downlinkMbps.toFixed(1);
+		this.badgeEl.style.borderColor = color;
+		this.badgeEl.style.color = color;
+		this.badgeEl.innerText = `${modeLabel} ${Math.round(this.rttMs)}ms ${mbpsStr}M`;
+	},
+
+	async probeLatency() {
+		const start = performance.now();
+		try {
+			const resp = await fetch(`/health?ping=${Date.now()}`, {
+				method: 'GET',
+				cache: 'no-store',
+				credentials: 'include'
+			});
+			if (resp.ok) {
+				const elapsed = performance.now() - start;
+				const inGrace = performance.now() < this.suppressPenaltiesUntil;
+				if (!inGrace || elapsed < this.rttMs) {
+					this.rttMs = (this.rttMs * 0.7) + (elapsed * 0.3);
+				}
+				// Gradually decay accumulated stall count over time when server is reachable
+				if (elapsed < 250 && this.stallCount > 0) {
+					this.stallCount = Math.max(0, this.stallCount - 0.5);
+				}
+				this.evaluateTier();
+			}
+		} catch (e) {
+			if (performance.now() >= this.suppressPenaltiesUntil) {
+				this.rttMs = Math.min(2000, this.rttMs * 1.35);
+				this.evaluateTier();
+			}
+		}
+	},
+
+	recordSample(bytes, durationMs) {
+		if (!bytes || bytes < 16384 || !durationMs || durationMs <= 2) return;
+
+		const netDurationMs = Math.max(5, durationMs - (this.rttMs * 0.25));
+		const activeStreamCount = Math.max(1, Object.keys(hlsPlayers).length);
+		const concurrencyFactor = activeStreamCount > 1 ? Math.min(2.5, 1 + ((activeStreamCount - 1) * 0.35)) : 1;
+		const rawMbps = ((bytes * 8) / (netDurationMs / 1000)) / 1000000;
+		const sampleMbps = Math.max(0.2, Math.min(100, rawMbps * concurrencyFactor));
+
+		const inGrace = performance.now() < this.suppressPenaltiesUntil;
+		// Small segments (< 64 KB) on low-motion VBR or sub-streams are latency-bound; never let them drag downlink down
+		if ((bytes < 65536 || inGrace) && sampleMbps < this.downlinkMbps) {
+			return;
+		}
+
+		this.downlinkMbps = (this.downlinkMbps * 0.75) + (sampleMbps * 0.25);
+		if (sampleMbps > 2.5 && this.stallCount > 0) {
+			this.stallCount = Math.max(0, this.stallCount - 0.5);
+		}
+		this.evaluateTier();
+	},
+
+	recordStall() {
+		const now = performance.now();
+		if (now < this.suppressPenaltiesUntil) return;
+		if (!document.hasFocus && document.visibilityState === 'hidden') return;
+		// Coalesce simultaneous stalls across multiple cameras into a single network event
+		if (now - this.lastStallTs < 4000) return;
+
+		this.lastStallTs = now;
+		this.stallCount = Math.min(5, this.stallCount + 1);
+		this.downlinkMbps = Math.max(1.0, this.downlinkMbps * 0.8);
+		this.evaluateTier();
+	},
+
+	evaluateTier(forceNotify = false) {
+		let nextTier = this.tier;
+
+		if (this.modeOverride !== 'auto') {
+			nextTier = this.modeOverride;
+		} else {
+			const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+			const saveData = Boolean(conn && conn.saveData);
+			const effType = conn ? conn.effectiveType : '';
+
+			if (saveData || effType === 'slow-2g' || effType === '2g' || effType === '3g') {
+				nextTier = 'low';
+			} else if (this.tier === 'high') {
+				if (this.downlinkMbps < 1.6 || this.rttMs > 380 || this.stallCount >= 3) {
+					nextTier = 'low';
+				} else if (
+					this.downlinkMbps < 4.5 ||
+					this.rttMs > 160 ||
+					this.stallCount >= 2 ||
+					(window.innerWidth <= 800 && this.downlinkMbps < 7.0)
+				) {
+					nextTier = 'medium';
+				}
+			} else if (this.tier === 'medium') {
+				if (this.downlinkMbps < 1.6 || this.rttMs > 380 || this.stallCount >= 3) {
+					nextTier = 'low';
+				} else if (
+					this.downlinkMbps >= 6.5 &&
+					this.rttMs <= 115 &&
+					this.stallCount < 1 &&
+					(window.innerWidth > 800 || this.downlinkMbps >= 9.0)
+				) {
+					nextTier = 'high';
+				}
+			} else if (this.tier === 'low') {
+				// Hysteresis: require clear recovery before leaving 'low'
+				if (this.downlinkMbps >= 7.0 && this.rttMs <= 115 && this.stallCount === 0) {
+					nextTier = 'high';
+				} else if (this.downlinkMbps >= 3.2 && this.rttMs <= 220 && this.stallCount <= 1) {
+					nextTier = 'medium';
+				}
+			}
+		}
+
+		const now = performance.now();
+		const changed = nextTier !== this.tier;
+
+		if (changed && !forceNotify && this.modeOverride === 'auto') {
+			// Prevent rapid tier oscillation (minimum 12s between automatic tier transitions)
+			if (this.lastTierChangeTs > 0 && (now - this.lastTierChangeTs) < 12000) {
+				this.updateBadgeUI();
+				return;
+			}
+		}
+
+		if (changed) {
+			this.tier = nextTier;
+			this.lastTierChangeTs = now;
+		}
+		this.updateBadgeUI();
+
+		if (changed || forceNotify) {
+			this.listeners.forEach(fn => {
+				try { fn(this.tier, forceNotify); } catch (e) {}
+			});
+		}
+	},
+
+	onChange(fn) {
+		this.listeners.add(fn);
+	},
+
+	hasSubStream(camId) {
+		return Boolean(window.cameraSubStreams && window.cameraSubStreams[camId] && !window.cameraSubStreamFailed[camId]);
+	},
+
+	clearSubStreamFailure(camId) {
+		window.cameraSubStreamFailCount[camId] = 0;
+		delete window.cameraSubStreamFailed[camId];
+		if (cameraSubStreamHealTimers[camId]) {
+			clearTimeout(cameraSubStreamHealTimers[camId]);
+			delete cameraSubStreamHealTimers[camId];
+		}
+	},
+
+	markSubStreamFailure(camId) {
+		window.cameraSubStreamFailCount[camId] = (window.cameraSubStreamFailCount[camId] || 0) + 1;
+		if (window.cameraSubStreamFailCount[camId] >= 2) {
+			window.cameraSubStreamFailed[camId] = true;
+			if (cameraSubStreamHealTimers[camId]) {
+				clearTimeout(cameraSubStreamHealTimers[camId]);
+			}
+			// Auto-heal after 60s in case the sub-stream pipeline was merely restarting
+			cameraSubStreamHealTimers[camId] = setTimeout(() => {
+				delete cameraSubStreamHealTimers[camId];
+				delete window.cameraSubStreamFailed[camId];
+				window.cameraSubStreamFailCount[camId] = 0;
+			}, 60000);
+			return true;
+		}
+		return false;
+	},
+
+	shouldUseSubStream(camId, isSingleView = false) {
+		if (!this.hasSubStream(camId)) return false;
+		if (isSingleView) {
+			return this.tier === 'low' || this.tier === 'medium';
+		}
+		return this.tier !== 'high' || window.innerWidth <= 800 || activeCameras.length > 2;
+	},
+
+	getLiveStreamUrl(baseDirPath, camId, isSingleView = false) {
+		const playlist = this.shouldUseSubStream(camId, isSingleView) ? 'stream_sub.m3u8' : 'stream.m3u8';
+		return `${baseDirPath}/${camId}/${playlist}?t=${Date.now()}`;
+	},
+
+	shouldUseSnapshotGrid(cameraCount) {
+		if (this.tier === 'low') return true;
+		return this.tier === 'medium' && (window.innerWidth <= 800 || cameraCount >= 4);
+	},
+
+	getSnapshotIntervalMs() {
+		if (this.tier === 'low') {
+			return Math.max(1500, Math.min(4000, Math.round(this.rttMs * 4.5)));
+		}
+		return Math.max(1000, Math.min(2500, Math.round(this.rttMs * 3)));
+	},
+
+	getHlsConfig(isLiveStream = true, isSingleView = false) {
+		const isLow = this.tier === 'low';
+		const isMed = this.tier === 'medium';
+
+		const config = {
+			manifestLoadingMaxRetry: 6,
+			levelLoadingMaxRetry: 6,
+			fragLoadingMaxRetry: 6,
+			backBufferLength: isLow ? 4 : (isMed ? 8 : 15),
+			maxBufferLength: isLow ? (isSingleView ? 6 : 4) : (isMed ? 10 : 18),
+			maxMaxBufferLength: isLow ? (isSingleView ? 12 : 6) : (isMed ? 20 : 30),
+			maxBufferSize: isLow ? 6 * 1000 * 1000 : (isMed ? 15 * 1000 * 1000 : 25 * 1000 * 1000),
+			xhrSetup: function(xhr) {
+				xhr.withCredentials = true;
+			}
+		};
+
+		if (isLiveStream) {
+			config.liveDurationInfinity = true;
+			config.liveSyncDurationCount = isLow ? 3 : (isMed ? 3 : 2);
+			config.liveMaxLatencyDurationCount = isLow ? 10 : 7;
+			config.maxLiveSyncPlaybackRate = 1.15;
+		}
+
+		return config;
+	},
+
+	attachHlsTelemetry(hls, camId = null) {
+		if (!hls || typeof Hls === 'undefined') return;
+		hls.on(Hls.Events.FRAG_LOADED, (event, data) => {
+			if (camId && hlsPlayers[camId] && hlsPlayers[camId] !== hls) return;
+			const stats = (data && data.frag && data.frag.stats) || (data && data.stats);
+			if (stats && stats.loading) {
+				const bytes = stats.total || stats.loaded || 0;
+				const dur = stats.loading.end - stats.loading.start;
+				this.recordSample(bytes, dur);
+			}
+		});
+		hls.on(Hls.Events.ERROR, (event, data) => {
+			if (camId && hlsPlayers[camId] && hlsPlayers[camId] !== hls) return;
+			if (data && data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR) {
+				this.recordStall();
+			}
+		});
+	}
+};
+
+window.networkMonitor = networkMonitor;
+
 // --- Global State & Caches ---
 let globalManifest = {};
 const hlsPlayers = {};
 const cameraReconnectTimers = {};
+const cameraStaggerTimers = {};
+const cameraSnapshotTimers = {};
+const cameraSnapshotInFlight = {};
+const cameraSnapshotEtags = {};
+const cameraSnapshotFailed = {};
+const cameraSnapshot404Count = {};
+const cameraSnapshotHealTimers = {};
+const cameraModeGeneration = {};
+const cameraLiveMode = {}; // 'snapshot' | 'hls-sub' | 'hls-main' | 'none'
+const visibleCameras = new Set();
+let cardIntersectionObserver = null;
+let manifestFetchInFlight = false;
+
 const activeCameras = [];
 let vttCache = {};
 let spriteImages = {};
@@ -44,6 +408,8 @@ let isSingleCameraOpen = false;
 let playbackInterval = null;
 let liveSyncInterval = null;
 let currentDayString = "";
+let scrubRafId = null;
+let scrubMetadataDebounceTimer = null;
 
 let availableDates = new Set();
 let calViewDate = new Date();
@@ -56,6 +422,11 @@ const dateDisplay = document.getElementById('global-date');
 const zoomSlider = document.getElementById('zoom-slider');
 const timelineContent = document.getElementById('timeline-content');
 const timelineViewport = document.getElementById('timeline-viewport');
+
+function bumpCameraGeneration(camId) {
+	cameraModeGeneration[camId] = (cameraModeGeneration[camId] || 0) + 1;
+	return cameraModeGeneration[camId];
+}
 
 function setCameraState(camId, state) {
 	const card = document.getElementById(`card-${camId}`);
@@ -72,19 +443,227 @@ function clearCameraReconnectTimer(camId) {
 	}
 }
 
-function destroyHlsPlayer(camId) {
-	clearCameraReconnectTimer(camId);
-	if (hlsPlayers[camId]) {
-		try {
-			hlsPlayers[camId].stopLoad();
-			hlsPlayers[camId].detachMedia();
-			hlsPlayers[camId].destroy();
-		} catch (e) {}
-		delete hlsPlayers[camId];
+function clearCameraStaggerTimer(camId) {
+	if (cameraStaggerTimers[camId]) {
+		clearTimeout(cameraStaggerTimers[camId]);
+		delete cameraStaggerTimers[camId];
 	}
 }
 
-function handleStreamError(camId, hlsInstance) {
+function stopCameraSnapshotLoop(camId) {
+	if (cameraSnapshotTimers[camId]) {
+		clearTimeout(cameraSnapshotTimers[camId]);
+		delete cameraSnapshotTimers[camId];
+	}
+	delete cameraSnapshotInFlight[camId];
+}
+
+function cleanupVideoElementListeners(videoEl) {
+	if (!videoEl) return;
+	if (videoEl._onVideoReady) {
+		videoEl.removeEventListener('seeked', videoEl._onVideoReady);
+		videoEl.removeEventListener('playing', videoEl._onVideoReady);
+		videoEl._onVideoReady = null;
+	}
+	videoEl.onloadedmetadata = null;
+	videoEl.onerror = null;
+}
+
+function destroyHlsPlayer(camId) {
+	bumpCameraGeneration(camId);
+	clearCameraReconnectTimer(camId);
+	clearCameraStaggerTimer(camId);
+	stopCameraSnapshotLoop(camId);
+	cameraLiveMode[camId] = 'none';
+
+	const videoEl = document.getElementById(`video-${camId}`);
+	cleanupVideoElementListeners(videoEl);
+
+	if (hlsPlayers[camId]) {
+		const hls = hlsPlayers[camId];
+		delete hlsPlayers[camId];
+		try {
+			if (typeof Hls !== 'undefined' && hls.off) {
+				hls.off(Hls.Events.MANIFEST_PARSED);
+				hls.off(Hls.Events.FRAG_BUFFERED);
+				hls.off(Hls.Events.FRAG_LOADED);
+				hls.off(Hls.Events.ERROR);
+			}
+			hls.stopLoad();
+			hls.detachMedia();
+			hls.destroy();
+		} catch (e) {}
+	}
+}
+
+function isCameraVisibleInViewport(camId) {
+	if (visibleCameras.size === 0) return true;
+	return visibleCameras.has(camId);
+}
+
+function getDesiredCameraLiveMode(camId) {
+	if (networkMonitor.shouldUseSnapshotGrid(activeCameras.length) && !cameraSnapshotFailed[camId]) {
+		return 'snapshot';
+	}
+	return networkMonitor.shouldUseSubStream(camId, false) ? 'hls-sub' : 'hls-main';
+}
+
+async function fetchAndRenderLiveSnapshot(camId) {
+	if (!isLive || isSingleCameraOpen || document.visibilityState === 'hidden') return;
+	if (!networkMonitor.shouldUseSnapshotGrid(activeCameras.length) || cameraSnapshotFailed[camId]) return;
+
+	const gen = cameraModeGeneration[camId] || 0;
+	cameraLiveMode[camId] = 'snapshot';
+
+	if (!isCameraVisibleInViewport(camId)) {
+		cameraSnapshotTimers[camId] = setTimeout(() => fetchAndRenderLiveSnapshot(camId), 1000);
+		return;
+	}
+
+	if (cameraSnapshotInFlight[camId]) return;
+	cameraSnapshotInFlight[camId] = true;
+
+	const startTs = performance.now();
+	const headers = {};
+	if (cameraSnapshotEtags[camId]) {
+		headers['If-None-Match'] = cameraSnapshotEtags[camId];
+	}
+
+	try {
+		const resp = await fetch(`${baseDir}/${camId}/live.jpg`, {
+			method: 'GET',
+			credentials: 'include',
+			cache: 'no-cache',
+			headers
+		});
+
+		if (
+			gen !== (cameraModeGeneration[camId] || 0) ||
+			!isLive ||
+			isSingleCameraOpen ||
+			!networkMonitor.shouldUseSnapshotGrid(activeCameras.length) ||
+			cameraSnapshotFailed[camId]
+		) {
+			return;
+		}
+
+		if (resp.status === 304) {
+			cameraSnapshot404Count[camId] = 0;
+			setCameraState(camId, 'canvas');
+		} else if (resp.ok) {
+			cameraSnapshot404Count[camId] = 0;
+			const etag = resp.headers.get('ETag');
+			if (etag) cameraSnapshotEtags[camId] = etag;
+
+			const blob = await resp.blob();
+			const elapsed = performance.now() - startTs;
+
+			if (
+				gen !== (cameraModeGeneration[camId] || 0) ||
+				!isLive ||
+				isSingleCameraOpen ||
+				!networkMonitor.shouldUseSnapshotGrid(activeCameras.length) ||
+				cameraSnapshotFailed[camId]
+			) {
+				return;
+			}
+
+			const canvas = document.getElementById(`canvas-${camId}`);
+			if (canvas && blob.size > 0) {
+				if ('createImageBitmap' in window) {
+					const bmp = await createImageBitmap(blob);
+					if (
+						gen !== (cameraModeGeneration[camId] || 0) ||
+						!isLive ||
+						isSingleCameraOpen ||
+						!networkMonitor.shouldUseSnapshotGrid(activeCameras.length)
+					) {
+						bmp.close();
+						return;
+					}
+					if (canvas.width !== bmp.width || canvas.height !== bmp.height) {
+						canvas.width = bmp.width;
+						canvas.height = bmp.height;
+					}
+					const ctx = canvas.getContext('2d');
+					ctx.drawImage(bmp, 0, 0, canvas.width, canvas.height);
+					bmp.close();
+					setCameraState(camId, 'canvas');
+				} else {
+					await new Promise((resolve) => {
+						const url = URL.createObjectURL(blob);
+						const img = new Image();
+						img.onload = () => {
+							if (
+								gen === (cameraModeGeneration[camId] || 0) &&
+								isLive &&
+								!isSingleCameraOpen &&
+								networkMonitor.shouldUseSnapshotGrid(activeCameras.length)
+							) {
+								if (canvas.width !== img.naturalWidth || canvas.height !== img.naturalHeight) {
+									canvas.width = img.naturalWidth;
+									canvas.height = img.naturalHeight;
+								}
+								canvas.getContext('2d').drawImage(img, 0, 0);
+								setCameraState(camId, 'canvas');
+							}
+							URL.revokeObjectURL(url);
+							resolve();
+						};
+						img.onerror = () => {
+							URL.revokeObjectURL(url);
+							resolve();
+						};
+						img.src = url;
+					});
+				}
+			}
+
+			// Record throughput sample AFTER rendering so a tier promotion cannot race with setCameraState('canvas')
+			networkMonitor.recordSample(blob.size, elapsed);
+		} else if (resp.status === 404) {
+			// Require 5 consecutive 404s so transient FFmpeg restarts never lock out snapshot mode
+			cameraSnapshot404Count[camId] = (cameraSnapshot404Count[camId] || 0) + 1;
+			if (cameraSnapshot404Count[camId] >= 5) {
+				cameraSnapshotFailed[camId] = true;
+				if (cameraSnapshotHealTimers[camId]) {
+					clearTimeout(cameraSnapshotHealTimers[camId]);
+				}
+				cameraSnapshotHealTimers[camId] = setTimeout(() => {
+					delete cameraSnapshotHealTimers[camId];
+					delete cameraSnapshotFailed[camId];
+					cameraSnapshot404Count[camId] = 0;
+				}, 60000);
+				delete cameraSnapshotInFlight[camId];
+				startHlsLiveForCamera(camId);
+				return;
+			}
+		}
+	} catch (e) {
+		// Network glitch; retry on next cycle
+	} finally {
+		delete cameraSnapshotInFlight[camId];
+	}
+
+	if (
+		gen === (cameraModeGeneration[camId] || 0) &&
+		isLive &&
+		!isSingleCameraOpen &&
+		document.visibilityState === 'visible' &&
+		networkMonitor.shouldUseSnapshotGrid(activeCameras.length) &&
+		!cameraSnapshotFailed[camId]
+	) {
+		cameraSnapshotTimers[camId] = setTimeout(() => {
+			fetchAndRenderLiveSnapshot(camId);
+		}, networkMonitor.getSnapshotIntervalMs());
+	}
+}
+
+function handleStreamError(camId, hlsInstance, wasSubStream = false) {
+	if (hlsInstance && hlsPlayers[camId] && hlsPlayers[camId] !== hlsInstance) {
+		return;
+	}
+
 	if (hlsInstance) {
 		try {
 			hlsInstance.stopLoad();
@@ -95,6 +674,16 @@ function handleStreamError(camId, hlsInstance) {
 			delete hlsPlayers[camId];
 		}
 	}
+	cameraLiveMode[camId] = 'none';
+
+	if (wasSubStream) {
+		const lockedOut = networkMonitor.markSubStreamFailure(camId);
+		if (lockedOut && isLive && !isSingleCameraOpen && document.visibilityState === "visible") {
+			console.warn(`[SubStream] ${camId} sub-stream unavailable on dashboard, falling back to main stream.`);
+			resetIndividualCamera(camId);
+			return;
+		}
+	}
 
 	if (isLive && !isSingleCameraOpen && !cameraReconnectTimers[camId]) {
 		cameraReconnectTimers[camId] = setTimeout(() => {
@@ -102,7 +691,7 @@ function handleStreamError(camId, hlsInstance) {
 			if (isLive && !isSingleCameraOpen && document.visibilityState === "visible") {
 				resetIndividualCamera(camId);
 			}
-		}, 3000);
+		}, 2500);
 	}
 }
 
@@ -142,10 +731,11 @@ async function ensureClipMetadata(clip) {
 
 	if (!needsSprite && !needsVtt) return;
 
-	// Cap in-memory sprite cache to prevent unbounded memory growth over days of uptime
+	const maxSprites = networkMonitor.tier === 'low' ? 30 : 80;
 	const spriteKeys = Object.keys(spriteImages);
-	if (spriteKeys.length > 80) {
-		for (let i = 0; i < 20; i++) {
+	if (spriteKeys.length > maxSprites) {
+		const evictCount = Math.min(20, spriteKeys.length - maxSprites + 5);
+		for (let i = 0; i < evictCount; i++) {
 			delete spriteImages[spriteKeys[i]];
 		}
 	}
@@ -205,13 +795,12 @@ function renderSpriteFrame(camId, clip, offset) {
 		let targetCue = cues[0];
 
 		for (let i = 0; i < cues.length; i++) {
-			if (offset >= cues[i].start && (i === cues.length - 1 || offset < cues[i+1].start)) {
+			if (offset >= cues[i].start && (i === cues.length - 1 || offset < cues[i + 1].start)) {
 				targetCue = cues[i];
 				break;
 			}
 		}
 
-		// Match canvas buffer to native tile dimensions and only resize when changed
 		if (canvas.width !== targetCue.w || canvas.height !== targetCue.h) {
 			canvas.width = targetCue.w;
 			canvas.height = targetCue.h;
@@ -344,13 +933,15 @@ function parseFilenameToSeconds(filename) {
 
 async function fetchManifest(camId = null) {
 	if (activeCameras.length === 0) return;
+	if (!camId && manifestFetchInFlight) return;
+	if (!camId) manifestFetchInFlight = true;
 
 	try {
 		const url = camId
 			? `/history?date=${currentDayString}&cam=${camId}`
 			: `/history?date=${currentDayString}`;
 
-		const response = await fetch(url, { cache: 'no-store', credentials: 'include' });
+		const response = await fetch(url, { cache: 'no-cache', credentials: 'include' });
 		if (!response.ok) return;
 		const allData = await response.json();
 
@@ -367,11 +958,14 @@ async function fetchManifest(camId = null) {
 		});
 
 		renderTimelineHeatmap();
-		if (document.getElementById('calendar-popup').classList.contains('visible')) {
+		const calPopup = document.getElementById('calendar-popup');
+		if (calPopup && calPopup.classList.contains('visible')) {
 			renderCalendar();
 		}
 	} catch (e) {
 		console.log(`Could not load history manifest${camId ? ' for ' + camId : ''}. Likely an auth issue.`);
+	} finally {
+		if (!camId) manifestFetchInFlight = false;
 	}
 }
 
@@ -416,8 +1010,8 @@ function toggleCalendar() {
 	const popup = document.getElementById('calendar-popup');
 	popup.classList.toggle('visible');
 	if (popup.classList.contains('visible')) {
-		const y = parseInt(currentDayString.substring(0,4));
-		const m = parseInt(currentDayString.substring(4,6)) - 1;
+		const y = parseInt(currentDayString.substring(0, 4));
+		const m = parseInt(currentDayString.substring(4, 6)) - 1;
 		calViewDate = new Date(y, m, 1);
 		renderCalendar();
 	}
@@ -463,9 +1057,9 @@ function renderCalendar() {
 }
 
 function selectDateFromCalendar(dateStr) {
-	const y = parseInt(dateStr.substring(0,4));
-	const m = parseInt(dateStr.substring(4,6)) - 1;
-	const d = parseInt(dateStr.substring(6,8));
+	const y = parseInt(dateStr.substring(0, 4));
+	const m = parseInt(dateStr.substring(4, 6)) - 1;
+	const d = parseInt(dateStr.substring(6, 8));
 	setDate(new Date(y, m, d));
 	toggleCalendar();
 }
@@ -494,6 +1088,13 @@ function findClipForCamera(camId, targetSeconds) {
 }
 
 function updateCamerasToScrubber(targetSeconds, isDragging = false) {
+	if (scrubMetadataDebounceTimer) {
+		clearTimeout(scrubMetadataDebounceTimer);
+		scrubMetadataDebounceTimer = null;
+	}
+
+	const pendingClipsToFetch = [];
+
 	activeCameras.forEach(camId => {
 		const videoEl = document.getElementById(`video-${camId}`);
 		if (!videoEl) return;
@@ -504,13 +1105,6 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 			const manifestRef = matchData.manifestRef;
 			const offset = matchData.offset;
 
-			ensureClipMetadata(manifestRef);
-
-			const activeUrl = videoEl.dataset.clipUrl || "";
-			const srcChanged = activeUrl !== manifestRef.url;
-			const drift = srcChanged ? 0 : Math.abs(videoEl.currentTime - offset);
-			const needsSeek = srcChanged || drift > 1.0;
-
 			const hasSprite = renderSpriteFrame(camId, manifestRef, offset);
 
 			if (isDragging) {
@@ -518,8 +1112,40 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 					setCameraState(camId, 'canvas');
 				} else {
 					videoEl.pause();
+					if (isCameraVisibleInViewport(camId)) {
+						pendingClipsToFetch.push({ camId, manifestRef, offset });
+					}
 				}
 			} else {
+				const gen = cameraModeGeneration[camId] || 0;
+				ensureClipMetadata(manifestRef).then(() => {
+					if (
+						gen === (cameraModeGeneration[camId] || 0) &&
+						!isLive &&
+						!isPlayingHistory &&
+						videoEl.readyState < 2
+					) {
+						if (renderSpriteFrame(camId, manifestRef, offset)) {
+							setCameraState(camId, 'canvas');
+						}
+					}
+				});
+
+				const useSpriteOnlyOnDashboard =
+					(networkMonitor.tier === 'low' && activeCameras.length > 1) ||
+					!isCameraVisibleInViewport(camId);
+
+				if (useSpriteOnlyOnDashboard && hasSprite) {
+					destroyHlsPlayer(camId);
+					setCameraState(camId, 'canvas');
+					return;
+				}
+
+				const activeUrl = videoEl.dataset.clipUrl || "";
+				const srcChanged = activeUrl !== manifestRef.url;
+				const drift = srcChanged ? 0 : Math.abs(videoEl.currentTime - offset);
+				const needsSeek = srcChanged || drift > 1.0;
+
 				if (needsSeek) {
 					if (hasSprite) {
 						setCameraState(camId, 'canvas');
@@ -527,13 +1153,12 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 						setCameraState(camId, 'video');
 					}
 
-					if (videoEl._onVideoReady) {
-						videoEl.removeEventListener('seeked', videoEl._onVideoReady);
-						videoEl.removeEventListener('playing', videoEl._onVideoReady);
-					}
+					cleanupVideoElementListeners(videoEl);
 
 					const onVideoReady = () => {
-						setCameraState(camId, 'video');
+						if (!isLive) {
+							setCameraState(camId, 'video');
+						}
 						videoEl.removeEventListener('seeked', onVideoReady);
 						videoEl.removeEventListener('playing', onVideoReady);
 						videoEl._onVideoReady = null;
@@ -548,18 +1173,18 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 
 						if (Hls.isSupported()) {
 							destroyHlsPlayer(camId);
+							videoEl._onVideoReady = onVideoReady;
+							videoEl.addEventListener('seeked', onVideoReady);
+							videoEl.addEventListener('playing', onVideoReady);
 
-							const hls = new Hls({
-								manifestLoadingMaxRetry: 5,
-								xhrSetup: function(xhr) {
-									xhr.withCredentials = true;
-								}
-							});
+							const hls = new Hls(networkMonitor.getHlsConfig(false, false));
+							networkMonitor.attachHlsTelemetry(hls, camId);
 							hlsPlayers[camId] = hls;
 							hls.loadSource(manifestRef.url);
 							hls.attachMedia(videoEl);
 
 							hls.on(Hls.Events.MANIFEST_PARSED, () => {
+								if (hlsPlayers[camId] !== hls) return;
 								videoEl.currentTime = offset;
 								if (isPlayingHistory) videoEl.play().catch(e => {});
 							});
@@ -589,11 +1214,6 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 			}
 		} else {
 			setCameraState(camId, 'overlay');
-			if (videoEl._onVideoReady) {
-				videoEl.removeEventListener('seeked', videoEl._onVideoReady);
-				videoEl.removeEventListener('playing', videoEl._onVideoReady);
-				videoEl._onVideoReady = null;
-			}
 			destroyHlsPlayer(camId);
 			if (videoEl.dataset.clipUrl || videoEl.hasAttribute('src')) {
 				delete videoEl.dataset.clipUrl;
@@ -603,6 +1223,19 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 			}
 		}
 	});
+
+	if (isDragging && pendingClipsToFetch.length > 0) {
+		const debounceMs = networkMonitor.tier === 'low' ? 280 : 140;
+		scrubMetadataDebounceTimer = setTimeout(() => {
+			pendingClipsToFetch.forEach(({ camId, manifestRef, offset }) => {
+				ensureClipMetadata(manifestRef).then(() => {
+					if (isScrubbing && renderSpriteFrame(camId, manifestRef, offset)) {
+						setCameraState(camId, 'canvas');
+					}
+				});
+			});
+		}, debounceMs);
+	}
 }
 
 // --- SPA Navigational Hooks ---
@@ -614,9 +1247,11 @@ function openCameraPage(camId) {
 	document.getElementById('dashboard-view').style.display = 'none';
 	document.getElementById('camera-view').style.display = 'flex';
 
-	// 2. Pause and stop loading dashboard HLS players to free up network/CPU for the single camera
+	// 2. Pause and stop loading dashboard HLS players and snapshot loops to free up network/CPU
 	activeCameras.forEach(id => {
 		clearCameraReconnectTimer(id);
+		clearCameraStaggerTimer(id);
+		stopCameraSnapshotLoop(id);
 		const videoEl = document.getElementById(`video-${id}`);
 		if (videoEl && !videoEl.paused) {
 			videoEl.pause();
@@ -648,54 +1283,171 @@ window.closeCameraPage = function() {
 	}
 };
 
-function resetIndividualCamera(camId) {
+function startHlsLiveForCamera(camId) {
 	const videoEl = document.getElementById(`video-${camId}`);
 	if (!videoEl) return;
+
+	const hadNativeSrc = videoEl.hasAttribute('src') && !hlsPlayers[camId];
+	destroyHlsPlayer(camId);
+	delete videoEl.dataset.clipUrl;
 
 	setCameraState(camId, 'video');
 	cameraWatchdog.lastTime[camId] = -1;
 	cameraWatchdog.freezeCount[camId] = 0;
 
-	destroyHlsPlayer(camId);
-	delete videoEl.dataset.clipUrl;
+	videoEl.muted = true;
+	videoEl.playsInline = true;
+	videoEl.autoplay = true;
 
-	videoEl.pause();
-	videoEl.removeAttribute('src');
-	videoEl.load();
+	if (hadNativeSrc) {
+		videoEl.pause();
+		videoEl.removeAttribute('src');
+		videoEl.load();
+	}
 
-	const freshPlaylistUrl = `${baseDir}/${camId}/stream.m3u8?t=${Date.now()}`;
+	if (window.innerWidth <= 800 && !isCameraVisibleInViewport(camId)) {
+		return;
+	}
+
+	const usingSubStream = networkMonitor.shouldUseSubStream(camId, false);
+	cameraLiveMode[camId] = usingSubStream ? 'hls-sub' : 'hls-main';
+	const freshPlaylistUrl = networkMonitor.getLiveStreamUrl(baseDir, camId, false);
 
 	if (Hls.isSupported()) {
-		const hls = new Hls({
-			liveDurationInfinity: true,
-			manifestLoadingMaxRetry: 5,
-			xhrSetup: function(xhr) {
-				xhr.withCredentials = true;
-			}
-		});
+		const hls = new Hls(networkMonitor.getHlsConfig(true, false));
+		let mediaRecoveryCount = 0;
+		let lastMediaRecoveryTs = 0;
+
+		networkMonitor.attachHlsTelemetry(hls, camId);
 		hlsPlayers[camId] = hls;
-		hls.loadSource(freshPlaylistUrl);
 		hls.attachMedia(videoEl);
 
-		hls.on(Hls.Events.MANIFEST_PARSED, () => videoEl.play().catch(e => {}));
+		hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+			if (hlsPlayers[camId] !== hls) return;
+			hls.loadSource(freshPlaylistUrl);
+		});
+
+		hls.on(Hls.Events.MANIFEST_PARSED, () => {
+			if (hlsPlayers[camId] !== hls) return;
+			if (usingSubStream) {
+				networkMonitor.clearSubStreamFailure(camId);
+			}
+			setCameraState(camId, 'video');
+			videoEl.play().catch(e => {});
+		});
+
+		hls.on(Hls.Events.FRAG_BUFFERED, () => {
+			if (hlsPlayers[camId] !== hls || !isLive || isSingleCameraOpen) return;
+			setCameraState(camId, 'video');
+			if (videoEl.paused && document.visibilityState === 'visible') {
+				videoEl.play().catch(e => {});
+			}
+		});
 
 		hls.on(Hls.Events.ERROR, (event, data) => {
+			if (hlsPlayers[camId] !== hls) return;
 			if (data.fatal) {
 				if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-					hls.recoverMediaError();
-				} else if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-					handleStreamError(camId, hls);
+					const now = performance.now();
+					if (now - lastMediaRecoveryTs > 15000) {
+						mediaRecoveryCount = 0;
+					}
+					mediaRecoveryCount++;
+					lastMediaRecoveryTs = now;
+
+					if (mediaRecoveryCount === 1) {
+						hls.recoverMediaError();
+						setTimeout(() => {
+							if (hlsPlayers[camId] === hls && isLive) {
+								videoEl.play().catch(e => {});
+							}
+						}, 150);
+					} else if (mediaRecoveryCount === 2) {
+						hls.swapAudioCodec();
+						hls.recoverMediaError();
+						setTimeout(() => {
+							if (hlsPlayers[camId] === hls && isLive) {
+								videoEl.play().catch(e => {});
+							}
+						}, 150);
+					} else {
+						handleStreamError(camId, hls, usingSubStream);
+					}
 				} else {
-					handleStreamError(camId, hls);
+					handleStreamError(camId, hls, usingSubStream);
 				}
 			}
 		});
 
 	} else if (videoEl.canPlayType('application/vnd.apple.mpegurl')) {
 		videoEl.src = freshPlaylistUrl;
-		videoEl.onloadedmetadata = () => videoEl.play().catch(e => {});
-		videoEl.onerror = () => handleStreamError(camId, null);
+		videoEl.onloadedmetadata = () => {
+			if (usingSubStream) {
+				networkMonitor.clearSubStreamFailure(camId);
+			}
+			setCameraState(camId, 'video');
+			videoEl.play().catch(e => {});
+		};
+		videoEl.onerror = () => handleStreamError(camId, null, usingSubStream);
 	}
+}
+
+function resetIndividualCamera(camId) {
+	const videoEl = document.getElementById(`video-${camId}`);
+	if (!videoEl) return;
+
+	if (isLive && networkMonitor.shouldUseSnapshotGrid(activeCameras.length) && !cameraSnapshotFailed[camId]) {
+		destroyHlsPlayer(camId);
+		delete videoEl.dataset.clipUrl;
+		if (videoEl.hasAttribute('src')) {
+			videoEl.pause();
+			videoEl.removeAttribute('src');
+			videoEl.load();
+		}
+		fetchAndRenderLiveSnapshot(camId);
+		return;
+	}
+
+	startHlsLiveForCamera(camId);
+}
+
+function reconcileCamerasForNetworkTier(forceResetAll = false) {
+	if (!isLive || isSingleCameraOpen || document.visibilityState !== 'visible') return;
+
+	activeCameras.forEach((camId, idx) => {
+		const desiredMode = getDesiredCameraLiveMode(camId);
+		const currentMode = cameraLiveMode[camId] || 'none';
+		const videoEl = document.getElementById(`video-${camId}`);
+
+		if (!forceResetAll && desiredMode === currentMode) {
+			if (desiredMode === 'snapshot') {
+				if (!cameraSnapshotTimers[camId] && !cameraSnapshotInFlight[camId]) {
+					fetchAndRenderLiveSnapshot(camId);
+				}
+				return;
+			}
+			if (hlsPlayers[camId] && videoEl) {
+				setCameraState(camId, 'video');
+				if (videoEl.paused) {
+					videoEl.play().catch(e => {});
+				}
+				return;
+			}
+		}
+
+		clearCameraStaggerTimer(camId);
+		const delay = idx * 60;
+		if (delay === 0) {
+			resetIndividualCamera(camId);
+		} else {
+			cameraStaggerTimers[camId] = setTimeout(() => {
+				delete cameraStaggerTimers[camId];
+				if (isLive && !isSingleCameraOpen && document.visibilityState === 'visible') {
+					resetIndividualCamera(camId);
+				}
+			}, delay);
+		}
+	});
 }
 
 function returnToLive() {
@@ -711,6 +1463,8 @@ function returnToLive() {
 		clearInterval(playbackInterval);
 		playbackInterval = null;
 	}
+
+	networkMonitor.resetAfterWake(10000);
 
 	playBtn.innerText = "▶ Play";
 	playBtn.disabled = true;
@@ -756,8 +1510,23 @@ function returnToLive() {
 	}
 
 	if (!isSingleCameraOpen) {
-		activeCameras.forEach(camId => {
-			resetIndividualCamera(camId);
+		activeCameras.forEach((camId, idx) => {
+			delete cameraSnapshotFailed[camId];
+			cameraSnapshot404Count[camId] = 0;
+			networkMonitor.clearSubStreamFailure(camId);
+			clearCameraStaggerTimer(camId);
+
+			const delay = idx * 80;
+			if (delay === 0) {
+				resetIndividualCamera(camId);
+			} else {
+				cameraStaggerTimers[camId] = setTimeout(() => {
+					delete cameraStaggerTimers[camId];
+					if (isLive && !isSingleCameraOpen && document.visibilityState === 'visible') {
+						resetIndividualCamera(camId);
+					}
+				}, delay);
+			}
 		});
 	}
 }
@@ -785,7 +1554,11 @@ scrubber.addEventListener('input', (e) => {
 	const targetSeconds = parseInt(e.target.value, 10);
 	timeLabel.innerText = secondsToTimeStr(targetSeconds);
 
-	updateCamerasToScrubber(targetSeconds, true);
+	if (scrubRafId) cancelAnimationFrame(scrubRafId);
+	scrubRafId = requestAnimationFrame(() => {
+		scrubRafId = null;
+		updateCamerasToScrubber(targetSeconds, true);
+	});
 
 	const scrubberX = (targetSeconds / 86400) * timelineContent.clientWidth;
 	const buffer = 50;
@@ -798,6 +1571,10 @@ scrubber.addEventListener('input', (e) => {
 
 scrubber.addEventListener('change', (e) => {
 	isScrubbing = false;
+	if (scrubRafId) {
+		cancelAnimationFrame(scrubRafId);
+		scrubRafId = null;
+	}
 	const targetSeconds = parseInt(e.target.value, 10);
 	updateCamerasToScrubber(targetSeconds, false);
 });
@@ -847,6 +1624,7 @@ liveBtn.addEventListener('click', () => {
 
 document.addEventListener("visibilitychange", () => {
 	if (document.visibilityState === "visible") {
+		networkMonitor.resetAfterWake(10000);
 		if (!isSingleCameraOpen) {
 			if (isLive) {
 				returnToLive();
@@ -878,10 +1656,44 @@ document.addEventListener("visibilitychange", () => {
 	}
 });
 
+// Handle returning from another desktop application when the browser tab stayed 'visible'
+window.addEventListener("focus", () => {
+	if (document.visibilityState !== "visible" || isSingleCameraOpen || !isLive) return;
+	networkMonitor.resetAfterWake(8000);
+
+	activeCameras.forEach(camId => {
+		if (!isCameraVisibleInViewport(camId)) return;
+		const desiredMode = getDesiredCameraLiveMode(camId);
+		if (desiredMode === 'snapshot') {
+			if (!cameraSnapshotTimers[camId] && !cameraSnapshotInFlight[camId]) {
+				fetchAndRenderLiveSnapshot(camId);
+			}
+			return;
+		}
+
+		const videoEl = document.getElementById(`video-${camId}`);
+		const hls = hlsPlayers[camId];
+		if (!hls || !videoEl || videoEl.error) {
+			resetIndividualCamera(camId);
+			return;
+		}
+
+		setCameraState(camId, 'video');
+		if (hls.liveSyncPosition && videoEl.currentTime > 0 && (hls.liveSyncPosition - videoEl.currentTime) > 12) {
+			videoEl.currentTime = hls.liveSyncPosition;
+		}
+		if (videoEl.paused) {
+			videoEl.play().catch(() => {
+				resetIndividualCamera(camId);
+			});
+		}
+	});
+});
+
 document.addEventListener('click', (e) => {
 	const popup = document.getElementById('calendar-popup');
 	const dateBtn = document.getElementById('global-date');
-	if (popup.classList.contains('visible') && !popup.contains(e.target) && !dateBtn.contains(e.target)) {
+	if (popup && dateBtn && popup.classList.contains('visible') && !popup.contains(e.target) && !dateBtn.contains(e.target)) {
 		popup.classList.remove('visible');
 	}
 });
@@ -916,7 +1728,51 @@ function adjustGridLayout() {
 
 window.addEventListener('resize', adjustGridLayout);
 
+function ensureIntersectionObserver() {
+	if (cardIntersectionObserver || !('IntersectionObserver' in window)) return;
+	cardIntersectionObserver = new IntersectionObserver((entries) => {
+		entries.forEach(entry => {
+			const cardId = entry.target.id || '';
+			const camId = cardId.replace('card-', '');
+			if (!camId) return;
+
+			if (entry.isIntersecting) {
+				visibleCameras.add(camId);
+				if (isLive && !isSingleCameraOpen && document.visibilityState === 'visible') {
+					if (networkMonitor.shouldUseSnapshotGrid(activeCameras.length) && !cameraSnapshotFailed[camId]) {
+						if (!cameraSnapshotTimers[camId] && !cameraSnapshotInFlight[camId]) {
+							fetchAndRenderLiveSnapshot(camId);
+						}
+					} else if (!hlsPlayers[camId]) {
+						startHlsLiveForCamera(camId);
+					} else {
+						const videoEl = document.getElementById(`video-${camId}`);
+						setCameraState(camId, 'video');
+						hlsPlayers[camId].startLoad();
+						if (videoEl && videoEl.paused) videoEl.play().catch(e => {});
+					}
+				}
+			} else {
+				visibleCameras.delete(camId);
+				if (window.innerWidth <= 800 && isLive && !isSingleCameraOpen) {
+					stopCameraSnapshotLoop(camId);
+					if (hlsPlayers[camId]) {
+						hlsPlayers[camId].stopLoad();
+						const videoEl = document.getElementById(`video-${camId}`);
+						if (videoEl && !videoEl.paused) videoEl.pause();
+					}
+				}
+			}
+		});
+	}, {
+		root: null,
+		rootMargin: '120px 0px',
+		threshold: 0.05
+	});
+}
+
 function createCameraDOM(camId) {
+	ensureIntersectionObserver();
 	const grid = document.getElementById('grid');
 	const card = document.createElement('div');
 	card.className = 'camera-card state-video';
@@ -929,7 +1785,7 @@ function createCameraDOM(camId) {
           <span class="camera-title" style="color: ${camColor};">${camId}</span>
        </div>
        <canvas id="canvas-${camId}" class="snapshot-canvas"></canvas>
-       <video id="video-${camId}" muted playsinline preload="none"></video>
+       <video id="video-${camId}" muted playsinline autoplay preload="none"></video>
        <div class="no-video-overlay" id="overlay-${camId}">
           <div>No Motion Detected</div>
        </div>
@@ -939,6 +1795,10 @@ function createCameraDOM(camId) {
 
 	grid.appendChild(card);
 	activeCameras.push(camId);
+	visibleCameras.add(camId);
+	if (cardIntersectionObserver) {
+		cardIntersectionObserver.observe(card);
+	}
 	adjustGridLayout();
 
 	resetIndividualCamera(camId);
@@ -950,6 +1810,9 @@ async function discoverCameras() {
 		if (response.ok) {
 			const data = await response.json();
 			const count = data.count || 1;
+			if (data.subStreams) {
+				window.cameraSubStreams = data.subStreams;
+			}
 
 			CAMERA_COLORS = [];
 			for (let i = 0; i < count; i++) {
@@ -980,8 +1843,21 @@ setInterval(() => {
 	if (!isLive || isSingleCameraOpen || document.visibilityState === "hidden") return;
 
 	activeCameras.forEach(camId => {
+		if (!isCameraVisibleInViewport(camId)) return;
+
+		// Ensure snapshot loop stays alive when in snapshot grid mode
+		if (networkMonitor.shouldUseSnapshotGrid(activeCameras.length) && !cameraSnapshotFailed[camId]) {
+			if (!cameraSnapshotTimers[camId] && !cameraSnapshotInFlight[camId]) {
+				fetchAndRenderLiveSnapshot(camId);
+			}
+			return;
+		}
+
 		const videoEl = document.getElementById(`video-${camId}`);
-		if (!videoEl || videoEl.paused) return;
+		if (!videoEl) return;
+
+		// Ensure card is displaying the video element when in HLS mode
+		setCameraState(camId, 'video');
 
 		if (cameraWatchdog.lastTime[camId] === undefined) {
 			cameraWatchdog.lastTime[camId] = -1;
@@ -990,11 +1866,32 @@ setInterval(() => {
 			cameraWatchdog.freezeCount[camId] = 0;
 		}
 
+		// If the player is missing and not waiting on a reconnect/stagger timer, restart it
+		if (!hlsPlayers[camId] && !videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+			if (!cameraReconnectTimers[camId] && !cameraStaggerTimers[camId]) {
+				resetIndividualCamera(camId);
+			}
+			return;
+		}
+
+		// Do not ignore paused live videos; attempt to resume first, then reset if still stuck
+		if (videoEl.paused) {
+			cameraWatchdog.freezeCount[camId]++;
+			videoEl.play().catch(e => {});
+			if (cameraWatchdog.freezeCount[camId] >= 2) {
+				console.warn(`[Watchdog] Camera ${camId} remained paused in live mode. Resetting individually...`);
+				resetIndividualCamera(camId);
+				cameraWatchdog.freezeCount[camId] = 0;
+			}
+			return;
+		}
+
 		if (videoEl.currentTime === cameraWatchdog.lastTime[camId]) {
 			cameraWatchdog.freezeCount[camId]++;
 
 			if (cameraWatchdog.freezeCount[camId] >= 2) {
 				console.warn(`[Watchdog] Camera ${camId} appears frozen. Resetting individually...`);
+				networkMonitor.recordStall();
 				resetIndividualCamera(camId);
 				cameraWatchdog.freezeCount[camId] = 0;
 			}
@@ -1007,11 +1904,22 @@ setInterval(() => {
 }, 4000);
 
 document.addEventListener('DOMContentLoaded', async () => {
+	networkMonitor.init();
+
+	networkMonitor.onChange((tier, forced) => {
+		if (isLive && !isSingleCameraOpen && document.visibilityState === 'visible') {
+			reconcileCamerasForNetworkTier(Boolean(forced));
+		}
+	});
+
 	try {
 		const response = await fetch('/basedir', { credentials: 'include' });
 		if (response.ok) {
 			const data = await response.json();
 			baseDir = data.baseDir || './cameras';
+			if (data.subStreams) {
+				window.cameraSubStreams = data.subStreams;
+			}
 		}
 	} catch (e) {
 		console.error("Failed to load base configuration:", e);
@@ -1047,10 +1955,8 @@ document.addEventListener('DOMContentLoaded', async () => {
 				iconShow.style.display = 'none';
 			}
 
-			// Dispatch resize event to ensure grids calculate accurate layout parameters
 			window.dispatchEvent(new Event('resize'));
 
-			// Center timeline gracefully if layout shift occurred
 			if (!isHidden) {
 				setTimeout(centerViewportOnScrubber, 50);
 			}
