@@ -36,6 +36,7 @@ This is human-written.
 19. Implemented as SPA.
 20. Toolbar can be hidden/displayed via button for distraction-free maximised camera view.
 21. General reliability and robustness improvement.
+22. Use camera sub_url if available for live.jpg snapshots and motion detection.
 
 ## Features
 
