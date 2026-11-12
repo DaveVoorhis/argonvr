@@ -606,10 +606,10 @@ class CameraStream:
         logger.info(f"\n--- [{timestamp}] {message} ---")
 
     def _clean_stale_ramdisk_segments(self):
-        """Removes leftover main HLS segments without deleting live.jpg or sub-stream files."""
+        """Removes leftover main HLS segments without deleting live.jpg (or its atomic temp file) or sub-stream files."""
         try:
             for f in os.listdir(self.cam_dir):
-                if f.startswith('stream_sub') or f == 'live.jpg':
+                if f.startswith(('stream_sub', 'live.jpg')):
                     continue
                 if f.endswith(('.ts', '.m3u8', '.tmp', '.jpg')):
                     try:
@@ -756,7 +756,7 @@ class CameraStream:
 
     async def start_sub_pipeline(self):
         """Dedicated supervisor loop that remuxes the camera's RTSP sub-stream into stream_sub.m3u8
-        and drives motion detection."""
+        and drives both motion detection and live.jpg snapshots."""
         if not self.sub_rtsp_url:
             return
 
@@ -770,13 +770,14 @@ class CameraStream:
             first_run = False
 
             self._clean_stale_sub_segments()
-            print(f"[📱] Starting low-bandwidth sub-stream pipeline (HLS + Motion) for {self.cam_id}...")
-            self.write_log_header(self.pipeline_logger, "STARTING SUB-STREAM PIPELINE (HLS + MOTION)")
+            print(f"[📱] Starting low-bandwidth sub-stream pipeline (HLS + Motion + Snapshot) for {self.cam_id}...")
+            self.write_log_header(self.pipeline_logger, "STARTING SUB-STREAM PIPELINE (HLS + MOTION + SNAPSHOT)")
             self.last_sub_output_time = time.time()
 
             sub_filter_graph = (
-                f"[0:v]fps=2,scale=320:-2,"
-                f"select='gt(scene,{self.motion_threshold})',metadata=mode=print[motion_out]"
+                f"[0:v]fps=2,scale=320:-2,split=2[motion_in][thumb_in];"
+                f"[motion_in]select='gt(scene,{self.motion_threshold})',metadata=mode=print[motion_out];"
+                f"[thumb_in]fps={LIVE_SNAPSHOT_FPS}[thumb_out]"
             )
 
             cmd = [
@@ -790,7 +791,11 @@ class CameraStream:
                 f"{self.cam_dir}/stream_sub.m3u8",
 
                 "-filter_complex", sub_filter_graph,
-                "-map", "[motion_out]", "-f", "null", "-"
+                "-map", "[motion_out]", "-f", "null", "-",
+                "-map", "[thumb_out]", "-f", "image2",
+                "-update", "1", "-atomic_writing", "1",
+                "-q:v", str(LIVE_SNAPSHOT_QUALITY),
+                "-y", f"{self.cam_dir}/live.jpg"
             ]
 
             last_stderr_line = ""
@@ -822,9 +827,10 @@ class CameraStream:
                     self.sub_proc = None
 
     async def start_master_pipeline(self):
-        """Persistent supervisor loop that pulls the main RTSP stream for HLS, Live Snapshots,
-        and (when sub_url is not configured) Motion Detection."""
-        use_sub_for_motion = bool(self.sub_rtsp_url)
+        """Persistent supervisor loop that pulls the main RTSP stream for HLS.
+        When sub_url is configured, runs purely with -c:v copy (zero video decoding).
+        When sub_url is not configured, also drives Motion Detection and Live Snapshots."""
+        use_sub_pipeline = bool(self.sub_rtsp_url)
         first_run = True
 
         while True:
@@ -838,25 +844,17 @@ class CameraStream:
             print(f"[📷] Starting master pipeline for {self.cam_id}...")
             self.last_pipeline_output_time = time.time()
 
-            if use_sub_for_motion:
-                self.write_log_header(self.pipeline_logger, "STARTING MASTER PIPELINE (HLS + SNAPSHOT)")
-                filter_graph = f"[0:v]fps={LIVE_SNAPSHOT_FPS},scale=320:-2[thumb_out]"
+            if use_sub_pipeline:
+                self.write_log_header(self.pipeline_logger, "STARTING MASTER PIPELINE (HLS COPY ONLY)")
                 cmd = [
                     "ffmpeg", "-rtsp_transport", "tcp",
                     "-i", self.rtsp_url,
-
                     "-map", "0:v", "-c:v", "copy", "-an",
                     "-f", "hls", "-hls_time", "2", "-hls_list_size", "10",
                     "-hls_flags", "delete_segments+independent_segments+temp_file",
                     "-strftime", "1",
                     "-hls_segment_filename", f"{self.cam_dir}/stream_%Y%m%d_%H%M%S.ts",
-                    f"{self.cam_dir}/stream.m3u8",
-
-                    "-filter_complex", filter_graph,
-                    "-map", "[thumb_out]", "-f", "image2",
-                    "-update", "1", "-atomic_writing", "1",
-                    "-q:v", str(LIVE_SNAPSHOT_QUALITY),
-                    "-y", f"{self.cam_dir}/live.jpg"
+                    f"{self.cam_dir}/stream.m3u8"
                 ]
             else:
                 self.write_log_header(self.pipeline_logger, "STARTING UNIFIED MASTER PIPELINE (HLS + MOTION + SNAPSHOT)")
@@ -898,7 +896,7 @@ class CameraStream:
                         last_stderr_line = decoded_line
                         self.pipeline_logger.info(decoded_line)
 
-                    if not use_sub_for_motion and "frame:" in decoded_line:
+                    if not use_sub_pipeline and "frame:" in decoded_line:
                         await self.handle_motion_detected(from_sub=False)
 
                 await self.master_proc.wait()
