@@ -606,10 +606,10 @@ class CameraStream:
         logger.info(f"\n--- [{timestamp}] {message} ---")
 
     def _clean_stale_ramdisk_segments(self):
-        """Removes leftover main HLS segments without deleting live.jpg or sub-stream files."""
+        """Removes leftover main HLS segments without deleting live.jpg (or its atomic temp file) or sub-stream files."""
         try:
             for f in os.listdir(self.cam_dir):
-                if f.startswith('stream_sub') or f == 'live.jpg':
+                if f.startswith(('stream_sub', 'live.jpg')):
                     continue
                 if f.endswith(('.ts', '.m3u8', '.tmp', '.jpg')):
                     try:
@@ -642,6 +642,69 @@ class CameraStream:
             if not os.path.exists(staging_path) and not os.path.exists(queued_path):
                 return staging_path
             ts += 1
+
+    async def handle_motion_detected(self, from_sub=False):
+        """Updates motion timestamp and initiates high-res raw stream capture from stream.m3u8 if not already recording."""
+        self.last_motion = time.time()
+
+        if self.recording:
+            return
+
+        print(f"[🚨] Motion detected on {self.cam_id}! Capturing raw stream.")
+        self.recording = True
+        self.record_start_time = time.time()
+        self.current_output_file = self._get_unique_staging_filepath()
+
+        self.write_log_header(self.recording_logger, "STARTING RAW STREAM CAPTURE")
+
+        m3u8_path = f"{self.cam_dir}/stream.m3u8"
+        wait_time = 0.0
+        while not os.path.exists(m3u8_path) and wait_time < 10.0:
+            await asyncio.sleep(0.5)
+            wait_time += 0.5
+            now = time.time()
+            if from_sub:
+                self.last_sub_output_time = now
+            else:
+                self.last_pipeline_output_time = now
+
+        if not os.path.exists(m3u8_path):
+            print(f"[⚠️] Aborting capture on {self.cam_id}: Master stream not ready.")
+            self.write_log_header(self.recording_logger, "ABORTED: m3u8 file was never created.")
+            self.recording = False
+            return
+
+        record_cmd = [
+            "ffmpeg",
+            "-i", m3u8_path,
+            "-map", "0:v",
+            "-c:v", "copy",
+            "-an",
+            "-y", self.current_output_file
+        ]
+
+        try:
+            self.record_proc = await asyncio.create_subprocess_exec(
+                *record_cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE
+            )
+            active_processes.add(self.record_proc)
+
+            async def drain_record_stderr(proc, logger):
+                try:
+                    async for log_line in read_lines_cr_lf(proc.stderr):
+                        if not log_line.startswith("frame="):
+                            logger.info(log_line)
+                except Exception:
+                    pass
+
+            asyncio.create_task(drain_record_stderr(self.record_proc, self.recording_logger))
+        except Exception as e:
+            print(f"[❌] Failed to start recording process on {self.cam_id}: {e}")
+            self.recording = False
+            self.record_proc = None
 
     async def finalize_recording(self, proc, filepath):
         """Finalizes the raw capture file and moves it to the encoding queue."""
@@ -692,7 +755,8 @@ class CameraStream:
                 print(f"[❌] Failed to move capture {filepath}: {e}")
 
     async def start_sub_pipeline(self):
-        """Dedicated lightweight supervisor loop that remuxes the camera's RTSP sub-stream into stream_sub.m3u8."""
+        """Dedicated supervisor loop that remuxes the camera's RTSP sub-stream into stream_sub.m3u8
+        and drives both motion detection and live.jpg snapshots."""
         if not self.sub_rtsp_url:
             return
 
@@ -706,9 +770,15 @@ class CameraStream:
             first_run = False
 
             self._clean_stale_sub_segments()
-            print(f"[📱] Starting low-bandwidth sub-stream pipeline for {self.cam_id}...")
-            self.write_log_header(self.pipeline_logger, "STARTING SUB-STREAM HLS PIPELINE")
+            print(f"[📱] Starting low-bandwidth sub-stream pipeline (HLS + Motion + Snapshot) for {self.cam_id}...")
+            self.write_log_header(self.pipeline_logger, "STARTING SUB-STREAM PIPELINE (HLS + MOTION + SNAPSHOT)")
             self.last_sub_output_time = time.time()
+
+            sub_filter_graph = (
+                f"[0:v]fps=2,scale=320:-2,split=2[motion_in][thumb_in];"
+                f"[motion_in]select='gt(scene,{self.motion_threshold})',metadata=mode=print[motion_out];"
+                f"[thumb_in]fps={LIVE_SNAPSHOT_FPS}[thumb_out]"
+            )
 
             cmd = [
                 "ffmpeg", "-rtsp_transport", "tcp",
@@ -718,7 +788,14 @@ class CameraStream:
                 "-hls_flags", "delete_segments+independent_segments+temp_file",
                 "-strftime", "1",
                 "-hls_segment_filename", f"{self.cam_dir}/stream_sub_%Y%m%d_%H%M%S.ts",
-                f"{self.cam_dir}/stream_sub.m3u8"
+                f"{self.cam_dir}/stream_sub.m3u8",
+
+                "-filter_complex", sub_filter_graph,
+                "-map", "[motion_out]", "-f", "null", "-",
+                "-map", "[thumb_out]", "-f", "image2",
+                "-update", "1", "-atomic_writing", "1",
+                "-q:v", str(LIVE_SNAPSHOT_QUALITY),
+                "-y", f"{self.cam_dir}/live.jpg"
             ]
 
             last_stderr_line = ""
@@ -734,6 +811,9 @@ class CameraStream:
                         last_stderr_line = decoded_line
                         self.pipeline_logger.info(f"[SUB] {decoded_line}")
 
+                    if "frame:" in decoded_line:
+                        await self.handle_motion_detected(from_sub=True)
+
                 await self.sub_proc.wait()
                 if self.sub_proc.returncode != 0:
                     print(f"[⚠️] Sub-stream FFmpeg for {self.cam_id} exited (code {self.sub_proc.returncode}): {last_stderr_line}")
@@ -747,8 +827,12 @@ class CameraStream:
                     self.sub_proc = None
 
     async def start_master_pipeline(self):
-        """Persistent supervisor loop that pulls the main RTSP stream for HLS, Motion, and Live Snapshots."""
+        """Persistent supervisor loop that pulls the main RTSP stream for HLS.
+        When sub_url is configured, runs purely with -c:v copy (zero video decoding).
+        When sub_url is not configured, also drives Motion Detection and Live Snapshots."""
+        use_sub_pipeline = bool(self.sub_rtsp_url)
         first_run = True
+
         while True:
             if not first_run:
                 await asyncio.sleep(2)
@@ -758,33 +842,45 @@ class CameraStream:
                 self._clean_stale_ramdisk_segments()
 
             print(f"[📷] Starting master pipeline for {self.cam_id}...")
-            self.write_log_header(self.pipeline_logger, "STARTING UNIFIED MASTER PIPELINE (HLS + MOTION + SNAPSHOT)")
             self.last_pipeline_output_time = time.time()
 
-            filter_graph = (
-                f"[0:v]fps=2,scale=320:-2,split=2[motion_in][thumb_in];"
-                f"[motion_in]select='gt(scene,{self.motion_threshold})',metadata=mode=print[motion_out];"
-                f"[thumb_in]fps={LIVE_SNAPSHOT_FPS}[thumb_out]"
-            )
+            if use_sub_pipeline:
+                self.write_log_header(self.pipeline_logger, "STARTING MASTER PIPELINE (HLS COPY ONLY)")
+                cmd = [
+                    "ffmpeg", "-rtsp_transport", "tcp",
+                    "-i", self.rtsp_url,
+                    "-map", "0:v", "-c:v", "copy", "-an",
+                    "-f", "hls", "-hls_time", "2", "-hls_list_size", "10",
+                    "-hls_flags", "delete_segments+independent_segments+temp_file",
+                    "-strftime", "1",
+                    "-hls_segment_filename", f"{self.cam_dir}/stream_%Y%m%d_%H%M%S.ts",
+                    f"{self.cam_dir}/stream.m3u8"
+                ]
+            else:
+                self.write_log_header(self.pipeline_logger, "STARTING UNIFIED MASTER PIPELINE (HLS + MOTION + SNAPSHOT)")
+                filter_graph = (
+                    f"[0:v]fps=2,scale=320:-2,split=2[motion_in][thumb_in];"
+                    f"[motion_in]select='gt(scene,{self.motion_threshold})',metadata=mode=print[motion_out];"
+                    f"[thumb_in]fps={LIVE_SNAPSHOT_FPS}[thumb_out]"
+                )
+                cmd = [
+                    "ffmpeg", "-rtsp_transport", "tcp",
+                    "-i", self.rtsp_url,
 
-            cmd = [
-                "ffmpeg", "-rtsp_transport", "tcp",
-                "-i", self.rtsp_url,
+                    "-map", "0:v", "-c:v", "copy", "-an",
+                    "-f", "hls", "-hls_time", "2", "-hls_list_size", "10",
+                    "-hls_flags", "delete_segments+independent_segments+temp_file",
+                    "-strftime", "1",
+                    "-hls_segment_filename", f"{self.cam_dir}/stream_%Y%m%d_%H%M%S.ts",
+                    f"{self.cam_dir}/stream.m3u8",
 
-                "-map", "0:v", "-c:v", "copy", "-an",
-                "-f", "hls", "-hls_time", "2", "-hls_list_size", "10",
-                "-hls_flags", "delete_segments+independent_segments+temp_file",
-                "-strftime", "1",
-                "-hls_segment_filename", f"{self.cam_dir}/stream_%Y%m%d_%H%M%S.ts",
-                f"{self.cam_dir}/stream.m3u8",
-
-                "-filter_complex", filter_graph,
-                "-map", "[motion_out]", "-f", "null", "-",
-                "-map", "[thumb_out]", "-f", "image2",
-                "-update", "1", "-atomic_writing", "1",
-                "-q:v", str(LIVE_SNAPSHOT_QUALITY),
-                "-y", f"{self.cam_dir}/live.jpg"
-            ]
+                    "-filter_complex", filter_graph,
+                    "-map", "[motion_out]", "-f", "null", "-",
+                    "-map", "[thumb_out]", "-f", "image2",
+                    "-update", "1", "-atomic_writing", "1",
+                    "-q:v", str(LIVE_SNAPSHOT_QUALITY),
+                    "-y", f"{self.cam_dir}/live.jpg"
+                ]
 
             last_stderr_line = ""
             try:
@@ -800,56 +896,8 @@ class CameraStream:
                         last_stderr_line = decoded_line
                         self.pipeline_logger.info(decoded_line)
 
-                    if "frame:" in decoded_line:
-                        self.last_motion = time.time()
-
-                        if not self.recording:
-                            print(f"[🚨] Motion detected on {self.cam_id}! Capturing raw stream.")
-                            self.recording = True
-                            self.record_start_time = time.time()
-                            self.current_output_file = self._get_unique_staging_filepath()
-
-                            self.write_log_header(self.recording_logger, "STARTING RAW STREAM CAPTURE")
-
-                            m3u8_path = f"{self.cam_dir}/stream.m3u8"
-                            wait_time = 0.0
-                            while not os.path.exists(m3u8_path) and wait_time < 10.0:
-                                await asyncio.sleep(0.5)
-                                wait_time += 0.5
-                                self.last_pipeline_output_time = time.time()
-
-                            if not os.path.exists(m3u8_path):
-                                print(f"[⚠️] Aborting capture on {self.cam_id}: Master stream not ready.")
-                                self.write_log_header(self.recording_logger, "ABORTED: m3u8 file was never created.")
-                                self.recording = False
-                                continue
-
-                            record_cmd = [
-                                "ffmpeg",
-                                "-i", m3u8_path,
-                                "-map", "0:v",
-                                "-c:v", "copy",
-                                "-an",
-                                "-y", self.current_output_file
-                            ]
-
-                            self.record_proc = await asyncio.create_subprocess_exec(
-                                *record_cmd,
-                                stdin=asyncio.subprocess.PIPE,
-                                stdout=asyncio.subprocess.DEVNULL,
-                                stderr=asyncio.subprocess.PIPE
-                            )
-                            active_processes.add(self.record_proc)
-
-                            async def drain_record_stderr(proc, logger):
-                                try:
-                                    async for log_line in read_lines_cr_lf(proc.stderr):
-                                        if not log_line.startswith("frame="):
-                                            logger.info(log_line)
-                                except Exception:
-                                    pass
-
-                            asyncio.create_task(drain_record_stderr(self.record_proc, self.recording_logger))
+                    if not use_sub_pipeline and "frame:" in decoded_line:
+                        await self.handle_motion_detected(from_sub=False)
 
                 await self.master_proc.wait()
                 if self.master_proc.returncode != 0:
@@ -870,6 +918,8 @@ class CameraStream:
                     self.recording = False
                     if old_proc:
                         await self.finalize_recording(old_proc, old_file)
+
+                self._clean_stale_ramdisk_segments()
 
     async def cooldown_manager(self):
         """Manages recording cooldown, chunking, and isolated process termination."""

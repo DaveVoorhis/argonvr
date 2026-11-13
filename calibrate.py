@@ -61,8 +61,10 @@ def main():
     print("\n--- ArgoNVR Calibration Tool ---")
     cam_ids = list(cameras.keys())
     for idx, cam_id in enumerate(cam_ids):
-        current_threshold = cameras[cam_id].get('motion_threshold', 'N/A')
-        print(f"[{idx + 1}] {cam_id} (Current Threshold: {current_threshold})")
+        cam_cfg = cameras[cam_id]
+        current_threshold = cam_cfg.get('motion_threshold', 'N/A')
+        stream_type = "sub_url" if cam_cfg.get('sub_url') else "url"
+        print(f"[{idx + 1}] {cam_id} (Current Threshold: {current_threshold}, Motion Source: {stream_type})")
 
     try:
         selection = int(input("\nSelect a camera to calibrate (number): ")) - 1
@@ -73,17 +75,20 @@ def main():
         sys.exit(1)
 
     selected_cam = cam_ids[selection]
-    rtsp_url = cameras[selected_cam]['url']
-    current_threshold = cameras[selected_cam].get('motion_threshold', 0.01)
+    cam_cfg = cameras[selected_cam]
+    sub_rtsp_url = cam_cfg.get('sub_url')
+    rtsp_url = sub_rtsp_url if sub_rtsp_url else cam_cfg['url']
+    stream_label = "sub-stream (sub_url)" if sub_rtsp_url else "main stream (url)"
+    current_threshold = cam_cfg.get('motion_threshold', 0.01)
 
-    print(f"\n📡 Connecting to {selected_cam}...")
+    print(f"\n📡 Connecting to {selected_cam} via {stream_label}...")
     print("👀 Watch the output below. Walk in front of the camera to see the score spike.")
     print("🛑 Press Ctrl+C when you are ready to set the new threshold.\n")
 
     cmd = [
         "ffmpeg", "-nostats", "-rtsp_transport", "tcp", "-i", rtsp_url,
         "-map", "0:v", "-an",
-        "-vf", "fps=2,scale=320:-1,select='gte(scene,0)',metadata=mode=print",
+        "-vf", "fps=2,scale=320:-2,select='gte(scene,0)',metadata=mode=print",
         "-f", "null", "-"
     ]
 
