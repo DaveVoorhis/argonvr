@@ -57,6 +57,8 @@
     const fwIndicator = document.getElementById('fw-timeline-indicator');
     const fwTimeLabel = document.getElementById('fw-time-label');
 
+    const fwBackBtn = document.getElementById('fw-btn-back');
+    const fwLiveBtn = document.getElementById('fw-btn-live');
     const scaleSelect = document.getElementById('fw-scale-select');
     const startSlider = document.getElementById('fw-start-slider');
     const endSlider = document.getElementById('fw-end-slider');
@@ -235,6 +237,22 @@
         endSlider.value = timelineEndSec;
         updateSliderLabels();
         applyTimelineRange();
+    }
+
+    if (fwBackBtn) {
+        fwBackBtn.addEventListener('click', () => {
+            if (window.closeCameraPage) {
+                window.closeCameraPage();
+            }
+        });
+    }
+
+    if (fwLiveBtn) {
+        fwLiveBtn.addEventListener('click', fwGoLive);
+    }
+
+    if (scaleSelect) {
+        scaleSelect.addEventListener('change', handleScaleChange);
     }
 
     startSlider.addEventListener('input', () => {
@@ -950,7 +968,12 @@
             window.networkMonitor.clearSubStreamFailure(camId);
         }
 
-        document.getElementById('cam-title').style.color = colorParam ? '#' + colorParam : '#3498db';
+        const camTitleEl = document.getElementById('cam-title');
+        if (colorParam) {
+            camTitleEl.style.setProperty('--cam-color', `#${colorParam}`);
+        } else {
+            camTitleEl.style.removeProperty('--cam-color');
+        }
         updateCameraHeaderBadge(false);
 
         fwIsScrubbing = false;
@@ -994,8 +1017,5 @@
         destroyFwHlsPlayer();
         snapshotCanvas.classList.remove('visible');
     };
-
-    window.fwGoLive = fwGoLive;
-    window.handleScaleChange = handleScaleChange;
 
 })(); // End SPA Isolation Wrapper

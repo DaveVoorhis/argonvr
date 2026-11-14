@@ -8,6 +8,11 @@
 	overflow: hidden;
 }
 
+#dashboard-view.hidden,
+#camera-view.hidden {
+	display: none;
+}
+
 body {
 	background: #0a0a0a;
 	margin: 0;
@@ -47,6 +52,33 @@ body {
 }
 .date-display:hover { color: #f39c12; background: rgba(255,255,255,0.1); }
 
+/* --- Network Quality Badge --- */
+#net-quality-badge {
+	background: rgba(20, 25, 35, 0.85);
+	color: #3498db;
+	border: 1px solid #3498db;
+	border-radius: 4px;
+	padding: 3px 8px;
+	font-size: 11px;
+	font-family: monospace;
+	cursor: pointer;
+	margin-left: 8px;
+	white-space: nowrap;
+	transition: border-color 0.2s, color 0.2s;
+}
+#net-quality-badge.tier-high {
+	color: #2ecc71;
+	border-color: #2ecc71;
+}
+#net-quality-badge.tier-medium {
+	color: #f39c12;
+	border-color: #f39c12;
+}
+#net-quality-badge.tier-low {
+	color: #e67e22;
+	border-color: #e67e22;
+}
+
 .calendar-popup {
 	display: none;
 	position: absolute;
@@ -82,6 +114,8 @@ body {
 	overflow: hidden;
 	background: #000;
 	grid-auto-rows: minmax(220px, 1fr);
+	grid-template-columns: repeat(var(--grid-cols, 1), 1fr);
+	grid-template-rows: repeat(var(--grid-rows, 1), 1fr);
 }
 
 .camera-card {
@@ -109,7 +143,7 @@ body {
 	font-weight: 600;
 	text-transform: uppercase;
 	font-size: 0.85rem;
-	color: #fff;
+	color: var(--cam-color, #fff);
 	text-shadow: 1px 1px 2px black;
 	margin: 0;
 }
@@ -403,6 +437,8 @@ input[type=range]:focus { outline: none; }
 		flex-grow: 1;
 		overflow-y: auto;
 		min-height: 0;
+		grid-template-columns: 1fr;
+		grid-template-rows: repeat(var(--cam-count, 1), 250px);
 	}
 	.timeline-bar {
 		height: auto;
@@ -454,6 +490,7 @@ input[type=range]:focus { outline: none; }
 	font-weight: bold;
 	font-size: 1rem;
 	text-transform: uppercase;
+	color: var(--cam-color, #3498db);
 }
 
 .video-container {
@@ -673,6 +710,18 @@ input[type=range]:focus { outline: none; }
 	background: rgba(0, 0, 0, 0.8);
 	border-color: rgba(255, 255, 255, 0.5);
 	box-shadow: 0 0 10px rgba(0,0,0,0.5);
+}
+
+#icon-show {
+	display: none;
+}
+
+body.toolbars-hidden #icon-hide {
+	display: none;
+}
+
+body.toolbars-hidden #icon-show {
+	display: block;
 }
 
 /* Drops the button to the bottom corner when toolbars are hidden */
