@@ -64,33 +64,33 @@
             </div>
         </div>
         <div class="zoom-container" title="Zoom Timeline">
-            <span class="zoom-btn" onclick="adjustZoom(-1)">−</span>
+            <span class="zoom-btn" id="zoom-out-btn">−</span>
             <input type="range" id="zoom-slider" min="1" max="144" value="1" step="1">
-            <span class="zoom-btn" onclick="adjustZoom(1)">+</span>
+            <span class="zoom-btn" id="zoom-in-btn">+</span>
         </div>
         <button class="ctrl-btn live-btn" id="btn-live">🔄 Reset</button>
         <button class="ctrl-btn warning-btn" id="btn-reboot">⚠️ Reboot</button>
 
-        <div class="date-display" id="global-date" onclick="toggleCalendar()">
+        <div class="date-display" id="global-date">
             <span>Loading...</span> 📅
         </div>
         <div class="calendar-popup" id="calendar-popup">
             <div class="cal-header">
-                <button class="cal-btn" onclick="changeMonth(-1)">◀</button>
+                <button class="cal-btn" id="cal-prev-month">◀</button>
                 <div id="cal-month-label">Month</div>
-                <button class="cal-btn" onclick="changeMonth(1)">▶</button>
+                <button class="cal-btn" id="cal-next-month">▶</button>
             </div>
             <div class="cal-grid" id="cal-grid"></div>
             <div class="cal-quick-btns">
-                <button class="cal-btn" onclick="selectQuickDate('yesterday')">Yesterday</button>
-                <button class="cal-btn" onclick="selectQuickDate('today')">Today</button>
+                <button class="cal-btn" id="cal-btn-yesterday">Yesterday</button>
+                <button class="cal-btn" id="cal-btn-today">Today</button>
             </div>
         </div>
     </div>
 </div>
 
 <!-- SINGLE CAMERA VIEW (Initially Hidden) -->
-<div id="camera-view" style="display: none;">
+<div id="camera-view" class="hidden">
     <div class="video-container">
         <canvas id="snapshot-canvas" class="snapshot-canvas"></canvas>
         <video id="fw-video" muted playsinline preload="auto"></video>
@@ -109,12 +109,12 @@
     </div>
 
     <div class="fw-controls" id="fw-controls">
-        <button class="back-btn" onclick="closeCameraPage()">◀ Back</button>
+        <button class="back-btn" id="fw-btn-back">◀ Back</button>
         <span id="cam-title" class="cam-title">CAM</span>
-        <button class="ctrl-btn live-btn" id="fw-btn-live" onclick="fwGoLive()">Go Live</button>
+        <button class="ctrl-btn live-btn" id="fw-btn-live">Go Live</button>
         <div class="fw-time-display time-live" id="fw-time-label">LIVE</div>
 
-        <select id="fw-scale-select" class="ctrl-btn ctrl-select" onchange="handleScaleChange()">
+        <select id="fw-scale-select" class="ctrl-btn ctrl-select">
             <option value="1" selected>1 Hour</option>
             <option value="2">2 Hours</option>
             <option value="4">4 Hours</option>
@@ -139,7 +139,7 @@
 <!-- Floating Toolbar Toggle -->
 <button id="toolbar-toggle" class="toolbar-toggle-btn" title="Toggle Toolbars">
     <svg id="icon-hide" viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
-    <svg id="icon-show" viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round" style="display: none;"><polyline points="18 15 12 9 6 15"></polyline></svg>
+    <svg id="icon-show" viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"></polyline></svg>
 </button>
 
 <script src="script.js"></script>

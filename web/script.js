@@ -88,19 +88,6 @@ const networkMonitor = {
 		badge.id = 'net-quality-badge';
 		badge.type = 'button';
 		badge.title = 'Click to cycle Bandwidth Mode (Auto / Low Data / High Quality)';
-		badge.style.cssText = [
-			'background: rgba(20, 25, 35, 0.85)',
-			'color: #ecf0f1',
-			'border: 1px solid rgba(255, 255, 255, 0.2)',
-			'border-radius: 4px',
-			'padding: 3px 8px',
-			'font-size: 11px',
-			'font-family: monospace',
-			'cursor: pointer',
-			'margin-left: 8px',
-			'white-space: nowrap',
-			'transition: border-color 0.2s, color 0.2s'
-		].join(';');
 
 		badge.addEventListener('click', (e) => {
 			e.stopPropagation();
@@ -125,16 +112,12 @@ const networkMonitor = {
 
 	updateBadgeUI() {
 		if (!this.badgeEl) return;
-		const colors = {
-			high: '#2ecc71',
-			medium: '#f39c12',
-			low: '#e67e22'
-		};
-		const color = colors[this.tier] || '#3498db';
 		const modeLabel = this.modeOverride === 'auto' ? `AUTO:${this.tier.toUpperCase()}` : `LOCK:${this.modeOverride.toUpperCase()}`;
 		const mbpsStr = this.downlinkMbps >= 10 ? Math.round(this.downlinkMbps) : this.downlinkMbps.toFixed(1);
-		this.badgeEl.style.borderColor = color;
-		this.badgeEl.style.color = color;
+		this.badgeEl.classList.remove('tier-high', 'tier-medium', 'tier-low');
+		if (this.tier) {
+			this.badgeEl.classList.add(`tier-${this.tier}`);
+		}
 		this.badgeEl.innerText = `${modeLabel} ${Math.round(this.rttMs)}ms ${mbpsStr}M`;
 	},
 
@@ -1051,7 +1034,7 @@ function renderCalendar() {
 		if (hasVideo) classes += " has-video";
 		if (isActive) classes += " active-day";
 
-		html += `<div class="${classes}" onclick="selectDateFromCalendar('${dateStr}')">${day}</div>`;
+		html += `<div class="${classes}" data-date="${dateStr}">${day}</div>`;
 	}
 	grid.innerHTML = html;
 }
@@ -1244,8 +1227,8 @@ function openCameraPage(camId) {
 	isSingleCameraOpen = true;
 
 	// 1. Swap Views
-	document.getElementById('dashboard-view').style.display = 'none';
-	document.getElementById('camera-view').style.display = 'flex';
+	document.getElementById('dashboard-view').classList.add('hidden');
+	document.getElementById('camera-view').classList.remove('hidden');
 
 	// 2. Pause and stop loading dashboard HLS players and snapshot loops to free up network/CPU
 	activeCameras.forEach(id => {
@@ -1269,8 +1252,8 @@ function openCameraPage(camId) {
 
 window.closeCameraPage = function() {
 	isSingleCameraOpen = false;
-	document.getElementById('camera-view').style.display = 'none';
-	document.getElementById('dashboard-view').style.display = 'flex';
+	document.getElementById('camera-view').classList.add('hidden');
+	document.getElementById('dashboard-view').classList.remove('hidden');
 
 	if (window.stopCameraView) {
 		window.stopCameraView();
@@ -1703,14 +1686,6 @@ function adjustGridLayout() {
 	const count = activeCameras.length;
 	if (count === 0) return;
 
-	if (window.innerWidth <= 800) {
-		grid.style.gridTemplateColumns = '1fr';
-		grid.style.gridTemplateRows = `repeat(${count}, 250px)`;
-		grid.style.overflowY = 'auto';
-		return;
-	}
-
-	grid.style.overflowY = 'hidden';
 	let cols, rows;
 	if (count === 1) { cols = 1; rows = 1; }
 	else if (count === 2) { cols = 2; rows = 1; }
@@ -1722,8 +1697,9 @@ function adjustGridLayout() {
 		cols = Math.ceil(Math.sqrt(count));
 		rows = Math.ceil(count / cols);
 	}
-	grid.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
-	grid.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
+	grid.style.setProperty('--cam-count', count);
+	grid.style.setProperty('--grid-cols', cols);
+	grid.style.setProperty('--grid-rows', rows);
 }
 
 window.addEventListener('resize', adjustGridLayout);
@@ -1779,10 +1755,11 @@ function createCameraDOM(camId) {
 	card.id = `card-${camId}`;
 
 	const camColor = getCameraColor(camId);
+	card.style.setProperty('--cam-color', camColor);
 
 	card.innerHTML = `
        <div class="camera-header">
-          <span class="camera-title" style="color: ${camColor};">${camId}</span>
+          <span class="camera-title">${camId}</span>
        </div>
        <canvas id="canvas-${camId}" class="snapshot-canvas"></canvas>
        <video id="video-${camId}" muted playsinline autoplay preload="none"></video>
@@ -1912,6 +1889,37 @@ document.addEventListener('DOMContentLoaded', async () => {
 		}
 	});
 
+	// Bind dashboard & calendar controls
+	const zoomOutBtn = document.getElementById('zoom-out-btn');
+	if (zoomOutBtn) zoomOutBtn.addEventListener('click', () => adjustZoom(-1));
+
+	const zoomInBtn = document.getElementById('zoom-in-btn');
+	if (zoomInBtn) zoomInBtn.addEventListener('click', () => adjustZoom(1));
+
+	if (dateDisplay) dateDisplay.addEventListener('click', toggleCalendar);
+
+	const calPrevMonthBtn = document.getElementById('cal-prev-month');
+	if (calPrevMonthBtn) calPrevMonthBtn.addEventListener('click', () => changeMonth(-1));
+
+	const calNextMonthBtn = document.getElementById('cal-next-month');
+	if (calNextMonthBtn) calNextMonthBtn.addEventListener('click', () => changeMonth(1));
+
+	const calYesterdayBtn = document.getElementById('cal-btn-yesterday');
+	if (calYesterdayBtn) calYesterdayBtn.addEventListener('click', () => selectQuickDate('yesterday'));
+
+	const calTodayBtn = document.getElementById('cal-btn-today');
+	if (calTodayBtn) calTodayBtn.addEventListener('click', () => selectQuickDate('today'));
+
+	const calGrid = document.getElementById('cal-grid');
+	if (calGrid) {
+		calGrid.addEventListener('click', (e) => {
+			const dayEl = e.target.closest('.cal-day[data-date]');
+			if (dayEl) {
+				selectDateFromCalendar(dayEl.dataset.date);
+			}
+		});
+	}
+
 	try {
 		const response = await fetch('/basedir', { credentials: 'include' });
 		if (response.ok) {
@@ -1939,21 +1947,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
 	// Setup toolbar toggle
 	const toggleBtn = document.getElementById('toolbar-toggle');
-	const iconHide = document.getElementById('icon-hide');
-	const iconShow = document.getElementById('icon-show');
 
 	if (toggleBtn) {
 		toggleBtn.addEventListener('click', () => {
 			document.body.classList.toggle('toolbars-hidden');
 			const isHidden = document.body.classList.contains('toolbars-hidden');
-
-			if (isHidden) {
-				iconHide.style.display = 'none';
-				iconShow.style.display = 'block';
-			} else {
-				iconHide.style.display = 'block';
-				iconShow.style.display = 'none';
-			}
 
 			window.dispatchEvent(new Event('resize'));
 
