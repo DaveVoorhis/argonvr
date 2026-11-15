@@ -5,37 +5,57 @@ ArgoNVR is a lightweight, self-hosted Network Video Recorder (NVR) designed for 
 ## Features
 
 ### Backend Engine (`argonvr.py`)
+
 * **Zero-Transcode HLS & Recording (`-c:v copy`):** Remuxes incoming RTSP video directly into live HLS segments and captures motion clips without re-encoding video, keeping CPU usage minimal.
+
 * **Dual-Stream Architecture (`url` + `sub_url`):** Supports an optional low-resolution RTSP `sub_url` per camera. When configured, the high-resolution master pipeline runs purely with `-c:v copy` (zero video decoding), while the sub-stream pipeline generates `stream_sub.m3u8` and drives both motion detection and live JPEG snapshots (`live.jpg`).
-* **Smart Motion Detection & Chunking:** Evaluates scene changes at 2 FPS (`scale=320:-2`) against a per-camera threshold, automatically managing post-motion cooldowns (`COOLDOWN_PERIOD`) and maximum clip lengths (`MAX_RECORD_TIME`).
+
+* **Sunlight-Resilient Motion Detection & Chunking:** Evaluates motion at 2 FPS (`scale=320:-2`) using grayscale conversion, a 3x3 spatial box blur (`avgblur`), temporal frame differencing (`tblend`), and a per-pixel luminance deadband LUT (`pixel_diff_threshold`) to ignore gradual sunlight drift, cloud shadows, and Auto-White-Balance shifts. Combines bounded scene scoring (`motion_threshold` to `motion_max_threshold`) with a multi-frame confirmation window (`motion_confirm_frames` within `motion_confirm_window`) to reject full-frame IR/exposure flips and single-frame camera Auto-Exposure steps, while automatically managing post-motion cooldowns (`COOLDOWN_PERIOD`) and maximum clip lengths (`MAX_RECORD_TIME`).
+
 * **Crash-Safe Staging & Background Packaging:** Motion captures write raw `.ts` streams to a `staging/` directory, move to `queued/` upon completion, and are automatically recovered on startup after an unclean shutdown. A background worker sequentially packages queued clips into VOD HLS playlists (`.m3u8` + 2-second `.ts` segments).
+
 * **Fast Keyframe Sprite Sheets & WebVTT:** Uses `ffprobe` packet inspection and `ffmpeg -skip_frame nokey` to extract I-frames without decoding P/B frames, tiling them into a single `.jpg` sprite sheet paired with a `.vtt` coordinate map for instant visual timeline scrubbing.
+
 * **Automated Disk Space Management:** Monitors the target storage mount (`STORAGE_DEVICE`) every 60 seconds and automatically purges the oldest recordings and segments whenever free space drops below `MIN_FREE_SPACE_PCT`, updating the affected daily `history_YYYYMMDD.json` manifests.
+
 * **Self-Healing Process Watchdogs & Rotating Logs:** Independent per-camera watchdogs monitor both master and sub-stream FFmpeg pipelines and restart stalled streams after 30 seconds of inactivity. Logs (`pipeline.log`, `recording.log`, `encoder_worker.log`) rotate daily at midnight with automatic `.gz` compression and configurable retention (`LOG_DAYS_TO_KEEP`).
 
 ### Web Server (`server.py`) & Frontend (`web/`)
+
 * **Responsive SPA & Installable PWA:** Single-Page Application with a web manifest and service worker (`sw.js`) that switches seamlessly between the multi-camera dashboard grid and single-camera view without page reloads.
+
 * **Dynamic Network Speed & Latency Monitor:** Continuously measures round-trip latency (`/health` probes), HLS segment download throughput, and buffer stalls to classify connections into `HIGH`, `MEDIUM`, or `LOW` tiers (with a clickable toolbar badge to cycle between `AUTO`, `LOCK:LOW`, and `LOCK:HIGH`):
+
   * **High Tier:** Streams live HD HLS (`stream.m3u8`) and prefetches timeline sprites aggressively.
+
   * **Medium Tier:** Automatically utilizes SD sub-streams (`stream_sub.m3u8`) on multi-camera grids or mobile viewports and switches to ETag-polled live snapshots (`live.jpg`) on larger grids.
+
   * **Low Tier:** Switches the dashboard grid to low-bandwidth `live.jpg` snapshot polling, uses SD sub-streams in single-camera live view, and restricts background sprite prefetching to the immediate playhead window.
+
 * **Multi-Camera Dashboard Timeline:** Features an auto-scaling camera grid, a zoomable 24-hour timeline (1x to 144x) with a color-coded per-camera motion heatmap, synchronized multi-camera canvas sprite scrubbing, historical playback, and an interactive calendar highlighting dates with recorded events.
+
 * **Single-Camera Event Scrubber:** Compacts recorded clips into a continuous activity bar so you can sweep directly across motion events without dead air, complete with selectable time windows (`1 Hour` to `Full Day` or custom `Start`/`End` sliders) and live `SD`/`HD` stream indicators.
+
 * **Threaded HTTP/1.1 Server with TLS & Caching:** Supports native HTTPS (`SSL_CERT_PATH` / `SSL_KEY_PATH`), timing-safe HTTP Basic Authentication (`hmac.compare_digest`), directory traversal protection, in-memory manifest caching, ETag/304 conditional responses, on-the-fly Gzip compression, and a remote system reboot control.
 
 ## Requirements
 
 * **Python 3.8+**: Required for the backend engine, calibration utility, and web server.
+
   * **Python Packages:** `PyYAML` (`pip install pyyaml`) and optionally `sdnotify` (`pip install sdnotify`) for systemd readiness notifications.
+
 * **FFmpeg & FFprobe**: Must be installed and available in your system `PATH` for RTSP ingestion, motion detection, VOD packaging, and sprite generation.
+
 * **OS**: Developed and tested on macOS and Linux (including Raspberry Pi 5 / Debian-based systems).
 
 ## Configuration (`argonvr.yaml`)
 
 1. **Create your configuration file:**
+
    ```bash
    cp argonvr.yaml.example argonvr.yaml
    ```
+
    *(Or edit `argonvr.yaml` directly if already present.)*
 
 2. **Configure cameras and settings:**
@@ -46,6 +66,11 @@ ArgoNVR is a lightweight, self-hosted Network Video Recorder (NVR) designed for 
            url: "rtsp://user:password@192.168.1.11:554/stream"
            sub_url: "rtsp://user:password@192.168.1.11:554/stream_sub"
            motion_threshold: 0.001
+           # Optional per-camera motion tuning (overrides global defaults in SETTINGS):
+           # motion_max_threshold: 0.50
+           # pixel_diff_threshold: 24
+           # motion_confirm_frames: 2
+           # motion_confirm_window: 2.0
        cam2:
            url: "rtsp://user:password@192.168.1.12:554/stream"
            motion_threshold: 0.001
@@ -71,6 +96,11 @@ ArgoNVR is a lightweight, self-hosted Network Video Recorder (NVR) designed for 
        MAX_RECORD_TIME: 60
        STAGGER_SPIN_UP_SECONDS: 0
        LOG_DAYS_TO_KEEP: 30
+       MOTION_THRESHOLD: 0.01
+       MOTION_MAX_THRESHOLD: 0.50
+       PIXEL_DIFF_THRESHOLD: 24
+       MOTION_CONFIRM_FRAMES: 2
+       MOTION_CONFIRM_WINDOW: 2.0
    ```
 
 ### Configuration Reference
@@ -79,7 +109,11 @@ ArgoNVR is a lightweight, self-hosted Network Video Recorder (NVR) designed for 
 | :--- | :--- | :--- |
 | `CAMERAS.<id>.url` | *(Required)* | Primary (high-resolution) RTSP stream URL used for HD live view and motion recordings. |
 | `CAMERAS.<id>.sub_url` | *(Optional)* | Secondary (low-resolution) RTSP sub-stream URL used for SD live view, motion detection, and `live.jpg` snapshots. |
-| `CAMERAS.<id>.motion_threshold` | `0.01` | FFmpeg scene-change score threshold required to trigger recording. |
+| `CAMERAS.<id>.motion_threshold` | `MOTION_THRESHOLD` (`0.01`) | Minimum fraction of the frame (`0.0`–`1.0`) that must exceed `pixel_diff_threshold` to count as motion. |
+| `CAMERAS.<id>.motion_max_threshold` | `MOTION_MAX_THRESHOLD` (`0.50`) | Maximum fraction of the frame (`0.0`–`1.0`) before rejecting the frame as a global exposure or IR cut-filter flip. |
+| `CAMERAS.<id>.pixel_diff_threshold` | `PIXEL_DIFF_THRESHOLD` (`24`) | Per-pixel luminance change (`0`–`255`) required between consecutive `0.5s` frames to ignore slow sunlight drift. |
+| `CAMERAS.<id>.motion_confirm_frames` | `MOTION_CONFIRM_FRAMES` (`2`) | Number of motion frames required within `motion_confirm_window` to initiate a new recording. |
+| `CAMERAS.<id>.motion_confirm_window` | `MOTION_CONFIRM_WINDOW` (`2.0`) | Time window (in seconds) within which `motion_confirm_frames` must occur to filter out single-frame AE steps. |
 | `WEB_USER` / `WEB_PASS` | `admin` / `secret` | HTTP Basic Authentication credentials for the web interface and API. |
 | `WEB_DIR` | `./web` | Directory containing the static frontend assets (`index.html`, `script.js`, `camera.js`, `style.css`). |
 | `BASE_DIR` | `./cameras` | Directory for active live HLS playlists, rolling `.ts` segments, and `live.jpg` snapshots (ideal for a RAM disk / `tmpfs`). |
@@ -97,26 +131,41 @@ ArgoNVR is a lightweight, self-hosted Network Video Recorder (NVR) designed for 
 | `MAX_RECORD_TIME` | `60` | Maximum duration (in seconds) of a single recording clip before chunking into a new file. |
 | `STAGGER_SPIN_UP_SECONDS` | `0` | Delay (in seconds) between starting each camera's pipelines on initial engine boot. |
 | `LOG_DAYS_TO_KEEP` | `30` | Number of days to retain daily compressed (`.gz`) log files. |
+| `MOTION_THRESHOLD` | `0.01` | Global default for minimum fraction of the frame (`0.0`–`1.0`) required to trigger motion. |
+| `MOTION_MAX_THRESHOLD` | `0.50` | Global default for maximum fraction of the frame (`0.0`–`1.0`) before rejecting full-frame lighting flashes. |
+| `PIXEL_DIFF_THRESHOLD` | `24` | Global default for per-pixel brightness change (`0`–`255`) required between `0.5s` frames. |
+| `MOTION_CONFIRM_FRAMES` | `2` | Global default for number of motion frames required within `MOTION_CONFIRM_WINDOW` to start recording. |
+| `MOTION_CONFIRM_WINDOW` | `2.0` | Global default for the confirmation time window (in seconds) used to debounce single-frame exposure spikes. |
 
 ## Motion Threshold Calibration (`calibrate.py`)
 
-ArgoNVR includes an interactive CLI calibration tool that connects to your camera's motion source (`sub_url` if configured, otherwise `url`) and displays FFmpeg's real-time scene score so you can dial in each camera's threshold.
+ArgoNVR includes an interactive CLI calibration tool that connects to your camera's motion source (`sub_url` if configured, otherwise `url`) and runs the exact same grayscale, spatial blur, temporal frame difference, and per-pixel deadband (`pixel_diff_threshold`) filter pipeline used by `argonvr.py`.
 
 1. **Run the calibration script:**
+
    ```bash
    python3 calibrate.py
    ```
-2. **Select a camera:** Choose the camera number from the list (which displays the current threshold and active motion source stream).
-3. **Observe baseline noise:** Watch the live score for a few moments to gauge ambient motion (wind, foliage, sensor noise).
-4. **Trigger motion:** Walk in front of the camera and watch the ASCII bar and `Peak` score spike, along with the `🚨 TRIGGER` indicator.
-5. **Save the new threshold:** Press `Ctrl+C` to stop. Enter a threshold safely above ambient noise but below your peak motion score. The script automatically backs up `argonvr.yaml` to `argonvr.yaml.bak` and writes the updated value.
+
+2. **Select a camera & test deadband:** Choose the camera number from the list (which displays active thresholds and motion source) and optionally enter a `pixel_diff_threshold` (`0`–`255`) to test during the session.
+
+3. **Observe baseline noise:** Watch the live score for a few moments. Gradual sunlight shifts and sub-threshold sensor noise are zeroed out by the per-pixel LUT and should read `0.00000`.
+
+4. **Trigger motion:** Walk in front of the camera and watch the ASCII bar, `Peak` score, and live status badge:
+   * `⏳ HIT 1/2`: Frame exceeded `motion_threshold` and is awaiting confirmation within `motion_confirm_window`.
+   * `🚨 TRIGGER`: Multi-frame motion confirmed (recording would start in `argonvr.py`).
+   * `⚡ FLASH`: Frame exceeded `motion_max_threshold` and was rejected as a global exposure or IR cut-filter flip.
+
+5. **Save updated parameters:** Press `Ctrl+C` to stop. You can save new per-camera values for `motion_threshold`, `pixel_diff_threshold`, and `motion_confirm_frames` (or press `Enter` at any prompt to keep existing values). The script automatically backs up `argonvr.yaml` to `argonvr.yaml.bak` before saving.
 
 ## Running the System (Manual Start)
 
 1. **Start the server and engine:**
+
    ```bash
    ./launch.sh
    ```
+
    `launch.sh` automatically detects a local virtual environment (`./.venv` or `./venv`) if present, starts `server.py` in the background, verifies that it initialized cleanly, and launches `argonvr.py` with signal traps to shut down both processes cleanly on `Ctrl+C`.
 
 2. **Access the Dashboard:**
@@ -127,14 +176,16 @@ ArgoNVR includes an interactive CLI calibration tool that connects to your camer
 To start ArgoNVR automatically on boot under Linux:
 
 1. **Edit the Service File:**
-   Open `argonvr.service` and verify that `User`, `WorkingDirectory`, and `ExecStart` match your installation path. *(Note: Using ` the `⚠️ Reboot` button in the web UI requires the service user to have passwordless `sudo reboot` privileges or run as `root`.)*
+   Open `argonvr.service` and verify that `User`, `WorkingDirectory`, and `ExecStart` match your installation path. *(Note: Using the `⚠️ Reboot` button in the web UI requires the service user to have passwordless `sudo reboot` privileges or run as `root`.)*
 
 2. **Install the Service:**
+
    ```bash
    sudo cp argonvr.service /etc/systemd/system/
    ```
 
 3. **Enable and Start:**
+
    ```bash
    sudo systemctl daemon-reload
    sudo systemctl enable argonvr
@@ -142,25 +193,30 @@ To start ArgoNVR automatically on boot under Linux:
    ```
 
 4. **Managing the Service:**
+
    * **Stop the service:** `sudo systemctl stop argonvr`
+
    * **Restart the service:** `sudo systemctl restart argonvr`
+
    * **View live logs:** `sudo journalctl -fu argonvr`
 
 ## Directory Structure
 
 * `web/`: Frontend Single-Page Application (`index.html`, `script.js`, `camera.js`, `style.css`, PWA manifest, and service worker).
-* `cameras/` (`BASE_DIR`): Ephemeral live stream workspace per camera containing `stream.m3u8`, optional `stream_sub.m3u8`, rolling `.ts` segments, and `live.jpg`.
-* `recordings/` (`STORE_DIR`): Persistent storage containing `encoder_worker.log` and per-camera subdirectories:
-  * `<cam_id>/staging/`: Active in-progress raw `.ts` motion captures.
-  * `<cam_id>/queued/`: Completed raw `.ts` captures awaiting VOD packaging.
-  * `<cam_id>/`: Packaged VOD HLS playlists (`.m3u8`), segments (`_000.ts`), sprite sheets (`.jpg`), WebVTT maps (`.vtt`), daily manifests (`history_YYYYMMDD.json`), and rotating logs (`pipeline.log`, `recording.log`).
 
----
+* `cameras/` (`BASE_DIR`): Ephemeral live stream workspace per camera containing `stream.m3u8`, optional `stream_sub.m3u8`, rolling `.ts` segments, and `live.jpg`.
+
+* `recordings/` (`STORE_DIR`): Persistent storage containing `encoder_worker.log` and per-camera subdirectories:
+
+  * `<cam_id>/staging/`: Active in-progress raw `.ts` motion captures.
+
+  * `<cam_id>/queued/`: Completed raw `.ts` captures awaiting VOD packaging.
+
+  * `<cam_id>/`: Packaged VOD HLS playlists (`.m3u8`), segments (`_000.ts`), sprite sheets (`.jpg`), WebVTT maps (`.vtt`), daily manifests (`history_YYYYMMDD.json`), and rotating logs (`pipeline.log`, `recording.log`).
 
 *This project is designed for local home networks and requires basic knowledge of RTSP streams.*
 
----
-
+----
 This project is an experiment in using Google Gemini to generate
 useful code when prompted by an experienced developer. The only
 directly human-written content is this final section of this README.md

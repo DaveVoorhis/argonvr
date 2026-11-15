@@ -37,6 +37,7 @@ This is human-written.
 20. Toolbar can be hidden/displayed via button for distraction-free maximised camera view.
 21. General reliability and robustness improvement.
 22. Use camera sub_url if available for live.jpg snapshots and motion detection.
+23. Improved motion detection rejects light changes.
 
 ## Features
 
