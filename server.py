@@ -337,7 +337,7 @@ def _resolve_clip_files(cam_id, date_str, clips):
     return media_files, resolved_clips
 
 
-def generate_video_clip(cam_id, date_str, start_sec, end_sec, clips):
+def generate_video_clip(cam_id, date_str, start_sec, end_sec, clips, output_filename=None):
     """Background worker to generate and store an MP4 video clip from displayed history."""
     start_time_Wall = time.monotonic()
     start_fmt = _format_seconds_hhmmss(start_sec, ":")
@@ -345,8 +345,12 @@ def generate_video_clip(cam_id, date_str, start_sec, end_sec, clips):
     start_tag = _format_seconds_hhmmss(start_sec)
     end_tag = _format_seconds_hhmmss(end_sec)
 
+    if not output_filename:
+        created_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_filename = f"{cam_id}_{date_str}_{start_tag}-{end_tag}_{created_stamp}.mp4"
+
     print(
-        f"[🎬] Queued background video generation for {cam_id} "
+        f"[🎬] Queued background video generation for {cam_id} -> {output_filename} "
         f"(date={date_str}, window={start_fmt}-{end_fmt}, clips={len(clips)})"
     )
 
@@ -370,8 +374,6 @@ def generate_video_clip(cam_id, date_str, start_sec, end_sec, clips):
                 )
                 return
 
-            created_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            output_filename = f"{cam_id}_{date_str}_{start_tag}-{end_tag}_{created_stamp}.mp4"
             final_output_path = os.path.join(ABS_VIDEO_DIR, output_filename)
             temp_output_path = os.path.join(ABS_VIDEO_DIR, f".{output_filename}.part.mp4")
 
@@ -1015,19 +1017,31 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                     )
                     return
 
+                start_tag = _format_seconds_hhmmss(start_sec)
+                end_tag = _format_seconds_hhmmss(end_sec)
+                created_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                output_filename = f"{cam_id}_{date_str}_{start_tag}-{end_tag}_{created_stamp}.mp4"
+                encoded_name = quote(output_filename)
+
                 print(
                     f"[📥] Accepted /api/video/create from {self.address_string()} "
-                    f"for {cam_id} on {date_str} ({len(clips)} clip(s))"
+                    f"for {cam_id} on {date_str} ({len(clips)} clip(s)) -> {output_filename}"
                 )
 
                 threading.Thread(
                     target=generate_video_clip,
-                    args=(cam_id, date_str, start_sec, end_sec, clips),
+                    args=(cam_id, date_str, start_sec, end_sec, clips, output_filename),
                     daemon=True
                 ).start()
 
                 self._send_json(
-                    {"status": "accepted", "message": "Video generation started in background."},
+                    {
+                        "status": "accepted",
+                        "message": "Video generation started in background.",
+                        "filename": output_filename,
+                        "streamUrl": f"/api/video/stream?file={encoded_name}",
+                        "downloadUrl": f"/api/video/stream?file={encoded_name}&download=1",
+                    },
                     status=202
                 )
             except Exception as e:

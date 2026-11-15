@@ -54,6 +54,7 @@
             <h2 id="brand-text">ArgoNVR</h2>
         </div>
 
+        <button class="ctrl-btn videos-btn" id="btn-videos">🎬 Videos</button>
         <button class="ctrl-btn" id="btn-play">▶ Play</button>
         <div class="time-display" id="time-label">LIVE</div>
         <div class="timeline-viewport" id="timeline-viewport">
@@ -138,6 +139,94 @@
     </div>
 </div>
 
+<!-- RECORDED VIDEOS VIEW (Initially Hidden) -->
+<div id="videos-view" class="hidden">
+    <div class="videos-header">
+        <div class="videos-header-left">
+            <button class="back-btn" id="videos-btn-back">◀ Back</button>
+            <span class="videos-title">🎬 Recorded Videos</span>
+            <span class="videos-summary-badge" id="videos-summary-badge">0 videos</span>
+        </div>
+        <div class="videos-header-right">
+            <select id="videos-filter-cam" class="ctrl-btn ctrl-select" title="Filter by Camera">
+                <option value="all">All Cameras</option>
+            </select>
+            <select id="videos-sort-select" class="ctrl-btn ctrl-select" title="Sort Videos">
+                <option value="newest">Newest First</option>
+                <option value="oldest">Oldest First</option>
+                <option value="largest">Largest First</option>
+                <option value="smallest">Smallest First</option>
+            </select>
+            <button class="ctrl-btn" id="videos-btn-refresh" title="Refresh Video List">🔄 Refresh</button>
+        </div>
+    </div>
+
+    <div class="videos-workspace">
+        <!-- Player Section -->
+        <div class="videos-player-panel">
+            <div class="videos-stage" id="videos-stage">
+                <video id="videos-player" playsinline preload="metadata"></video>
+                <div class="no-video-overlay" id="videos-empty-overlay">
+                    <div class="videos-empty-icon">🎬</div>
+                    <div id="videos-overlay-text">Select a recorded video to play</div>
+                </div>
+            </div>
+
+            <div class="videos-now-playing" id="videos-now-playing">
+                <div class="now-playing-info">
+                    <span class="now-playing-cam" id="np-cam">No Video Selected</span>
+                    <span class="now-playing-meta" id="np-meta">Choose a video from the list to begin playback</span>
+                </div>
+                <div class="now-playing-actions">
+                    <a class="ctrl-btn download-video-btn disabled" id="np-btn-download" href="#" download title="Download MP4">⬇ Download</a>
+                    <button class="ctrl-btn delete-video-btn" id="np-btn-delete" disabled title="Delete Video">🗑️ Delete</button>
+                </div>
+            </div>
+
+            <div class="videos-transport-bar">
+                <button class="ctrl-btn transport-play-btn" id="vp-btn-play" disabled>▶ Play</button>
+                <button class="ctrl-btn" id="vp-btn-skip-back" disabled title="Rewind 10 seconds">⏪ 10s</button>
+                <button class="ctrl-btn" id="vp-btn-skip-fwd" disabled title="Forward 10 seconds">10s ⏩</button>
+
+                <div class="vp-scrubber-wrap">
+                    <input type="range" id="vp-scrubber" min="0" max="1000" step="1" value="0" disabled>
+                </div>
+
+                <div class="vp-time-label" id="vp-time-label">00:00 / 00:00</div>
+
+                <select id="vp-speed-select" class="ctrl-btn ctrl-select" title="Playback Speed" disabled>
+                    <option value="0.5">0.5x</option>
+                    <option value="1" selected>1x</option>
+                    <option value="1.5">1.5x</option>
+                    <option value="2">2x</option>
+                    <option value="4">4x</option>
+                </select>
+
+                <button class="ctrl-btn" id="vp-btn-mute" disabled title="Toggle Mute">🔊</button>
+                <button class="ctrl-btn" id="vp-btn-fullscreen" disabled title="Fullscreen">⛶</button>
+            </div>
+        </div>
+
+        <!-- Video List Section -->
+        <div class="videos-list-panel">
+            <div class="videos-list" id="videos-list"></div>
+        </div>
+    </div>
+
+    <!-- Delete Confirmation Modal -->
+    <div class="videos-modal-backdrop hidden" id="videos-delete-modal">
+        <div class="videos-modal">
+            <h3>Delete Recorded Video?</h3>
+            <p id="videos-delete-prompt">Are you sure you want to permanently delete this video?</p>
+            <div class="videos-modal-filename" id="videos-delete-filename"></div>
+            <div class="videos-modal-actions">
+                <button class="ctrl-btn" id="videos-modal-cancel">Cancel</button>
+                <button class="ctrl-btn delete-video-btn" id="videos-modal-confirm">🗑️ Delete</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <!-- Floating Toolbar Toggle -->
 <button id="toolbar-toggle" class="toolbar-toggle-btn" title="Toggle Toolbars">
     <svg id="icon-hide" viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
@@ -146,5 +235,6 @@
 
 <script src="script.js"></script>
 <script src="camera.js"></script>
+<script src="videos.js"></script>
 </body>
 </html>

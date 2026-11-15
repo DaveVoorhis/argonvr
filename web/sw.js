@@ -1,4 +1,4 @@
-const CACHE_NAME = 'argonvr-cache-v37';
+const CACHE_NAME = 'argonvr-cache-v38';
 const urlsToCache = [];
 
 // Install the service worker
@@ -37,8 +37,11 @@ self.addEventListener('fetch', event => {
     if (
         url.pathname.endsWith('.m3u8') ||
         url.pathname.endsWith('.ts') ||
+        url.pathname.endsWith('.mp4') ||
         url.pathname.endsWith('.vtt') ||
         url.pathname.endsWith('.jpg') ||
+        url.pathname === '/health' ||
+        url.pathname.startsWith('/videos/') ||
         url.pathname.startsWith('/history') ||
         url.pathname.startsWith('/cameracount') ||
         url.pathname.startsWith('/basedir') ||
