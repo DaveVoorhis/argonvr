@@ -3,6 +3,11 @@ CAMERAS:
         url: "rtsp://user:password@192.168.1.11:554/stream"
         sub_url: "rtsp://user:password@192.168.1.11:554/stream_sub"
         motion_threshold: 0.001
+        # Optional per-camera motion tuning (overrides global defaults in SETTINGS):
+        # motion_max_threshold: 0.50
+        # pixel_diff_threshold: 24
+        # motion_confirm_frames: 2
+        # motion_confirm_window: 2.0
     cam2:
         url: "rtsp://user:password@192.168.1.12:554/stream"
         motion_threshold: 0.001
@@ -24,8 +29,21 @@ SETTINGS:
     SPRITE_HEIGHT: 180
     # Timeline preview JPEG compression (2 is best quality/largest size, 31 is worst quality/smallest size)
     SPRITE_QUALITY: 5
+    # Live Snapshot Configuration
+    LIVE_SNAPSHOT_FPS: 1.0
+    LIVE_SNAPSHOT_QUALITY: 6
     # Recording & Spin-up Configuration
     COOLDOWN_PERIOD: 10
     MAX_RECORD_TIME: 60
     STAGGER_SPIN_UP_SECONDS: 0
     LOG_DAYS_TO_KEEP: 30
+    # Global Motion Detection Defaults (can also be overridden per camera in CAMERAS)
+    # Minimum fraction of the frame (0.0 - 1.0) that must change to count as motion
+    MOTION_THRESHOLD: 0.01
+    # Maximum fraction of the frame (0.0 - 1.0) before rejecting as a full-frame exposure/IR flip
+    MOTION_MAX_THRESHOLD: 0.50
+    # Per-pixel brightness change (0 - 255) required between 0.5s frames to ignore slow sunlight drift
+    PIXEL_DIFF_THRESHOLD: 24
+    # Number of motion frames required within MOTION_CONFIRM_WINDOW seconds to start recording
+    MOTION_CONFIRM_FRAMES: 2
+    MOTION_CONFIRM_WINDOW: 2.0
