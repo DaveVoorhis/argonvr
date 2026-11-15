@@ -241,6 +241,15 @@ video {
 	background: #e67e22;
 }
 
+.ctrl-btn.create-video-btn {
+	background: #2980b9;
+	justify-content: center;
+	flex-shrink: 0;
+}
+.ctrl-btn.create-video-btn:hover {
+	background: #3498db;
+}
+
 .time-display {
 	font-family: monospace;
 	font-size: 1.05rem;

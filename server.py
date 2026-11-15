@@ -3,16 +3,19 @@ import socketserver
 import base64
 import hmac
 import os
+import re
 import ssl
 import json
 import yaml
 import socket
 import subprocess
 import threading
+import tempfile
 import gzip
 import hashlib
 import time
-from urllib.parse import urlparse, parse_qs, unquote
+from datetime import datetime
+from urllib.parse import urlparse, parse_qs, unquote, quote
 try:
     import sdnotify
 except ImportError:
@@ -31,10 +34,12 @@ PASSWORD = str(SETTINGS.get('WEB_PASS', 'secret'))
 STORE_DIR = SETTINGS.get('STORE_DIR', './recordings')
 BASE_DIR = SETTINGS.get('BASE_DIR', './cameras')
 WEB_DIR = SETTINGS.get('WEB_DIR', './web')
+VIDEO_DIR = SETTINGS.get('VIDEO_DIR', os.path.join(STORE_DIR, 'videos'))
 
 ABS_STORE_DIR = os.path.abspath(STORE_DIR)
 ABS_BASE_DIR = os.path.abspath(BASE_DIR)
 ABS_WEB_DIR = os.path.abspath(WEB_DIR)
+ABS_VIDEO_DIR = os.path.abspath(VIDEO_DIR)
 STORE_DIR_NAME = os.path.basename(os.path.normpath(STORE_DIR))
 BASE_DIR_NAME = os.path.basename(os.path.normpath(BASE_DIR))
 
@@ -57,6 +62,14 @@ _HISTORY_CACHE_LOCK = threading.Lock()
 # In-memory cache for available dates with short TTL
 _DATES_CACHE = {"timestamp": 0.0, "dates": [], "etag": ""}
 _DATES_CACHE_LOCK = threading.Lock()
+
+# Limit concurrent ffmpeg video generation jobs to protect CPU/disk I/O
+_VIDEO_GEN_SEMA = threading.BoundedSemaphore(2)
+
+# Regex matching generated video filenames: {cam_id}_{YYYYMMDD}_{startHHMMSS}-{endHHMMSS}_{createdYYYYMMDD}_{createdHHMMSS}.mp4
+_VIDEO_FILENAME_RE = re.compile(
+    r'^(?P<cam_id>.+)_(?P<date>\d{8})_(?P<start>\d{6})-(?P<end>\d{6})_(?P<cdate>\d{8})_(?P<ctime>\d{6})\.mp4$'
+)
 
 
 def _load_cached_history_file(history_path):
@@ -83,6 +96,385 @@ def _load_cached_history_file(history_path):
     except Exception as e:
         print(f"Error reading {history_path}: {e}")
         return []
+
+
+def _format_seconds_hhmmss(seconds, sep=""):
+    """Formats seconds since midnight (0-86400) into HHMMSS or HH:MM:SS."""
+    sec = max(0, min(86400, int(seconds)))
+    hrs = sec // 3600
+    mins = (sec % 3600) // 60
+    secs = sec % 60
+    return f"{hrs:02d}{sep}{mins:02d}{sep}{secs:02d}"
+
+
+def _hhmmss_to_seconds(hhmmss_str):
+    """Converts a 6-digit HHMMSS string into seconds since midnight."""
+    if not hhmmss_str or len(hhmmss_str) != 6 or not hhmmss_str.isdigit():
+        return None
+    hrs = int(hhmmss_str[0:2])
+    mins = int(hhmmss_str[2:4])
+    secs = int(hhmmss_str[4:6])
+    return hrs * 3600 + mins * 60 + secs
+
+
+def _resolve_video_file(raw_filename):
+    """Validates and resolves a video filename strictly inside ABS_VIDEO_DIR."""
+    if not raw_filename or not isinstance(raw_filename, str):
+        return None, None
+
+    clean_name = os.path.basename(unquote(raw_filename.strip()))
+    if (
+            not clean_name
+            or clean_name.startswith('.')
+            or not clean_name.lower().endswith('.mp4')
+            or clean_name.lower().endswith('.part.mp4')
+    ):
+        return None, None
+
+    candidate = os.path.abspath(os.path.join(ABS_VIDEO_DIR, clean_name))
+    if candidate != os.path.join(ABS_VIDEO_DIR, clean_name) or not candidate.startswith(ABS_VIDEO_DIR + os.sep):
+        return None, None
+
+    return clean_name, candidate
+
+
+def _build_video_entry(filename, st):
+    """Builds a metadata dictionary for a video file in ABS_VIDEO_DIR."""
+    encoded_name = quote(filename)
+    entry = {
+        "filename": filename,
+        "size": st.st_size,
+        "mtime": int(st.st_mtime),
+        "createdAt": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+        "camId": None,
+        "date": None,
+        "startTime": None,
+        "endTime": None,
+        "startSec": None,
+        "endSec": None,
+        "streamUrl": f"/api/video/stream?file={encoded_name}",
+        "downloadUrl": f"/api/video/stream?file={encoded_name}&download=1",
+    }
+
+    match = _VIDEO_FILENAME_RE.match(filename)
+    if match:
+        start_raw = match.group("start")
+        end_raw = match.group("end")
+        cdate_raw = match.group("cdate")
+        ctime_raw = match.group("ctime")
+
+        entry["camId"] = match.group("cam_id")
+        entry["date"] = match.group("date")
+        entry["startTime"] = f"{start_raw[0:2]}:{start_raw[2:4]}:{start_raw[4:6]}"
+        entry["endTime"] = f"{end_raw[0:2]}:{end_raw[2:4]}:{end_raw[4:6]}"
+        entry["startSec"] = _hhmmss_to_seconds(start_raw)
+        entry["endSec"] = _hhmmss_to_seconds(end_raw)
+        entry["createdAt"] = (
+            f"{cdate_raw[0:4]}-{cdate_raw[4:6]}-{cdate_raw[6:8]} "
+            f"{ctime_raw[0:2]}:{ctime_raw[2:4]}:{ctime_raw[4:6]}"
+        )
+
+    return entry
+
+
+def _list_video_files():
+    """Returns metadata for all completed MP4 files in ABS_VIDEO_DIR sorted newest-first."""
+    videos = []
+    if not os.path.isdir(ABS_VIDEO_DIR):
+        return videos
+
+    try:
+        for entry in os.scandir(ABS_VIDEO_DIR):
+            if not entry.is_file():
+                continue
+            name = entry.name
+            if name.startswith('.') or not name.lower().endswith('.mp4') or name.lower().endswith('.part.mp4'):
+                continue
+            try:
+                st = entry.stat()
+                if st.st_size > 0:
+                    videos.append(_build_video_entry(name, st))
+            except OSError:
+                continue
+    except OSError as e:
+        print(f"[❌] Error scanning video directory {ABS_VIDEO_DIR}: {e}")
+
+    videos.sort(key=lambda v: (v["mtime"], v["filename"]), reverse=True)
+    return videos
+
+
+def _safe_store_path(raw_path, cam_id="", date_str=""):
+    """Resolves a clip or segment path securely inside ABS_STORE_DIR."""
+    if not raw_path or not isinstance(raw_path, str):
+        return None
+
+    clean = unquote(raw_path.strip()).split('?', 1)[0].split('#', 1)[0].lstrip('/')
+    for prefix in ('recordings/', f'{STORE_DIR_NAME}/'):
+        if clean.startswith(prefix):
+            clean = clean[len(prefix):]
+            break
+
+    search_roots = [ABS_STORE_DIR]
+    if cam_id and date_str:
+        search_roots.append(os.path.join(ABS_STORE_DIR, cam_id, date_str))
+    if cam_id:
+        search_roots.append(os.path.join(ABS_STORE_DIR, cam_id))
+
+    for root in search_roots:
+        candidate = os.path.abspath(os.path.join(root, clean))
+        if (candidate == ABS_STORE_DIR or candidate.startswith(ABS_STORE_DIR + os.sep)) and os.path.exists(candidate):
+            return candidate
+
+    return None
+
+
+def _extract_clip_reference(clip_item):
+    """Extracts the file/playlist path string and a chronological sort key from a clip entry."""
+    if isinstance(clip_item, str):
+        return clip_item, clip_item
+
+    if isinstance(clip_item, dict):
+        path_val = None
+        for key in ('playlist', 'm3u8', 'mp4', 'video', 'file', 'url', 'path', 'src', 'filename', 'name'):
+            val = clip_item.get(key)
+            if isinstance(val, str) and val.strip():
+                path_val = val.strip()
+                break
+
+        sort_key = (
+                clip_item.get('timestamp')
+                or clip_item.get('start')
+                or clip_item.get('startTime')
+                or clip_item.get('time')
+                or path_val
+                or ""
+        )
+        return path_val, str(sort_key)
+
+    return None, ""
+
+
+def _expand_m3u8_segments(m3u8_path, cam_id="", date_str=""):
+    """Parses an HLS .m3u8 playlist and returns a list of existing segment file paths."""
+    segments = []
+    playlist_dir = os.path.dirname(m3u8_path)
+    try:
+        with open(m3u8_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith('#'):
+                    continue
+
+                clean_seg = unquote(line).split('?', 1)[0].split('#', 1)[0]
+                if clean_seg.startswith('/'):
+                    seg_path = _safe_store_path(clean_seg, cam_id, date_str)
+                else:
+                    candidate = os.path.abspath(os.path.join(playlist_dir, clean_seg))
+                    if candidate.startswith(ABS_STORE_DIR + os.sep) and os.path.isfile(candidate):
+                        seg_path = candidate
+                    else:
+                        seg_path = _safe_store_path(clean_seg, cam_id, date_str)
+
+                if seg_path and os.path.isfile(seg_path) and os.path.getsize(seg_path) > 0:
+                    segments.append(seg_path)
+                else:
+                    print(f"[⚠️] Missing or empty HLS segment '{line}' referenced in {m3u8_path}")
+    except Exception as e:
+        print(f"[❌] Failed to parse playlist {m3u8_path}: {e}")
+
+    return segments
+
+
+def _resolve_clip_files(cam_id, date_str, clips):
+    """Resolves a list of clip entries into an ordered, deduplicated list of media files for ffmpeg."""
+    extracted = []
+    for idx, item in enumerate(clips):
+        ref, sort_key = _extract_clip_reference(item)
+        if ref:
+            extracted.append((sort_key, idx, ref))
+
+    # Sort chronologically if sort keys are available so newest-first UI lists play forward in time
+    if len(extracted) > 1 and all(item[0] for item in extracted):
+        extracted.sort(key=lambda x: (x[0], x[1]))
+
+    media_files = []
+    seen = set()
+    resolved_clips = 0
+
+    for _, _, ref in extracted:
+        resolved = _safe_store_path(ref, cam_id, date_str)
+        if not resolved:
+            print(f"[⚠️] Clip path could not be resolved for {cam_id} ({date_str}): {ref}")
+            continue
+
+        clip_segments = []
+        if os.path.isdir(resolved):
+            # Look for an .m3u8 playlist or direct .ts/.mp4 segments inside the directory
+            dir_entries = sorted(os.listdir(resolved))
+            m3u8_files = [e for e in dir_entries if e.endswith('.m3u8')]
+            if m3u8_files:
+                clip_segments = _expand_m3u8_segments(os.path.join(resolved, m3u8_files[0]), cam_id, date_str)
+            else:
+                clip_segments = [
+                    os.path.join(resolved, e)
+                    for e in dir_entries
+                    if e.endswith(('.ts', '.mp4')) and os.path.getsize(os.path.join(resolved, e)) > 0
+                ]
+        elif resolved.endswith('.m3u8'):
+            clip_segments = _expand_m3u8_segments(resolved, cam_id, date_str)
+        elif resolved.endswith(('.ts', '.mp4')) and os.path.isfile(resolved) and os.path.getsize(resolved) > 0:
+            clip_segments = [resolved]
+
+        if clip_segments:
+            resolved_clips += 1
+            for seg in clip_segments:
+                if seg not in seen:
+                    seen.add(seg)
+                    media_files.append(seg)
+        else:
+            print(f"[⚠️] No valid media segments found for clip: {resolved}")
+
+    return media_files, resolved_clips
+
+
+def generate_video_clip(cam_id, date_str, start_sec, end_sec, clips):
+    """Background worker to generate and store an MP4 video clip from displayed history."""
+    start_time_Wall = time.monotonic()
+    start_fmt = _format_seconds_hhmmss(start_sec, ":")
+    end_fmt = _format_seconds_hhmmss(end_sec, ":")
+    start_tag = _format_seconds_hhmmss(start_sec)
+    end_tag = _format_seconds_hhmmss(end_sec)
+
+    print(
+        f"[🎬] Queued background video generation for {cam_id} "
+        f"(date={date_str}, window={start_fmt}-{end_fmt}, clips={len(clips)})"
+    )
+
+    concat_list_path = None
+    temp_output_path = None
+
+    with _VIDEO_GEN_SEMA:
+        try:
+            os.makedirs(ABS_VIDEO_DIR, exist_ok=True)
+
+            media_files, resolved_clips = _resolve_clip_files(cam_id, date_str, clips)
+            print(
+                f"[🔍] Resolved {resolved_clips}/{len(clips)} clips into "
+                f"{len(media_files)} media segment(s) for {cam_id} ({date_str})"
+            )
+
+            if not media_files:
+                print(
+                    f"[❌] Aborting video generation for {cam_id} ({date_str}): "
+                    f"no valid media segments found on disk."
+                )
+                return
+
+            created_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            output_filename = f"{cam_id}_{date_str}_{start_tag}-{end_tag}_{created_stamp}.mp4"
+            final_output_path = os.path.join(ABS_VIDEO_DIR, output_filename)
+            temp_output_path = os.path.join(ABS_VIDEO_DIR, f".{output_filename}.part.mp4")
+
+            with tempfile.NamedTemporaryFile(
+                    mode='w',
+                    encoding='utf-8',
+                    prefix=f"concat_{cam_id}_",
+                    suffix=".txt",
+                    dir=ABS_VIDEO_DIR,
+                    delete=False
+            ) as list_file:
+                concat_list_path = list_file.name
+                for seg_path in media_files:
+                    escaped = seg_path.replace("'", r"'\''")
+                    list_file.write(f"file '{escaped}'\n")
+
+            print(
+                f"[⚙️] Running ffmpeg to build {output_filename} "
+                f"from {len(media_files)} segment(s)..."
+            )
+
+            cmd = [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel", "error",
+                "-y",
+                "-f", "concat",
+                "-safe", "0",
+                "-i", concat_list_path,
+                "-c", "copy",
+                "-movflags", "+faststart",
+                temp_output_path,
+            ]
+
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=600
+            )
+
+            if proc.returncode != 0:
+                err_msg = (proc.stderr or "").strip() or f"exit code {proc.returncode}"
+                print(
+                    f"[⚠️] Stream copy failed for {output_filename} ({err_msg}); "
+                    f"retrying with AAC audio bitstream filter..."
+                )
+                cmd_retry = [
+                    "ffmpeg",
+                    "-hide_banner",
+                    "-loglevel", "error",
+                    "-y",
+                    "-f", "concat",
+                    "-safe", "0",
+                    "-i", concat_list_path,
+                    "-c", "copy",
+                    "-bsf:a", "aac_adtstoasc",
+                    "-movflags", "+faststart",
+                    temp_output_path,
+                ]
+                proc = subprocess.run(
+                    cmd_retry,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=600
+                )
+
+            if proc.returncode != 0:
+                err_msg = (proc.stderr or "").strip() or f"exit code {proc.returncode}"
+                print(f"[❌] ffmpeg failed to generate {output_filename} for {cam_id}: {err_msg}")
+                return
+
+            if not os.path.isfile(temp_output_path) or os.path.getsize(temp_output_path) == 0:
+                print(f"[❌] ffmpeg produced an empty or missing file for {output_filename}")
+                return
+
+            os.replace(temp_output_path, final_output_path)
+            temp_output_path = None
+
+            size_mb = os.path.getsize(final_output_path) / (1024 * 1024)
+            elapsed = time.monotonic() - start_time_Wall
+            print(
+                f"[✅] Video created for {cam_id}: {final_output_path} "
+                f"({size_mb:.2f} MB in {elapsed:.1f}s)"
+            )
+
+        except subprocess.TimeoutExpired:
+            print(f"[❌] Timed out generating video clip for {cam_id} ({date_str}) after 600s")
+        except Exception as e:
+            print(f"[❌] Error generating video clip for {cam_id} ({date_str}): {e}")
+        finally:
+            if concat_list_path and os.path.exists(concat_list_path):
+                try:
+                    os.remove(concat_list_path)
+                except OSError:
+                    pass
+            if temp_output_path and os.path.exists(temp_output_path):
+                try:
+                    os.remove(temp_output_path)
+                except OSError:
+                    pass
 
 
 class ThreadedHTTPServer(ThreadingMixIn, socketserver.TCPServer):
@@ -173,7 +565,15 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                 or clean_path == '/'
                 or clean_path.endswith(('/stream.m3u8', '/stream_sub.m3u8'))
                 or clean_path.endswith('/live.jpg')
-                or clean_path in ('/history', '/available_dates', '/cameracount', '/basedir', '/health')
+                or clean_path in (
+                '/history',
+                '/available_dates',
+                '/cameracount',
+                '/basedir',
+                '/health',
+                '/api/video/list',
+                '/api/videos',
+        )
         ):
             self.send_header('Cache-Control', 'no-cache, must-revalidate, max-age=0')
         elif (
@@ -204,12 +604,17 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
             relative_path = clean_path[len(f'/{STORE_DIR_NAME}/'):]
             return self._safe_join(ABS_STORE_DIR, relative_path)
 
-        # 2. Ensure active camera streams explicitly map to BASE_DIR outside of WEB_DIR
+        # 2. Map /videos/ directly to ABS_VIDEO_DIR regardless of where VIDEO_DIR is configured
+        if clean_path.startswith('/videos/'):
+            relative_path = clean_path[len('/videos/'):]
+            return self._safe_join(ABS_VIDEO_DIR, relative_path)
+
+        # 3. Ensure active camera streams explicitly map to BASE_DIR outside of WEB_DIR
         if clean_path.startswith(f'/{BASE_DIR_NAME}/'):
             relative_path = clean_path[len(f'/{BASE_DIR_NAME}/'):]
             return self._safe_join(ABS_BASE_DIR, relative_path)
 
-        # 3. Everything else defaults to being securely served out of WEB_DIR
+        # 4. Everything else defaults to being securely served out of WEB_DIR
         return super().translate_path(path)
 
     def do_AUTHHEAD(self, body=b"Authentication required."):
@@ -264,7 +669,7 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _serve_optimized_file(self, filepath, clean_path):
+    def _serve_optimized_file(self, filepath, clean_path, extra_headers=None):
         """Serves static/media files with ETag/304 support, Gzip compression, and strict Content-Length safety."""
         try:
             with open(filepath, 'rb') as f:
@@ -293,6 +698,11 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                     self.send_response(200)
                     self.send_header('Content-Type', ctype)
                     self.send_header('ETag', etag)
+                    if clean_path.endswith('.mp4'):
+                        self.send_header('Accept-Ranges', 'bytes')
+                    if extra_headers:
+                        for h_key, h_val in extra_headers.items():
+                            self.send_header(h_key, h_val)
                     if should_compress:
                         self.send_header('Content-Encoding', 'gzip')
                         self.send_header('Vary', 'Accept-Encoding')
@@ -303,6 +713,11 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                     self.send_response(200)
                     self.send_header('Content-Type', ctype)
                     self.send_header('ETag', etag)
+                    if clean_path.endswith('.mp4'):
+                        self.send_header('Accept-Ranges', 'bytes')
+                    if extra_headers:
+                        for h_key, h_val in extra_headers.items():
+                            self.send_header(h_key, h_val)
                     self.send_header('Content-Length', str(st.st_size))
                     self.end_headers()
                     remaining = st.st_size
@@ -317,18 +732,31 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
         except (ConnectionResetError, BrokenPipeError, socket.timeout, ssl.SSLError, OSError):
             pass
 
-    def serve_range(self, filepath, range_header):
+    def serve_range(self, filepath, range_header, extra_headers=None):
         try:
             with open(filepath, 'rb') as f:
                 fs = os.fstat(f.fileno())
                 file_len = fs.st_size
 
-                byte_range = range_header.split('=')[1].split('-')
-                start = int(byte_range[0]) if byte_range[0] else 0
-                end = int(byte_range[1]) if (len(byte_range) > 1 and byte_range[1]) else file_len - 1
-                end = min(end, file_len - 1)
+                if not range_header.startswith('bytes='):
+                    self.send_error(416, "Requested Range Not Satisfiable")
+                    return
 
-                if start >= file_len or start > end:
+                byte_range = range_header[6:].split(',', 1)[0].strip().split('-')
+                if not byte_range[0]:
+                    # Suffix byte range: bytes=-500
+                    suffix_len = int(byte_range[1]) if (len(byte_range) > 1 and byte_range[1]) else 0
+                    if suffix_len <= 0:
+                        self.send_error(416, "Requested Range Not Satisfiable")
+                        return
+                    start = max(0, file_len - suffix_len)
+                    end = file_len - 1
+                else:
+                    start = int(byte_range[0])
+                    end = int(byte_range[1]) if (len(byte_range) > 1 and byte_range[1]) else file_len - 1
+                    end = min(end, file_len - 1)
+
+                if start >= file_len or start > end or start < 0:
                     self.send_error(416, "Requested Range Not Satisfiable")
                     return
 
@@ -337,6 +765,9 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_header('Content-Type', 'video/mp4')
                 self.send_header('Accept-Ranges', 'bytes')
                 self.send_header('Content-Range', f'bytes {start}-{end}/{file_len}')
+                if extra_headers:
+                    for h_key, h_val in extra_headers.items():
+                        self.send_header(h_key, h_val)
                 self.send_header('Content-Length', str(length))
                 self.end_headers()
 
@@ -352,6 +783,79 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
             pass
         except Exception as e:
             self.send_error(500, f"Server Error: {e}")
+
+    def _handle_video_stream(self, path_no_query, query_params):
+        """Streams or downloads a requested video file from ABS_VIDEO_DIR."""
+        raw_file = (
+                query_params.get('file', [None])[0]
+                or query_params.get('filename', [None])[0]
+                or query_params.get('name', [None])[0]
+        )
+        if not raw_file and path_no_query.startswith('/api/video/stream/'):
+            raw_file = path_no_query[len('/api/video/stream/'):]
+
+        clean_name, filepath = _resolve_video_file(raw_file)
+        if not clean_name or not filepath:
+            self._send_json({"error": "Invalid or missing video filename"}, status=400)
+            return
+
+        if not os.path.isfile(filepath):
+            self._send_json({"error": "Video file not found"}, status=404)
+            return
+
+        is_download = query_params.get('download', ['0'])[0].lower() in ('1', 'true', 'yes')
+        disposition = 'attachment' if is_download else 'inline'
+        extra_headers = {
+            'Content-Disposition': f'{disposition}; filename="{clean_name}"'
+        }
+
+        range_header = self.headers.get('Range')
+        if range_header:
+            self.serve_range(filepath, range_header, extra_headers=extra_headers)
+        else:
+            self._serve_optimized_file(filepath, clean_name, extra_headers=extra_headers)
+
+    def _handle_video_delete(self, path_no_query, query_params):
+        """Deletes a specified video file from ABS_VIDEO_DIR."""
+        raw_file = (
+                query_params.get('file', [None])[0]
+                or query_params.get('filename', [None])[0]
+                or query_params.get('name', [None])[0]
+        )
+        if not raw_file and path_no_query.startswith('/api/video/delete/'):
+            raw_file = path_no_query[len('/api/video/delete/'):]
+
+        if not raw_file:
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length > 0:
+                try:
+                    raw_body = self.rfile.read(content_length)
+                    payload = json.loads(raw_body.decode('utf-8'))
+                    if isinstance(payload, dict):
+                        raw_file = (
+                                payload.get('file')
+                                or payload.get('filename')
+                                or payload.get('name')
+                        )
+                except Exception:
+                    pass
+
+        clean_name, filepath = _resolve_video_file(raw_file)
+        if not clean_name or not filepath:
+            self._send_json({"error": "Invalid or missing video filename"}, status=400)
+            return
+
+        if not os.path.isfile(filepath):
+            self._send_json({"error": "Video file not found"}, status=404)
+            return
+
+        try:
+            os.remove(filepath)
+            print(f"[🗑️] Deleted video file '{clean_name}' (requested by {self.address_string()})")
+            self._send_json({"status": "deleted", "filename": clean_name}, status=200)
+        except OSError as e:
+            print(f"[❌] Failed to delete video file '{clean_name}': {e}")
+            self._send_json({"error": f"Failed to delete video file: {e}"}, status=500)
 
     def do_GET(self):
         parsed_url = urlparse(self.path)
@@ -374,6 +878,15 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
 
         if not self._is_authenticated():
             self.do_AUTHHEAD()
+            return
+
+        if path_no_query in ('/api/video/list', '/api/videos'):
+            videos = _list_video_files()
+            self._send_json({"videos": videos})
+            return
+
+        if path_no_query == '/api/video/stream' or path_no_query.startswith('/api/video/stream/'):
+            self._handle_video_stream(path_no_query, query_params)
             return
 
         if path_no_query == '/history':
@@ -473,9 +986,57 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
     def do_POST(self):
         parsed_url = urlparse(self.path)
         path_no_query = parsed_url.path
+        query_params = parse_qs(parsed_url.query)
 
         if not self._is_authenticated():
             self.do_AUTHHEAD()
+            return
+
+        if path_no_query == '/api/video/create':
+            try:
+                content_length = int(self.headers.get('Content-Length', 0))
+                raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+                payload = json.loads(raw_body.decode('utf-8'))
+
+                cam_id = os.path.basename(str(payload.get('camId', '')).strip())
+                date_str = os.path.basename(str(payload.get('date', '')).strip())
+                start_sec = int(payload.get('startSec', 0))
+                end_sec = int(payload.get('endSec', 86400))
+                clips = payload.get('clips', [])
+
+                if not cam_id or not date_str or not isinstance(clips, list) or len(clips) == 0:
+                    print(
+                        f"[⚠️] Rejected /api/video/create request from {self.address_string()}: "
+                        f"camId='{cam_id}', date='{date_str}', clips={len(clips) if isinstance(clips, list) else 'invalid'}"
+                    )
+                    self._send_json(
+                        {"error": "Invalid video creation parameters (non-empty clips list required)"},
+                        status=400
+                    )
+                    return
+
+                print(
+                    f"[📥] Accepted /api/video/create from {self.address_string()} "
+                    f"for {cam_id} on {date_str} ({len(clips)} clip(s))"
+                )
+
+                threading.Thread(
+                    target=generate_video_clip,
+                    args=(cam_id, date_str, start_sec, end_sec, clips),
+                    daemon=True
+                ).start()
+
+                self._send_json(
+                    {"status": "accepted", "message": "Video generation started in background."},
+                    status=202
+                )
+            except Exception as e:
+                print(f"[❌] Error handling /api/video/create request: {e}")
+                self._send_json({"error": str(e)}, status=500)
+            return
+
+        if path_no_query == '/api/video/delete' or path_no_query.startswith('/api/video/delete/'):
+            self._handle_video_delete(path_no_query, query_params)
             return
 
         if path_no_query == '/api/system/reboot':
@@ -496,6 +1057,21 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
 
         self.send_error(404, "Endpoint not found")
 
+    def do_DELETE(self):
+        parsed_url = urlparse(self.path)
+        path_no_query = parsed_url.path
+        query_params = parse_qs(parsed_url.query)
+
+        if not self._is_authenticated():
+            self.do_AUTHHEAD()
+            return
+
+        if path_no_query == '/api/video/delete' or path_no_query.startswith('/api/video/delete/'):
+            self._handle_video_delete(path_no_query, query_params)
+            return
+
+        self.send_error(404, "Endpoint not found")
+
 
 if __name__ == "__main__":
     tls_context = None
@@ -509,7 +1085,7 @@ if __name__ == "__main__":
         else:
             print(f"🔓 ArgoNVR server running on port {PORT} (No SSL configured)")
 
-        print(f"📂 Storage mapped to: {STORE_DIR}")
+        print(f"📂 Storage mapped to: {STORE_DIR} (Videos: {VIDEO_DIR})")
         print(f"📷 Cameras discovered from config: {CAMERA_COUNT} (Sub-streams: {sum(SUB_STREAMS.values())})")
 
         if sdnotify is not None:

@@ -59,6 +59,7 @@
 
     const fwBackBtn = document.getElementById('fw-btn-back');
     const fwLiveBtn = document.getElementById('fw-btn-live');
+    const fwCreateVideoBtn = document.getElementById('fw-btn-create-video');
     const scaleSelect = document.getElementById('fw-scale-select');
     const startSlider = document.getElementById('fw-start-slider');
     const endSlider = document.getElementById('fw-end-slider');
@@ -239,6 +240,48 @@
         applyTimelineRange();
     }
 
+    async function handleCreateVideo() {
+        const dayClips = getDayClips();
+        if (dayClips.length === 0) {
+            alert("No recorded clips in the currently displayed history range.");
+            return;
+        }
+
+        if (fwCreateVideoBtn) {
+            fwCreateVideoBtn.disabled = true;
+        }
+
+        try {
+            const payload = {
+                camId: camId,
+                date: currentDayString,
+                startSec: timelineStartSec,
+                endSec: timelineEndSec,
+                clips: dayClips.map(c => c.filename)
+            };
+
+            const response = await fetch('/api/video/create', {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                throw new Error(`Server returned ${response.status}`);
+            }
+        } catch (err) {
+            console.error("Failed to initiate video creation:", err);
+            alert("Failed to start video creation.");
+        } finally {
+            if (fwCreateVideoBtn) {
+                fwCreateVideoBtn.disabled = false;
+            }
+        }
+    }
+
     if (fwBackBtn) {
         fwBackBtn.addEventListener('click', () => {
             if (window.closeCameraPage) {
@@ -249,6 +292,10 @@
 
     if (fwLiveBtn) {
         fwLiveBtn.addEventListener('click', fwGoLive);
+    }
+
+    if (fwCreateVideoBtn) {
+        fwCreateVideoBtn.addEventListener('click', handleCreateVideo);
     }
 
     if (scaleSelect) {
