@@ -38,6 +38,13 @@ MAX_RECORD_TIME = int(SETTINGS.get('MAX_RECORD_TIME', 60))  # Maximum length of 
 STAGGER_SPIN_UP_SECONDS = int(SETTINGS.get('STAGGER_SPIN_UP_SECONDS', 0))
 LOG_DAYS_TO_KEEP = int(SETTINGS.get('LOG_DAYS_TO_KEEP', 30))
 
+# --- Default Motion Detection Configuration (Overridable per camera) ---
+DEFAULT_MOTION_THRESHOLD = float(SETTINGS.get('MOTION_THRESHOLD', 0.01))
+DEFAULT_MOTION_MAX_THRESHOLD = float(SETTINGS.get('MOTION_MAX_THRESHOLD', 0.50))
+DEFAULT_PIXEL_DIFF_THRESHOLD = int(SETTINGS.get('PIXEL_DIFF_THRESHOLD', 24))
+DEFAULT_MOTION_CONFIRM_FRAMES = int(SETTINGS.get('MOTION_CONFIRM_FRAMES', 2))
+DEFAULT_MOTION_CONFIRM_WINDOW = float(SETTINGS.get('MOTION_CONFIRM_WINDOW', 2.0))
+
 os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(STORE_DIR, exist_ok=True)
 
@@ -573,7 +580,14 @@ class CameraStream:
         self.cam_id = cam_id
         self.rtsp_url = cam_config.get('url')
         self.sub_rtsp_url = cam_config.get('sub_url')
-        self.motion_threshold = str(cam_config.get('motion_threshold', '0.01'))
+
+        # Motion detection parameters (per-camera config with global/sensible fallbacks)
+        self.motion_threshold = str(cam_config.get('motion_threshold', DEFAULT_MOTION_THRESHOLD))
+        self.motion_max_threshold = str(cam_config.get('motion_max_threshold', DEFAULT_MOTION_MAX_THRESHOLD))
+        self.pixel_diff_threshold = int(cam_config.get('pixel_diff_threshold', DEFAULT_PIXEL_DIFF_THRESHOLD))
+        self.motion_confirm_frames = int(cam_config.get('motion_confirm_frames', DEFAULT_MOTION_CONFIRM_FRAMES))
+        self.motion_confirm_window = float(cam_config.get('motion_confirm_window', DEFAULT_MOTION_CONFIRM_WINDOW))
+        self.motion_hit_times = []
 
         # Ramdisk Directory for active HLS streams
         self.cam_dir = f"{BASE_DIR}/{self.cam_id}"
@@ -604,6 +618,20 @@ class CameraStream:
     def write_log_header(self, logger, message):
         timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
         logger.info(f"\n--- [{timestamp}] {message} ---")
+
+    def _build_filter_graph(self):
+        """Builds the shared motion detection + live snapshot filter graph.
+        Uses grayscale conversion, 3x3 spatial box blur, temporal frame differencing,
+        and a per-pixel luma deadband LUT to ignore gradual lighting changes."""
+        return (
+            f"[0:v]fps=2,scale=320:-2,split=2[motion_in][thumb_in];"
+            f"[motion_in]format=gray,avgblur=sizeX=3:sizeY=3,"
+            f"tblend=all_mode=difference,"
+            f"lut=c0='if(gt(val,{self.pixel_diff_threshold}),255,0)',"
+            f"select='between(scene,{self.motion_threshold},{self.motion_max_threshold})',"
+            f"metadata=mode=print[motion_out];"
+            f"[thumb_in]fps={LIVE_SNAPSHOT_FPS}[thumb_out]"
+        )
 
     def _clean_stale_ramdisk_segments(self):
         """Removes leftover main HLS segments without deleting live.jpg (or its atomic temp file) or sub-stream files."""
@@ -645,10 +673,26 @@ class CameraStream:
 
     async def handle_motion_detected(self, from_sub=False):
         """Updates motion timestamp and initiates high-res raw stream capture from stream.m3u8 if not already recording."""
-        self.last_motion = time.time()
+        now = time.time()
 
+        # If already recording, any motion hit immediately extends the active clip's cooldown timer
         if self.recording:
+            self.last_motion = now
             return
+
+        # Prune hits outside the confirmation window and record the current hit
+        self.motion_hit_times = [
+            t for t in self.motion_hit_times
+            if (now - t) <= self.motion_confirm_window
+        ]
+        self.motion_hit_times.append(now)
+
+        # Require N motion hits within the confirmation window to reject single-frame AE steps
+        if len(self.motion_hit_times) < self.motion_confirm_frames:
+            return
+
+        self.motion_hit_times.clear()
+        self.last_motion = now
 
         print(f"[🚨] Motion detected on {self.cam_id}! Capturing raw stream.")
         self.recording = True
@@ -770,15 +814,12 @@ class CameraStream:
             first_run = False
 
             self._clean_stale_sub_segments()
+            self.motion_hit_times.clear()
             print(f"[📱] Starting low-bandwidth sub-stream pipeline (HLS + Motion + Snapshot) for {self.cam_id}...")
             self.write_log_header(self.pipeline_logger, "STARTING SUB-STREAM PIPELINE (HLS + MOTION + SNAPSHOT)")
             self.last_sub_output_time = time.time()
 
-            sub_filter_graph = (
-                f"[0:v]fps=2,scale=320:-2,split=2[motion_in][thumb_in];"
-                f"[motion_in]select='gt(scene,{self.motion_threshold})',metadata=mode=print[motion_out];"
-                f"[thumb_in]fps={LIVE_SNAPSHOT_FPS}[thumb_out]"
-            )
+            sub_filter_graph = self._build_filter_graph()
 
             cmd = [
                 "ffmpeg", "-rtsp_transport", "tcp",
@@ -841,6 +882,9 @@ class CameraStream:
             if not self.recording:
                 self._clean_stale_ramdisk_segments()
 
+            if not use_sub_pipeline:
+                self.motion_hit_times.clear()
+
             print(f"[📷] Starting master pipeline for {self.cam_id}...")
             self.last_pipeline_output_time = time.time()
 
@@ -858,11 +902,7 @@ class CameraStream:
                 ]
             else:
                 self.write_log_header(self.pipeline_logger, "STARTING UNIFIED MASTER PIPELINE (HLS + MOTION + SNAPSHOT)")
-                filter_graph = (
-                    f"[0:v]fps=2,scale=320:-2,split=2[motion_in][thumb_in];"
-                    f"[motion_in]select='gt(scene,{self.motion_threshold})',metadata=mode=print[motion_out];"
-                    f"[thumb_in]fps={LIVE_SNAPSHOT_FPS}[thumb_out]"
-                )
+                filter_graph = self._build_filter_graph()
                 cmd = [
                     "ffmpeg", "-rtsp_transport", "tcp",
                     "-i", self.rtsp_url,
