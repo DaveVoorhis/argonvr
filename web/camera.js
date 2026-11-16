@@ -59,6 +59,7 @@
 
     const fwBackBtn = document.getElementById('fw-btn-back');
     const fwLiveBtn = document.getElementById('fw-btn-live');
+    const fwCreateVideoBtn = document.getElementById('fw-btn-create-video');
     const scaleSelect = document.getElementById('fw-scale-select');
     const startSlider = document.getElementById('fw-start-slider');
     const endSlider = document.getElementById('fw-end-slider');
@@ -79,6 +80,78 @@
 
     let timelineStartSec = 0;
     let timelineEndSec = 86400;
+
+    // Video generation button state & timers
+    let isCreatingVideo = false;
+    let createVideoTickTimer = null;
+    let createVideoResetTimer = null;
+
+    function clearCreateVideoTimers() {
+        if (createVideoTickTimer) {
+            clearInterval(createVideoTickTimer);
+            createVideoTickTimer = null;
+        }
+        if (createVideoResetTimer) {
+            clearTimeout(createVideoResetTimer);
+            createVideoResetTimer = null;
+        }
+    }
+
+    function setCreateVideoBtnVisual(state, labelText) {
+        if (!fwCreateVideoBtn) return;
+
+        if (state === 'creating') {
+            fwCreateVideoBtn.style.setProperty('background-color', '#e67e22', 'important');
+            fwCreateVideoBtn.style.setProperty('color', '#ffffff', 'important');
+            fwCreateVideoBtn.style.cursor = 'wait';
+            fwCreateVideoBtn.textContent = labelText || '⏳ Creating...';
+        } else if (state === 'success') {
+            fwCreateVideoBtn.style.setProperty('background-color', '#27ae60', 'important');
+            fwCreateVideoBtn.style.setProperty('color', '#ffffff', 'important');
+            fwCreateVideoBtn.style.cursor = 'default';
+            fwCreateVideoBtn.textContent = labelText || '✅ Video Ready!';
+        } else if (state === 'error') {
+            fwCreateVideoBtn.style.setProperty('background-color', '#c0392b', 'important');
+            fwCreateVideoBtn.style.setProperty('color', '#ffffff', 'important');
+            fwCreateVideoBtn.style.cursor = 'default';
+            fwCreateVideoBtn.textContent = labelText || '❌ Failed';
+        } else {
+            fwCreateVideoBtn.style.removeProperty('background-color');
+            fwCreateVideoBtn.style.removeProperty('color');
+            fwCreateVideoBtn.style.cursor = '';
+            fwCreateVideoBtn.textContent = 'Create Video';
+        }
+    }
+
+    async function waitForVideoFile(filename, maxWaitMs = 300000) {
+        if (!filename) {
+            throw new Error('Server did not return a target video filename');
+        }
+
+        const probeUrl = `/api/video/stream?file=${encodeURIComponent(filename)}`;
+        const deadline = Date.now() + maxWaitMs;
+
+        while (Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 1500));
+            try {
+                const resp = await fetch(probeUrl, {
+                    method: 'GET',
+                    credentials: 'include',
+                    cache: 'no-store',
+                    headers: {
+                        'Range': 'bytes=0-0'
+                    }
+                });
+
+                if (resp.status === 206 || resp.status === 200) {
+                    return true;
+                }
+            } catch (e) {
+                // Ignore transient network errors while polling
+            }
+        }
+        throw new Error('Timed out waiting for video file to become available');
+    }
 
     function getNetTier() {
         return (window.networkMonitor && window.networkMonitor.tier) ? window.networkMonitor.tier : 'high';
@@ -239,6 +312,70 @@
         applyTimelineRange();
     }
 
+    async function handleCreateVideo() {
+        if (isCreatingVideo) return;
+
+        const dayClips = getDayClips();
+        if (dayClips.length === 0) {
+            alert("No recorded clips in the currently displayed history range.");
+            return;
+        }
+
+        isCreatingVideo = true;
+        clearCreateVideoTimers();
+
+        const payload = {
+            camId: camId,
+            date: currentDayString,
+            startSec: timelineStartSec,
+            endSec: timelineEndSec,
+            clips: dayClips.map(c => c.filename)
+        };
+
+        const startedAt = Date.now();
+        setCreateVideoBtnVisual('creating', '⏳ Creating (0s)...');
+
+        createVideoTickTimer = setInterval(() => {
+            const elapsedSec = Math.floor((Date.now() - startedAt) / 1000);
+            setCreateVideoBtnVisual('creating', `⏳ Creating (${elapsedSec}s)...`);
+        }, 1000);
+
+        try {
+            const response = await fetch('/api/video/create', {
+                method: 'POST',
+                credentials: 'include',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                throw new Error(`Server returned ${response.status}`);
+            }
+
+            const data = await response.json();
+            await waitForVideoFile(data.filename);
+
+            clearCreateVideoTimers();
+            isCreatingVideo = false;
+            setCreateVideoBtnVisual('success', '✅ Video Ready!');
+
+            createVideoResetTimer = setTimeout(() => {
+                setCreateVideoBtnVisual('idle');
+            }, 3500);
+        } catch (err) {
+            console.error("Failed to complete video creation:", err);
+            clearCreateVideoTimers();
+            isCreatingVideo = false;
+            setCreateVideoBtnVisual('error', '❌ Failed');
+
+            createVideoResetTimer = setTimeout(() => {
+                setCreateVideoBtnVisual('idle');
+            }, 3500);
+        }
+    }
+
     if (fwBackBtn) {
         fwBackBtn.addEventListener('click', () => {
             if (window.closeCameraPage) {
@@ -249,6 +386,10 @@
 
     if (fwLiveBtn) {
         fwLiveBtn.addEventListener('click', fwGoLive);
+    }
+
+    if (fwCreateVideoBtn) {
+        fwCreateVideoBtn.addEventListener('click', handleCreateVideo);
     }
 
     if (scaleSelect) {
