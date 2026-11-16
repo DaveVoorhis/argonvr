@@ -400,10 +400,12 @@ def generate_video_clip(cam_id, date_str, start_sec, end_sec, clips, output_file
                 "-hide_banner",
                 "-loglevel", "error",
                 "-y",
+                "-fflags", "+genpts+igndts",
                 "-f", "concat",
                 "-safe", "0",
                 "-i", concat_list_path,
                 "-c", "copy",
+                "-avoid_negative_ts", "make_zero",
                 "-movflags", "+faststart",
                 temp_output_path,
             ]
@@ -427,11 +429,13 @@ def generate_video_clip(cam_id, date_str, start_sec, end_sec, clips, output_file
                     "-hide_banner",
                     "-loglevel", "error",
                     "-y",
+                    "-fflags", "+genpts+igndts",
                     "-f", "concat",
                     "-safe", "0",
                     "-i", concat_list_path,
                     "-c", "copy",
                     "-bsf:a", "aac_adtstoasc",
+                    "-avoid_negative_ts", "make_zero",
                     "-movflags", "+faststart",
                     temp_output_path,
                 ]
@@ -578,6 +582,12 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
         )
         ):
             self.send_header('Cache-Control', 'no-cache, must-revalidate, max-age=0')
+        elif (
+                clean_path.startswith(f'/{BASE_DIR_NAME}/')
+                and clean_path.endswith('.ts')
+        ):
+            # Live ring-buffer segments wrap around; cache briefly for active playback without long-term staleness
+            self.send_header('Cache-Control', 'private, max-age=15')
         elif (
                 clean_path.startswith('/recordings/')
                 or (STORE_DIR_NAME != 'recordings' and clean_path.startswith(f'/{STORE_DIR_NAME}/'))
@@ -739,6 +749,7 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
             with open(filepath, 'rb') as f:
                 fs = os.fstat(f.fileno())
                 file_len = fs.st_size
+                etag = f'"{fs.st_mtime_ns:x}-{fs.st_size:x}"'
 
                 if not range_header.startswith('bytes='):
                     self.send_error(416, "Requested Range Not Satisfiable")
@@ -765,8 +776,10 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                 length = end - start + 1
                 self.send_response(206)
                 self.send_header('Content-Type', 'video/mp4')
+                self.send_header('ETag', etag)
                 self.send_header('Accept-Ranges', 'bytes')
                 self.send_header('Content-Range', f'bytes {start}-{end}/{file_len}')
+                self.send_header('Cache-Control', 'private, max-age=3600')
                 if extra_headers:
                     for h_key, h_val in extra_headers.items():
                         self.send_header(h_key, h_val)

@@ -45,6 +45,14 @@ DEFAULT_PIXEL_DIFF_THRESHOLD = int(SETTINGS.get('PIXEL_DIFF_THRESHOLD', 24))
 DEFAULT_MOTION_CONFIRM_FRAMES = int(SETTINGS.get('MOTION_CONFIRM_FRAMES', 2))
 DEFAULT_MOTION_CONFIRM_WINDOW = float(SETTINGS.get('MOTION_CONFIRM_WINDOW', 2.0))
 
+# Bitstream filter expression that forces valid, identical, strictly monotonic PTS and DTS
+# on every packet entering the MPEG-TS muxer, preventing N/A PTS or 1 Hz GOP timestamp jumps.
+SETTS_MONOTONIC_BSF = (
+    "setts="
+    "dts='max(if(eq(PTS,NOPTS),DTS,PTS),if(eq(PREV_OUTDTS,NOPTS),0,PREV_OUTDTS+1))':"
+    "pts='max(if(eq(PTS,NOPTS),DTS,PTS),if(eq(PREV_OUTPTS,NOPTS),0,PREV_OUTPTS+1))'"
+)
+
 os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(STORE_DIR, exist_ok=True)
 
@@ -518,11 +526,14 @@ async def background_encoder_worker():
 
                     encode_cmd = [
                         "ffmpeg",
+                        "-fflags", "+discardcorrupt",
                         "-i", raw_filepath,
                         "-c:v", "copy",
+                        "-bsf:v", SETTS_MONOTONIC_BSF,
                         "-an",
+                        "-avoid_negative_ts", "make_zero",
                         "-f", "hls",
-                        "-hls_time", "2",
+                        "-hls_time", "4",
                         "-hls_playlist_type", "vod",
                         "-hls_flags", "independent_segments",
                         "-hls_segment_filename", os.path.join(final_dir, f"{base_name}_%03d.ts"),
@@ -720,9 +731,13 @@ class CameraStream:
 
         record_cmd = [
             "ffmpeg",
+            "-fflags", "+discardcorrupt",
+            "-live_start_index", "0",
             "-i", m3u8_path,
             "-map", "0:v",
             "-c:v", "copy",
+            "-bsf:v", SETTS_MONOTONIC_BSF,
+            "-copyts",
             "-an",
             "-y", self.current_output_file
         ]
@@ -822,18 +837,25 @@ class CameraStream:
             sub_filter_graph = self._build_filter_graph()
 
             cmd = [
-                "ffmpeg", "-rtsp_transport", "tcp",
+                "ffmpeg",
+                "-thread_queue_size", "1024",
+                "-use_wallclock_as_timestamps", "1",
+                "-fflags", "+discardcorrupt",
+                "-rtsp_transport", "tcp",
                 "-i", self.sub_rtsp_url,
-                "-map", "0:v", "-c:v", "copy", "-an",
-                "-f", "hls", "-hls_time", "2", "-hls_list_size", "10",
+                "-map", "0:v", "-c:v", "copy",
+                "-bsf:v", SETTS_MONOTONIC_BSF,
+                "-an",
+                "-f", "hls",
+                "-hls_time", "2",
+                "-hls_list_size", "10",
                 "-hls_flags", "delete_segments+independent_segments+temp_file",
-                "-strftime", "1",
-                "-hls_segment_filename", f"{self.cam_dir}/stream_sub_%Y%m%d_%H%M%S.ts",
+                "-hls_segment_filename", f"{self.cam_dir}/stream_sub_%05d.ts",
                 f"{self.cam_dir}/stream_sub.m3u8",
 
                 "-filter_complex", sub_filter_graph,
-                "-map", "[motion_out]", "-f", "null", "-",
-                "-map", "[thumb_out]", "-f", "image2",
+                "-map", "[motion_out]", "-fps_mode", "passthrough", "-f", "null", "-",
+                "-map", "[thumb_out]", "-fps_mode", "passthrough", "-f", "image2",
                 "-update", "1", "-atomic_writing", "1",
                 "-q:v", str(LIVE_SNAPSHOT_QUALITY),
                 "-y", f"{self.cam_dir}/live.jpg"
@@ -891,32 +913,46 @@ class CameraStream:
             if use_sub_pipeline:
                 self.write_log_header(self.pipeline_logger, "STARTING MASTER PIPELINE (HLS COPY ONLY)")
                 cmd = [
-                    "ffmpeg", "-rtsp_transport", "tcp",
+                    "ffmpeg",
+                    "-thread_queue_size", "1024",
+                    "-use_wallclock_as_timestamps", "1",
+                    "-fflags", "+discardcorrupt",
+                    "-rtsp_transport", "tcp",
                     "-i", self.rtsp_url,
-                    "-map", "0:v", "-c:v", "copy", "-an",
-                    "-f", "hls", "-hls_time", "2", "-hls_list_size", "10",
+                    "-map", "0:v", "-c:v", "copy",
+                    "-bsf:v", SETTS_MONOTONIC_BSF,
+                    "-an",
+                    "-f", "hls",
+                    "-hls_time", "2",
+                    "-hls_list_size", "10",
                     "-hls_flags", "delete_segments+independent_segments+temp_file",
-                    "-strftime", "1",
-                    "-hls_segment_filename", f"{self.cam_dir}/stream_%Y%m%d_%H%M%S.ts",
+                    "-hls_segment_filename", f"{self.cam_dir}/stream_%05d.ts",
                     f"{self.cam_dir}/stream.m3u8"
                 ]
             else:
                 self.write_log_header(self.pipeline_logger, "STARTING UNIFIED MASTER PIPELINE (HLS + MOTION + SNAPSHOT)")
                 filter_graph = self._build_filter_graph()
                 cmd = [
-                    "ffmpeg", "-rtsp_transport", "tcp",
+                    "ffmpeg",
+                    "-thread_queue_size", "1024",
+                    "-use_wallclock_as_timestamps", "1",
+                    "-fflags", "+discardcorrupt",
+                    "-rtsp_transport", "tcp",
                     "-i", self.rtsp_url,
 
-                    "-map", "0:v", "-c:v", "copy", "-an",
-                    "-f", "hls", "-hls_time", "2", "-hls_list_size", "10",
+                    "-map", "0:v", "-c:v", "copy",
+                    "-bsf:v", SETTS_MONOTONIC_BSF,
+                    "-an",
+                    "-f", "hls",
+                    "-hls_time", "2",
+                    "-hls_list_size", "10",
                     "-hls_flags", "delete_segments+independent_segments+temp_file",
-                    "-strftime", "1",
-                    "-hls_segment_filename", f"{self.cam_dir}/stream_%Y%m%d_%H%M%S.ts",
+                    "-hls_segment_filename", f"{self.cam_dir}/stream_%05d.ts",
                     f"{self.cam_dir}/stream.m3u8",
 
                     "-filter_complex", filter_graph,
-                    "-map", "[motion_out]", "-f", "null", "-",
-                    "-map", "[thumb_out]", "-f", "image2",
+                    "-map", "[motion_out]", "-fps_mode", "passthrough", "-f", "null", "-",
+                    "-map", "[thumb_out]", "-fps_mode", "passthrough", "-f", "image2",
                     "-update", "1", "-atomic_writing", "1",
                     "-q:v", str(LIVE_SNAPSHOT_QUALITY),
                     "-y", f"{self.cam_dir}/live.jpg"
