@@ -59,6 +59,10 @@ LOG_HTTP_REQUESTS = SETTINGS.get('LOG_HTTP_REQUESTS', False)
 _HISTORY_FILE_CACHE = {}
 _HISTORY_CACHE_LOCK = threading.Lock()
 
+# In-memory cache for parsed MP4 sidecar JSON files keyed by path -> ((mtime_ns, size), parsed_data)
+_VIDEO_SIDECAR_CACHE = {}
+_VIDEO_SIDECAR_LOCK = threading.Lock()
+
 # In-memory cache for available dates with short TTL
 _DATES_CACHE = {"timestamp": 0.0, "dates": [], "etag": ""}
 _DATES_CACHE_LOCK = threading.Lock()
@@ -106,6 +110,32 @@ def _load_cached_history_file(history_path):
         return []
 
 
+def _load_cached_video_sidecar(sidecar_path):
+    """Reads and caches an MP4 sidecar JSON file based on its mtime_ns and size."""
+    try:
+        st = os.stat(sidecar_path)
+    except OSError:
+        return None
+
+    key = (st.st_mtime_ns, st.st_size)
+    with _VIDEO_SIDECAR_LOCK:
+        cached = _VIDEO_SIDECAR_CACHE.get(sidecar_path)
+        if cached and cached[0] == key:
+            return cached[1]
+
+    try:
+        with open(sidecar_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        with _VIDEO_SIDECAR_LOCK:
+            if len(_VIDEO_SIDECAR_CACHE) > 512:
+                _VIDEO_SIDECAR_CACHE.clear()
+            _VIDEO_SIDECAR_CACHE[sidecar_path] = (key, data)
+        return data
+    except Exception as e:
+        print(f"Error reading video sidecar {sidecar_path}: {e}")
+        return None
+
+
 def _format_seconds_hhmmss(seconds, sep=""):
     """Formats seconds since midnight (0-86400) into HHMMSS or HH:MM:SS."""
     sec = max(0, min(86400, int(seconds)))
@@ -125,17 +155,21 @@ def _hhmmss_to_seconds(hhmmss_str):
     return hrs * 3600 + mins * 60 + secs
 
 
-def _resolve_video_file(raw_filename):
-    """Validates and resolves a video filename strictly inside ABS_VIDEO_DIR."""
+def _resolve_video_file(raw_filename, allow_json=False):
+    """Validates and resolves a video (or sidecar .json) filename strictly inside ABS_VIDEO_DIR."""
     if not raw_filename or not isinstance(raw_filename, str):
         return None, None
 
     clean_name = os.path.basename(unquote(raw_filename.strip()))
+    lower_name = clean_name.lower()
+    allowed_exts = ('.mp4', '.json') if allow_json else ('.mp4',)
+
     if (
             not clean_name
             or clean_name.startswith('.')
-            or not clean_name.lower().endswith('.mp4')
-            or clean_name.lower().endswith('.part.mp4')
+            or not lower_name.endswith(allowed_exts)
+            or lower_name.endswith('.part.mp4')
+            or lower_name.endswith('.tmp')
     ):
         return None, None
 
@@ -147,7 +181,7 @@ def _resolve_video_file(raw_filename):
 
 
 def _build_video_entry(filename, st):
-    """Builds a metadata dictionary for a video file in ABS_VIDEO_DIR."""
+    """Builds a metadata dictionary for a video file in ABS_VIDEO_DIR, including sidecar segments if present."""
     encoded_name = quote(filename)
     entry = {
         "filename": filename,
@@ -161,6 +195,8 @@ def _build_video_entry(filename, st):
         "endTime": None,
         "startSec": None,
         "endSec": None,
+        "duration": None,
+        "segments": [],
         "streamUrl": f"/api/video/stream?file={encoded_name}",
         "downloadUrl": f"/api/video/stream?file={encoded_name}&download=1",
     }
@@ -185,6 +221,27 @@ def _build_video_entry(filename, st):
             f"{cdate_raw[0:4]}-{cdate_raw[4:6]}-{cdate_raw[6:8]} "
             f"{ctime_raw[0:2]}:{ctime_raw[2:4]}:{ctime_raw[4:6]}"
         )
+
+    base_name = os.path.splitext(filename)[0]
+    sidecar_name = f"{base_name}.json"
+    sidecar_path = os.path.join(ABS_VIDEO_DIR, sidecar_name)
+    sidecar_data = _load_cached_video_sidecar(sidecar_path)
+    if isinstance(sidecar_data, dict):
+        if isinstance(sidecar_data.get("segments"), list):
+            entry["segments"] = sidecar_data["segments"]
+        if sidecar_data.get("duration") is not None:
+            entry["duration"] = sidecar_data["duration"]
+        if not entry["camId"] and sidecar_data.get("camId"):
+            entry["camId"] = sidecar_data["camId"]
+        if not entry["date"] and sidecar_data.get("date"):
+            entry["date"] = sidecar_data["date"]
+        if not entry["endDate"] and sidecar_data.get("endDate"):
+            entry["endDate"] = sidecar_data["endDate"]
+        if not entry["startTime"] and sidecar_data.get("startTime"):
+            entry["startTime"] = sidecar_data["startTime"]
+        if not entry["endTime"] and sidecar_data.get("endTime"):
+            entry["endTime"] = sidecar_data["endTime"]
+        entry["sidecarUrl"] = f"/api/video/stream?file={quote(sidecar_name)}"
 
     return entry
 
@@ -221,7 +278,7 @@ def _safe_store_path(raw_path, cam_id="", date_str=""):
         return None
 
     clean = unquote(raw_path.strip()).split('?', 1)[0].split('#', 1)[0].lstrip('/')
-    for prefix in ('recordings/', f'{STORE_DIR_NAME}/'):
+    for prefix in ('recordings/', f'{STORE_DIR_NAME}/', './recordings/', f'./{STORE_DIR_NAME}/'):
         if clean.startswith(prefix):
             clean = clean[len(prefix):]
             break
@@ -243,6 +300,10 @@ def _safe_store_path(raw_path, cam_id="", date_str=""):
 def _extract_clip_reference(clip_item):
     """Extracts the file/playlist path string and a chronological sort key from a clip entry."""
     if isinstance(clip_item, str):
+        clean_name = os.path.basename(unquote(clip_item.strip()).split('?', 1)[0].split('#', 1)[0])
+        match = _CLIP_TIMESTAMP_RE.search(clean_name)
+        if match:
+            return clip_item, f"{match.group('date')}_{match.group('time')}"
         return clip_item, clip_item
 
     if isinstance(clip_item, dict):
@@ -253,8 +314,15 @@ def _extract_clip_reference(clip_item):
                 path_val = val.strip()
                 break
 
+        if path_val:
+            clean_name = os.path.basename(unquote(path_val).split('?', 1)[0].split('#', 1)[0])
+            match = _CLIP_TIMESTAMP_RE.search(clean_name)
+            if match:
+                return path_val, f"{match.group('date')}_{match.group('time')}"
+
         sort_key = (
                 clip_item.get('timestamp')
+                or clip_item.get('startEpoch')
                 or clip_item.get('start')
                 or clip_item.get('startTime')
                 or clip_item.get('time')
@@ -283,7 +351,7 @@ def _get_m3u8_duration(m3u8_path):
 
 
 def _get_clip_duration(cam_id, date_str, clip_ref, clip_item=None):
-    """Resolves the duration in seconds of a clip from its dict metadata, history JSON, or .m3u8 playlist."""
+    """Resolves the duration in seconds of a clip from its dict metadata, sidecar JSON, history JSON, or .m3u8 playlist."""
     if isinstance(clip_item, dict) and clip_item.get('duration') is not None:
         try:
             dur = float(clip_item['duration'])
@@ -293,6 +361,19 @@ def _get_clip_duration(cam_id, date_str, clip_ref, clip_item=None):
             pass
 
     clean_name = os.path.basename(unquote((clip_ref or '').strip()).split('?', 1)[0].split('#', 1)[0])
+
+    resolved = _safe_store_path(clip_ref, cam_id, date_str)
+    if resolved and os.path.isfile(resolved):
+        clip_sidecar = os.path.splitext(resolved)[0] + '.json'
+        if os.path.isfile(clip_sidecar):
+            try:
+                with open(clip_sidecar, 'r', encoding='utf-8') as sf:
+                    sdata = json.load(sf)
+                dur = float(sdata.get('duration') or 0.0)
+                if dur > 0:
+                    return dur
+            except Exception:
+                pass
 
     if cam_id and date_str and clean_name:
         history_path = os.path.join(ABS_STORE_DIR, cam_id, f'history_{date_str}.json')
@@ -306,7 +387,6 @@ def _get_clip_duration(cam_id, date_str, clip_ref, clip_item=None):
                     except (ValueError, TypeError):
                         pass
 
-    resolved = _safe_store_path(clip_ref, cam_id, date_str)
     if resolved:
         if os.path.isdir(resolved):
             try:
@@ -387,14 +467,25 @@ def _build_generated_video_filename(cam_id, start_date, end_date, start_tag, end
 
 
 def _expand_m3u8_segments(m3u8_path, cam_id="", date_str=""):
-    """Parses an HLS .m3u8 playlist and returns a list of existing segment file paths."""
+    """Parses an HLS .m3u8 playlist and returns (valid_segment_paths, valid_duration_seconds)."""
     segments = []
+    valid_duration = 0.0
+    pending_extinf = 0.0
     playlist_dir = os.path.dirname(m3u8_path)
     try:
         with open(m3u8_path, 'r', encoding='utf-8') as f:
             for line in f:
                 line = line.strip()
-                if not line or line.startswith('#'):
+                if not line:
+                    continue
+                if line.startswith('#EXTINF:'):
+                    try:
+                        val = line.split(':', 1)[1].split(',', 1)[0].strip()
+                        pending_extinf = max(0.0, float(val))
+                    except (ValueError, IndexError):
+                        pending_extinf = 0.0
+                    continue
+                if line.startswith('#'):
                     continue
 
                 clean_seg = unquote(line).split('?', 1)[0].split('#', 1)[0]
@@ -408,22 +499,28 @@ def _expand_m3u8_segments(m3u8_path, cam_id="", date_str=""):
                         seg_path = _safe_store_path(clean_seg, cam_id, date_str)
 
                 if seg_path and os.path.isfile(seg_path) and os.path.getsize(seg_path) > 0:
-                    segments.append(seg_path)
+                    segments.append((seg_path, pending_extinf))
+                    valid_duration += pending_extinf
                 else:
                     print(f"[⚠️] Missing or empty HLS segment '{line}' referenced in {m3u8_path}")
+                pending_extinf = 0.0
     except Exception as e:
         print(f"[❌] Failed to parse playlist {m3u8_path}: {e}")
 
-    return segments
+    return segments, valid_duration
 
 
 def _resolve_clip_files(cam_id, date_str, clips):
-    """Resolves a list of clip entries into an ordered, deduplicated list of media files for ffmpeg."""
+    """Resolves a list of clip entries into:
+    1. media_files: ordered, deduplicated list of .ts/.mp4 segment paths for ffmpeg concat
+    2. resolved_clips: count of resolved clips
+    3. clip_segments_meta: list of segment metadata dicts [{offset, duration, date, startTime, endDate, endTime, filename}]
+    """
     extracted = []
     for idx, item in enumerate(clips):
         ref, sort_key = _extract_clip_reference(item)
         if ref:
-            extracted.append((sort_key, idx, ref))
+            extracted.append((sort_key, idx, ref, item))
 
     # Sort chronologically if sort keys are available so newest-first UI lists play forward in time
     if len(extracted) > 1 and all(item[0] for item in extracted):
@@ -432,41 +529,132 @@ def _resolve_clip_files(cam_id, date_str, clips):
     media_files = []
     seen = set()
     resolved_clips = 0
+    clip_segments_meta = []
+    running_offset = 0.0
 
-    for _, _, ref in extracted:
-        resolved = _safe_store_path(ref, cam_id, date_str)
+    for _, _, ref, raw_item in extracted:
+        clean_name = os.path.basename(unquote(ref.strip()).split('?', 1)[0].split('#', 1)[0])
+        ts_match = _CLIP_TIMESTAMP_RE.search(clean_name)
+        clip_date = ts_match.group('date') if ts_match else (
+                (raw_item.get('date') if isinstance(raw_item, dict) else None) or date_str
+        )
+        clip_time_raw = ts_match.group('time') if ts_match else None
+
+        resolved = _safe_store_path(ref, cam_id, clip_date)
+        if not resolved and clip_date != date_str:
+            resolved = _safe_store_path(ref, cam_id, date_str)
         if not resolved:
-            print(f"[⚠️] Clip path could not be resolved for {cam_id} ({date_str}): {ref}")
+            print(f"[⚠️] Clip path could not be resolved for {cam_id} ({clip_date}): {ref}")
             continue
 
-        clip_segments = []
+        clip_seg_tuples = []
+        m3u8_dur = 0.0
         if os.path.isdir(resolved):
-            # Look for an .m3u8 playlist or direct .ts/.mp4 segments inside the directory
             dir_entries = sorted(os.listdir(resolved))
             m3u8_files = [e for e in dir_entries if e.endswith('.m3u8')]
             if m3u8_files:
-                clip_segments = _expand_m3u8_segments(os.path.join(resolved, m3u8_files[0]), cam_id, date_str)
+                clip_seg_tuples, m3u8_dur = _expand_m3u8_segments(
+                    os.path.join(resolved, m3u8_files[0]), cam_id, clip_date
+                )
             else:
-                clip_segments = [
-                    os.path.join(resolved, e)
+                clip_seg_tuples = [
+                    (os.path.join(resolved, e), 0.0)
                     for e in dir_entries
                     if e.endswith(('.ts', '.mp4')) and os.path.getsize(os.path.join(resolved, e)) > 0
                 ]
         elif resolved.endswith('.m3u8'):
-            clip_segments = _expand_m3u8_segments(resolved, cam_id, date_str)
+            clip_seg_tuples, m3u8_dur = _expand_m3u8_segments(resolved, cam_id, clip_date)
         elif resolved.endswith(('.ts', '.mp4')) and os.path.isfile(resolved) and os.path.getsize(resolved) > 0:
-            clip_segments = [resolved]
+            clip_seg_tuples = [(resolved, 0.0)]
 
-        if clip_segments:
-            resolved_clips += 1
-            for seg in clip_segments:
-                if seg not in seen:
-                    seen.add(seg)
-                    media_files.append(seg)
+        if clip_seg_tuples:
+            added_count = 0
+            added_extinf_dur = 0.0
+            for seg_path, seg_dur in clip_seg_tuples:
+                if seg_path not in seen:
+                    seen.add(seg_path)
+                    media_files.append(seg_path)
+                    added_count += 1
+                    added_extinf_dur += seg_dur
+
+            if added_count > 0:
+                resolved_clips += 1
+                clip_dur = added_extinf_dur if added_extinf_dur > 0 else m3u8_dur
+                if clip_dur <= 0:
+                    clip_dur = _get_clip_duration(cam_id, clip_date, ref, raw_item)
+
+                start_hhmmss = None
+                end_date_str = clip_date
+                end_hhmmss = None
+
+                if clip_time_raw and len(clip_time_raw) == 6:
+                    start_hhmmss = f"{clip_time_raw[0:2]}:{clip_time_raw[2:4]}:{clip_time_raw[4:6]}"
+                    try:
+                        start_dt = datetime.strptime(f"{clip_date}_{clip_time_raw}", "%Y%m%d_%H%M%S")
+                        end_dt = start_dt + timedelta(seconds=max(0.0, clip_dur))
+                        end_date_str = end_dt.strftime("%Y%m%d")
+                        end_hhmmss = end_dt.strftime("%H:%M:%S")
+                    except ValueError:
+                        end_hhmmss = start_hhmmss
+                elif isinstance(raw_item, dict) and raw_item.get('startTime'):
+                    start_hhmmss = str(raw_item['startTime'])
+                    end_hhmmss = str(raw_item.get('endTime') or start_hhmmss)
+                    end_date_str = str(raw_item.get('endDate') or clip_date)
+
+                if start_hhmmss and clip_dur > 0:
+                    clip_segments_meta.append({
+                        "offset": round(running_offset, 2),
+                        "duration": round(clip_dur, 2),
+                        "date": clip_date,
+                        "startTime": start_hhmmss,
+                        "endDate": end_date_str,
+                        "endTime": end_hhmmss,
+                        "filename": clean_name
+                    })
+                    running_offset += clip_dur
         else:
             print(f"[⚠️] No valid media segments found for clip: {resolved}")
 
-    return media_files, resolved_clips
+    return media_files, resolved_clips, clip_segments_meta
+
+
+def _write_video_sidecar_json(
+        mp4_filepath,
+        cam_id,
+        start_date,
+        end_date,
+        start_time_fmt,
+        end_time_fmt,
+        clip_segments_meta
+):
+    """Atomically writes the sidecar .json file alongside a generated MP4 video in ABS_VIDEO_DIR."""
+    base_path = os.path.splitext(mp4_filepath)[0]
+    sidecar_path = f"{base_path}.json"
+    sidecar_tmp = f"{sidecar_path}.tmp"
+
+    total_duration = round(sum(float(s.get("duration") or 0.0) for s in clip_segments_meta), 2)
+    payload = {
+        "filename": os.path.basename(mp4_filepath),
+        "camId": cam_id,
+        "date": start_date,
+        "startTime": start_time_fmt,
+        "endDate": end_date,
+        "endTime": end_time_fmt,
+        "duration": total_duration,
+        "segments": clip_segments_meta
+    }
+
+    try:
+        with open(sidecar_tmp, 'w', encoding='utf-8') as sf:
+            json.dump(payload, sf, indent=2)
+        os.replace(sidecar_tmp, sidecar_path)
+    except OSError as e:
+        print(f"[⚠️] Failed to write sidecar JSON {sidecar_path}: {e}")
+        if os.path.exists(sidecar_tmp):
+            try:
+                os.remove(sidecar_tmp)
+            except OSError:
+                pass
 
 
 def generate_video_clip(
@@ -478,7 +666,7 @@ def generate_video_clip(
         output_filename=None,
         last_clip_duration=None
 ):
-    """Background worker to generate and store an MP4 video clip from displayed history."""
+    """Background worker to generate and store an MP4 video clip and its sidecar .json from displayed history."""
     start_time_Wall = time.monotonic()
     (
         start_date,
@@ -517,7 +705,7 @@ def generate_video_clip(
         try:
             os.makedirs(ABS_VIDEO_DIR, exist_ok=True)
 
-            media_files, resolved_clips = _resolve_clip_files(cam_id, start_date, clips)
+            media_files, resolved_clips, clip_segments_meta = _resolve_clip_files(cam_id, start_date, clips)
             print(
                 f"[🔍] Resolved {resolved_clips}/{len(clips)} clips into "
                 f"{len(media_files)} media segment(s) for {cam_id} ({date_window_label})"
@@ -615,11 +803,21 @@ def generate_video_clip(
             os.replace(temp_output_path, final_output_path)
             temp_output_path = None
 
+            _write_video_sidecar_json(
+                final_output_path,
+                cam_id=cam_id,
+                start_date=start_date,
+                end_date=end_date,
+                start_time_fmt=start_fmt,
+                end_time_fmt=end_fmt,
+                clip_segments_meta=clip_segments_meta
+            )
+
             size_mb = os.path.getsize(final_output_path) / (1024 * 1024)
             elapsed = time.monotonic() - start_time_Wall
             print(
                 f"[✅] Video created for {cam_id}: {final_output_path} "
-                f"({size_mb:.2f} MB in {elapsed:.1f}s)"
+                f"({size_mb:.2f} MB, {len(clip_segments_meta)} clip segment(s) in {elapsed:.1f}s)"
             )
 
         except subprocess.TimeoutExpired:
@@ -747,7 +945,7 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
         elif (
                 clean_path.startswith('/recordings/')
                 or (STORE_DIR_NAME != 'recordings' and clean_path.startswith(f'/{STORE_DIR_NAME}/'))
-        ) and clean_path.endswith(('.ts', '.jpg', '.vtt', '.m3u8')):
+        ) and clean_path.endswith(('.ts', '.jpg', '.vtt', '.m3u8', '.json')):
             self.send_header('Cache-Control', 'public, max-age=86400, immutable')
 
         super().end_headers()
@@ -956,7 +1154,7 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
             self.send_error(500, f"Server Error: {e}")
 
     def _handle_video_stream(self, path_no_query, query_params):
-        """Streams or downloads a requested video file from ABS_VIDEO_DIR."""
+        """Streams or downloads a requested video (or sidecar .json) file from ABS_VIDEO_DIR."""
         raw_file = (
                 query_params.get('file', [None])[0]
                 or query_params.get('filename', [None])[0]
@@ -965,7 +1163,7 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
         if not raw_file and path_no_query.startswith('/api/video/stream/'):
             raw_file = path_no_query[len('/api/video/stream/'):]
 
-        clean_name, filepath = _resolve_video_file(raw_file)
+        clean_name, filepath = _resolve_video_file(raw_file, allow_json=True)
         if not clean_name or not filepath:
             self._send_json({"error": "Invalid or missing video filename"}, status=400)
             return
@@ -981,13 +1179,13 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
         }
 
         range_header = self.headers.get('Range')
-        if range_header:
+        if range_header and clean_name.lower().endswith('.mp4'):
             self.serve_range(filepath, range_header, extra_headers=extra_headers)
         else:
             self._serve_optimized_file(filepath, clean_name, extra_headers=extra_headers)
 
     def _handle_video_delete(self, path_no_query, query_params):
-        """Deletes a specified video file from ABS_VIDEO_DIR."""
+        """Deletes a specified video file and its sidecar .json from ABS_VIDEO_DIR."""
         raw_file = (
                 query_params.get('file', [None])[0]
                 or query_params.get('filename', [None])[0]
@@ -1022,6 +1220,15 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
 
         try:
             os.remove(filepath)
+            sidecar_path = os.path.splitext(filepath)[0] + '.json'
+            if os.path.isfile(sidecar_path):
+                try:
+                    os.remove(sidecar_path)
+                except OSError:
+                    pass
+            with _VIDEO_SIDECAR_LOCK:
+                _VIDEO_SIDECAR_CACHE.pop(sidecar_path, None)
+
             print(f"[🗑️] Deleted video file '{clean_name}' (requested by {self.address_string()})")
             self._send_json({"status": "deleted", "filename": clean_name}, status=200)
         except OSError as e:

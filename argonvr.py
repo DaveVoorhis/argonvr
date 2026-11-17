@@ -1,5 +1,6 @@
 import asyncio
 import os
+import re
 import time
 import atexit
 import sys
@@ -52,6 +53,8 @@ SETTS_MONOTONIC_BSF = (
     "dts='max(if(eq(PTS,NOPTS),DTS,PTS),if(eq(PREV_OUTDTS,NOPTS),0,PREV_OUTDTS+1))':"
     "pts='max(if(eq(PTS,NOPTS),DTS,PTS),if(eq(PREV_OUTPTS,NOPTS),0,PREV_OUTPTS+1))'"
 )
+
+CLIP_TIMESTAMP_RE = re.compile(r'^(?P<cam>.+)_(?P<date>\d{8})_(?P<time>\d{6})$')
 
 os.makedirs(BASE_DIR, exist_ok=True)
 os.makedirs(STORE_DIR, exist_ok=True)
@@ -184,6 +187,182 @@ def get_video_duration(filepath):
         return round(float(proc.stdout.strip()), 2)
     except Exception:
         return 0.0
+
+def parse_clip_metadata(filename_or_base, duration=0.0, cam_id_fallback=None):
+    """Parses clip start date/time and calculates end date/time from a clip filename or base_name."""
+    base_name = os.path.splitext(os.path.basename(filename_or_base))[0]
+    dur = round(max(0.0, float(duration or 0.0)), 2)
+
+    match = CLIP_TIMESTAMP_RE.match(base_name)
+    if match:
+        cam_id = cam_id_fallback or match.group('cam')
+        date_str = match.group('date')
+        time_str = match.group('time')
+    else:
+        parts = base_name.split('_')
+        cam_id = cam_id_fallback or (parts[0] if parts else 'cam1')
+        date_str = parts[1] if len(parts) >= 2 and len(parts[1]) == 8 else time.strftime('%Y%m%d')
+        time_str = parts[2] if len(parts) >= 3 and len(parts[2]) >= 6 else '000000'
+        time_str = time_str[:6]
+
+    start_time_str = f"{time_str[0:2]}:{time_str[2:4]}:{time_str[4:6]}"
+    try:
+        start_dt = datetime.datetime.strptime(f"{date_str}_{time_str}", "%Y%m%d_%H%M%S")
+        end_dt = start_dt + datetime.timedelta(seconds=dur)
+        end_date_str = end_dt.strftime("%Y%m%d")
+        end_time_str = end_dt.strftime("%H:%M:%S")
+        start_epoch = round(start_dt.timestamp(), 2)
+    except ValueError:
+        end_date_str = date_str
+        end_time_str = start_time_str
+        start_epoch = 0.0
+
+    return {
+        "camId": cam_id,
+        "date": date_str,
+        "startTime": start_time_str,
+        "endDate": end_date_str,
+        "endTime": end_time_str,
+        "startEpoch": start_epoch,
+        "duration": dur
+    }
+
+def write_clip_sidecar_json(output_dir, base_name, cam_id=None, duration=None):
+    """Writes an atomic sidecar .json file for a single packaged HLS clip."""
+    m3u8_filename = f"{base_name}.m3u8"
+    m3u8_filepath = os.path.join(output_dir, m3u8_filename)
+    sidecar_filepath = os.path.join(output_dir, f"{base_name}.json")
+    sidecar_tmp = sidecar_filepath + ".tmp"
+
+    if duration is None:
+        duration = get_video_duration(m3u8_filepath)
+
+    meta = parse_clip_metadata(base_name, duration=duration, cam_id_fallback=cam_id)
+    payload = {
+        "filename": m3u8_filename,
+        "camId": meta["camId"],
+        "date": meta["date"],
+        "startTime": meta["startTime"],
+        "endDate": meta["endDate"],
+        "endTime": meta["endTime"],
+        "startEpoch": meta["startEpoch"],
+        "duration": meta["duration"],
+        "segments": [
+            {
+                "offset": 0.0,
+                "duration": meta["duration"],
+                "date": meta["date"],
+                "startTime": meta["startTime"],
+                "endDate": meta["endDate"],
+                "endTime": meta["endTime"],
+                "filename": m3u8_filename
+            }
+        ]
+    }
+
+    try:
+        with open(sidecar_tmp, 'w', encoding='utf-8') as sf:
+            json.dump(payload, sf, indent=2)
+        os.replace(sidecar_tmp, sidecar_filepath)
+    except OSError as e:
+        print(f"[⚠️] Failed to write clip sidecar {sidecar_filepath}: {e}")
+
+    return payload
+
+def write_stitched_mp4_sidecar(mp4_filepath, source_clips, cam_id=None):
+    """Builds and atomically writes a multi-segment sidecar .json file for a stitched MP4 video.
+    `source_clips` can be a list of filepaths, filenames, or manifest/sidecar dicts."""
+    base_path = os.path.splitext(mp4_filepath)[0]
+    sidecar_filepath = f"{base_path}.json"
+    sidecar_tmp = sidecar_filepath + ".tmp"
+
+    segments = []
+    running_offset = 0.0
+
+    for item in source_clips:
+        if isinstance(item, dict):
+            clip_name = item.get('filename') or item.get('file') or ''
+            dur = float(item.get('duration') or 0.0)
+            if dur <= 0 and item.get('filepath') and os.path.exists(item['filepath']):
+                dur = get_video_duration(item['filepath'])
+            meta = parse_clip_metadata(
+                clip_name,
+                duration=dur,
+                cam_id_fallback=item.get('camId') or cam_id
+            )
+            seg_date = item.get('date') or meta['date']
+            seg_start = item.get('startTime') or meta['startTime']
+            seg_end_date = item.get('endDate') or meta['endDate']
+            seg_end = item.get('endTime') or meta['endTime']
+            seg_cam = item.get('camId') or meta['camId']
+        else:
+            clip_path = str(item)
+            clip_name = os.path.basename(clip_path)
+            clip_sidecar = os.path.splitext(clip_path)[0] + ".json"
+            loaded_sidecar = None
+            if os.path.exists(clip_sidecar):
+                try:
+                    with open(clip_sidecar, 'r', encoding='utf-8') as cf:
+                        loaded_sidecar = json.load(cf)
+                except Exception:
+                    loaded_sidecar = None
+
+            if loaded_sidecar and loaded_sidecar.get('duration', 0) > 0:
+                dur = float(loaded_sidecar['duration'])
+                seg_date = loaded_sidecar.get('date')
+                seg_start = loaded_sidecar.get('startTime')
+                seg_end_date = loaded_sidecar.get('endDate')
+                seg_end = loaded_sidecar.get('endTime')
+                seg_cam = loaded_sidecar.get('camId') or cam_id
+            else:
+                dur = get_video_duration(clip_path) if os.path.exists(clip_path) else 0.0
+                meta = parse_clip_metadata(clip_name, duration=dur, cam_id_fallback=cam_id)
+                seg_date = meta['date']
+                seg_start = meta['startTime']
+                seg_end_date = meta['endDate']
+                seg_end = meta['endTime']
+                seg_cam = meta['camId']
+
+        if not cam_id and seg_cam:
+            cam_id = seg_cam
+
+        dur = round(max(0.0, dur), 2)
+        if dur <= 0:
+            continue
+
+        segments.append({
+            "offset": round(running_offset, 2),
+            "duration": dur,
+            "date": seg_date,
+            "startTime": seg_start,
+            "endDate": seg_end_date,
+            "endTime": seg_end,
+            "filename": clip_name
+        })
+        running_offset += dur
+
+    first_seg = segments[0] if segments else {}
+    last_seg = segments[-1] if segments else {}
+
+    payload = {
+        "filename": os.path.basename(mp4_filepath),
+        "camId": cam_id or "cam1",
+        "date": first_seg.get("date"),
+        "startTime": first_seg.get("startTime"),
+        "endDate": last_seg.get("endDate") or last_seg.get("date"),
+        "endTime": last_seg.get("endTime"),
+        "duration": round(running_offset, 2),
+        "segments": segments
+    }
+
+    try:
+        with open(sidecar_tmp, 'w', encoding='utf-8') as sf:
+            json.dump(payload, sf, indent=2)
+        os.replace(sidecar_tmp, sidecar_filepath)
+    except OSError as e:
+        print(f"[⚠️] Failed to write stitched MP4 sidecar {sidecar_filepath}: {e}")
+
+    return payload
 
 def format_vtt_time(seconds):
     """Formats raw seconds into WebVTT timestamp format."""
@@ -320,16 +499,22 @@ def update_history_manifest(target_cam_id=None, target_dates=None):
         for f in dir_entries:
             if f.endswith('.m3u8') and f not in ('stream.m3u8', 'stream_sub.m3u8'):
                 try:
-                    parts = f.split('_')
-                    if len(parts) >= 2:
+                    base_name = os.path.splitext(f)[0]
+                    match = CLIP_TIMESTAMP_RE.match(base_name)
+                    if match:
+                        date_str = match.group('date')
+                    else:
+                        parts = f.split('_')
+                        if len(parts) < 2:
+                            continue
                         date_str = parts[1]
 
-                        if target_dates and date_str not in target_dates:
-                            continue
+                    if target_dates and date_str not in target_dates:
+                        continue
 
-                        if date_str not in daily_files:
-                            daily_files[date_str] = []
-                        daily_files[date_str].append(f)
+                    if date_str not in daily_files:
+                        daily_files[date_str] = []
+                    daily_files[date_str].append(f)
                 except IndexError:
                     continue
 
@@ -367,24 +552,39 @@ def update_history_manifest(target_cam_id=None, target_dates=None):
                 base_name = os.path.splitext(f)[0]
                 jpg_filename = f"{base_name}.jpg"
                 vtt_filename = f"{base_name}.vtt"
+                sidecar_filename = f"{base_name}.json"
 
                 has_sprite = os.path.exists(os.path.join(cam_path, jpg_filename))
                 has_vtt = os.path.exists(os.path.join(cam_path, vtt_filename))
+                has_sidecar = os.path.exists(os.path.join(cam_path, sidecar_filename))
 
                 cached = existing_data.get(f)
                 if (
                         cached
                         and cached.get('duration', 0) > 0
+                        and cached.get('startTime')
+                        and cached.get('endTime')
                         and bool(cached.get('sprite_url')) == has_sprite
                         and bool(cached.get('vtt_url')) == has_vtt
                 ):
+                    if not has_sidecar:
+                        write_clip_sidecar_json(cam_path, base_name, cam_id=cam_id, duration=cached['duration'])
                     manifest_data.append(cached)
                 else:
                     filepath = os.path.join(cam_path, f)
+                    dur = get_video_duration(filepath)
+                    meta = parse_clip_metadata(base_name, duration=dur, cam_id_fallback=cam_id)
+                    if not has_sidecar:
+                        write_clip_sidecar_json(cam_path, base_name, cam_id=cam_id, duration=dur)
                     manifest_data.append({
                         "filename": f,
                         "url": f"./{store_basename}/{cam_id}/{f}",
-                        "duration": get_video_duration(filepath),
+                        "duration": dur,
+                        "date": meta["date"],
+                        "startTime": meta["startTime"],
+                        "endDate": meta["endDate"],
+                        "endTime": meta["endTime"],
+                        "startEpoch": meta["startEpoch"],
                         "sprite_url": f"./{store_basename}/{cam_id}/{jpg_filename}" if has_sprite else None,
                         "vtt_url": f"./{store_basename}/{cam_id}/{vtt_filename}" if has_vtt else None
                     })
@@ -439,9 +639,14 @@ def _purge_oldest_files_sync():
 
         try:
             filename = os.path.basename(target_m3u8)
-            parts = filename.split('_')
-            if len(parts) >= 2:
-                affected_dates.add(parts[1])
+            base_name = os.path.splitext(filename)[0]
+            match = CLIP_TIMESTAMP_RE.match(base_name)
+            if match:
+                affected_dates.add(match.group('date'))
+            else:
+                parts = filename.split('_')
+                if len(parts) >= 2:
+                    affected_dates.add(parts[1])
         except Exception:
             pass
 
@@ -562,15 +767,21 @@ async def background_encoder_worker():
                         except OSError:
                             pass
 
+                        await asyncio.to_thread(write_clip_sidecar_json, final_dir, base_name, cam_id)
                         await generate_sprite_and_vtt(final_filepath, final_dir, base_name)
 
                         try:
-                            parts = base_name.split('_')
-                            if len(parts) >= 2:
-                                target_date = parts[1]
+                            match = CLIP_TIMESTAMP_RE.match(base_name)
+                            if match:
+                                target_date = match.group('date')
                                 await asyncio.to_thread(update_history_manifest, cam_id, [target_date])
                             else:
-                                await asyncio.to_thread(update_history_manifest, cam_id)
+                                parts = base_name.split('_')
+                                if len(parts) >= 2:
+                                    target_date = parts[1]
+                                    await asyncio.to_thread(update_history_manifest, cam_id, [target_date])
+                                else:
+                                    await asyncio.to_thread(update_history_manifest, cam_id)
                         except Exception:
                             await asyncio.to_thread(update_history_manifest, cam_id)
                     else:

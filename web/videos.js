@@ -100,6 +100,12 @@
         legacyMuteBtn.remove();
     }
 
+    // Prevent transport time label from wrapping when displaying wall-clock time
+    if (vpTimeLabel) {
+        vpTimeLabel.style.whiteSpace = 'nowrap';
+        vpTimeLabel.style.minWidth = 'max-content';
+    }
+
     const videosListEl = document.getElementById('videos-list');
 
     const deleteModal = document.getElementById('videos-delete-modal');
@@ -111,8 +117,218 @@
     // State
     let allVideos = [];
     let activeFilename = null;
+    let activeClipSegments = [];
     let pendingDeleteVideo = null;
     let isScrubbingVideo = false;
+    let scrubberTicksEl = null;
+    let scrubberTooltipEl = null;
+
+    function initScrubberTicksContainer() {
+        if (!vpScrubber || !vpScrubber.parentNode) return;
+
+        if (!document.getElementById('vp-scrubber-ticks-style')) {
+            const styleEl = document.createElement('style');
+            styleEl.id = 'vp-scrubber-ticks-style';
+            styleEl.textContent = `
+                .vp-scrubber-wrap {
+                    position: relative;
+                    flex: 1 1 auto;
+                    display: flex;
+                    align-items: center;
+                    min-width: 80px;
+                }
+                .vp-scrubber-wrap > #vp-scrubber {
+                    width: 100%;
+                    flex: 1 1 auto;
+                    margin: 0;
+                    position: relative;
+                    z-index: 2;
+                }
+                .vp-scrubber-ticks {
+                    position: absolute;
+                    inset: 0;
+                    pointer-events: none;
+                    z-index: 3;
+                    overflow: visible;
+                }
+                .vp-scrubber-tick {
+                    position: absolute;
+                    top: 50%;
+                    width: 2px;
+                    height: 12px;
+                    background: #ffcc00;
+                    border-radius: 1px;
+                    transform: translate(-50%, -50%);
+                    box-shadow: 0 0 2px rgba(0, 0, 0, 0.9);
+                    opacity: 0.92;
+                    transition: transform 0.12s ease, background-color 0.12s ease;
+                }
+                .vp-scrubber-tick.active-hover {
+                    background: #ffffff;
+                    transform: translate(-50%, -50%) scaleY(1.35) scaleX(1.3);
+                }
+                .vp-scrubber-tooltip {
+                    position: absolute;
+                    bottom: calc(100% + 8px);
+                    transform: translateX(-50%);
+                    background: rgba(15, 18, 24, 0.94);
+                    color: #f5f7fa;
+                    border: 1px solid rgba(255, 204, 0, 0.45);
+                    border-radius: 4px;
+                    padding: 3px 7px;
+                    font-size: 11px;
+                    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+                    white-space: nowrap;
+                    pointer-events: none;
+                    z-index: 10;
+                    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5);
+                    opacity: 0;
+                    transition: opacity 0.1s ease;
+                }
+                .vp-scrubber-tooltip.visible {
+                    opacity: 1;
+                }
+                .vp-scrubber-tooltip.on-transition {
+                    border-color: #ffcc00;
+                    color: #ffcc00;
+                }
+            `;
+            document.head.appendChild(styleEl);
+        }
+
+        const wrap = document.createElement('div');
+        wrap.className = 'vp-scrubber-wrap';
+        vpScrubber.parentNode.insertBefore(wrap, vpScrubber);
+        wrap.appendChild(vpScrubber);
+
+        scrubberTicksEl = document.createElement('div');
+        scrubberTicksEl.className = 'vp-scrubber-ticks';
+        wrap.appendChild(scrubberTicksEl);
+
+        scrubberTooltipEl = document.createElement('div');
+        scrubberTooltipEl.className = 'vp-scrubber-tooltip';
+        wrap.appendChild(scrubberTooltipEl);
+    }
+
+    function getEffectiveClipDuration() {
+        const playerDur = videoPlayer ? videoPlayer.duration : 0;
+        if (Number.isFinite(playerDur) && playerDur > 0) {
+            return playerDur;
+        }
+        if (activeClipSegments && activeClipSegments.length > 0) {
+            const lastSeg = activeClipSegments[activeClipSegments.length - 1];
+            if (Number.isFinite(lastSeg.duration) && lastSeg.duration > 0) {
+                return lastSeg.offset + lastSeg.duration;
+            }
+        }
+        return 0;
+    }
+
+    function clearScrubberTicks() {
+        if (scrubberTicksEl) {
+            scrubberTicksEl.innerHTML = '';
+        }
+        if (scrubberTooltipEl) {
+            scrubberTooltipEl.classList.remove('visible', 'on-transition');
+        }
+    }
+
+    function renderScrubberTicks() {
+        if (!scrubberTicksEl) return;
+        scrubberTicksEl.innerHTML = '';
+
+        if (!activeFilename || !activeClipSegments || activeClipSegments.length <= 1) {
+            return;
+        }
+
+        const totalDur = getEffectiveClipDuration();
+        if (!Number.isFinite(totalDur) || totalDur <= 0) {
+            return;
+        }
+
+        for (let i = 1; i < activeClipSegments.length; i++) {
+            const seg = activeClipSegments[i];
+            if (!Number.isFinite(seg.offset) || seg.offset <= 0 || seg.offset >= totalDur) {
+                continue;
+            }
+
+            const ratio = Math.max(0, Math.min(1, seg.offset / totalDur));
+            const tick = document.createElement('span');
+            tick.className = 'vp-scrubber-tick';
+            tick.dataset.segIndex = String(seg.index);
+            tick.dataset.offset = String(seg.offset);
+            // Align with standard 14px range thumb center across the track width
+            tick.style.left = `calc(7px + (100% - 14px) * ${ratio.toFixed(6)})`;
+            scrubberTicksEl.appendChild(tick);
+        }
+    }
+
+    function updateScrubberHoverTooltip(clientX) {
+        if (!scrubberTooltipEl || !vpScrubber || !activeFilename || vpScrubber.disabled) {
+            return;
+        }
+        const totalDur = getEffectiveClipDuration();
+        if (!Number.isFinite(totalDur) || totalDur <= 0) {
+            scrubberTooltipEl.classList.remove('visible');
+            return;
+        }
+
+        const rect = vpScrubber.getBoundingClientRect();
+        if (rect.width <= 0) return;
+
+        const thumbRadius = 7;
+        const usableWidth = Math.max(1, rect.width - thumbRadius * 2);
+        const relX = Math.max(0, Math.min(usableWidth, clientX - rect.left - thumbRadius));
+        const ratio = relX / usableWidth;
+        const hoverSec = ratio * totalDur;
+
+        // Check if cursor is within ~6px of a stitched clip transition tick
+        const snapToleranceSec = (6 / usableWidth) * totalDur;
+        let snappedSeg = null;
+        if (activeClipSegments.length > 1) {
+            for (let i = 1; i < activeClipSegments.length; i++) {
+                const seg = activeClipSegments[i];
+                if (Math.abs(hoverSec - seg.offset) <= snapToleranceSec) {
+                    snappedSeg = seg;
+                    break;
+                }
+            }
+        }
+
+        if (scrubberTicksEl) {
+            const ticks = scrubberTicksEl.querySelectorAll('.vp-scrubber-tick');
+            ticks.forEach((t) => {
+                t.classList.toggle(
+                    'active-hover',
+                    Boolean(snappedSeg && Number(t.dataset.segIndex) === snappedSeg.index)
+                );
+            });
+        }
+
+        const targetSec = snappedSeg ? snappedSeg.offset : hoverSec;
+        const resolved = resolveRecordingTimeAtPosition(targetSec);
+        const relClock = formatDurationClock(targetSec);
+
+        if (snappedSeg && resolved) {
+            scrubberTooltipEl.textContent = `⏭ Clip ${snappedSeg.index}/${activeClipSegments.length} • ${resolved.clockStr} (${relClock})`;
+            scrubberTooltipEl.classList.add('on-transition');
+        } else if (resolved) {
+            const clipBadge = resolved.totalSegments > 1
+                ? `Clip ${resolved.segment.index}/${resolved.totalSegments} • `
+                : '';
+            scrubberTooltipEl.textContent = `${clipBadge}${resolved.clockStr} (${relClock})`;
+            scrubberTooltipEl.classList.remove('on-transition');
+        } else {
+            scrubberTooltipEl.textContent = relClock;
+            scrubberTooltipEl.classList.remove('on-transition');
+        }
+
+        const clampedPx = Math.max(24, Math.min(rect.width - 24, clientX - rect.left));
+        scrubberTooltipEl.style.left = `${clampedPx}px`;
+        scrubberTooltipEl.classList.add('visible');
+    }
+
+    initScrubberTicksContainer();
 
     function initPlaybackSpeedOptions() {
         if (!vpSpeedSelect) return;
@@ -146,6 +362,178 @@
     }
 
     initPlaybackSpeedOptions();
+
+    function parseTimeStringToSeconds(timeStr, filenameHint) {
+        if (!timeStr) return null;
+        const match = String(timeStr).trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+        if (!match) return null;
+
+        const hrs = parseInt(match[1], 10);
+        const mins = parseInt(match[2], 10);
+        let secs = match[3] !== undefined ? parseInt(match[3], 10) : null;
+
+        if (secs === null && filenameHint) {
+            const hhmm = `${String(hrs).padStart(2, '0')}${String(mins).padStart(2, '0')}`;
+            const fnMatch = String(filenameHint).match(new RegExp(`(?:^|[_\\-T])${hhmm}(\\d{2})(?:[_\\-.]|$)`));
+            if (fnMatch) {
+                const parsedSec = parseInt(fnMatch[1], 10);
+                if (parsedSec >= 0 && parsedSec < 60) {
+                    secs = parsedSec;
+                }
+            }
+        }
+
+        if (hrs >= 0 && hrs < 24 && mins >= 0 && mins < 60) {
+            return (hrs * 3600) + (mins * 60) + (secs || 0);
+        }
+        return null;
+    }
+
+    function buildClipSegments(video) {
+        if (!video) return [];
+
+        // 1. Multi-segment array provided by /api/video/list or sidecar .json
+        if (Array.isArray(video.segments) && video.segments.length > 0) {
+            let runningOffset = 0;
+            const mapped = [];
+            video.segments.forEach((seg, idx) => {
+                const startSeconds = parseTimeStringToSeconds(
+                    seg.startTime || seg.start,
+                    seg.filename || video.filename
+                );
+                const dur = Number(seg.duration) || 0;
+                const offset = Number.isFinite(Number(seg.offset)) ? Number(seg.offset) : runningOffset;
+                if (startSeconds !== null && dur > 0) {
+                    mapped.push({
+                        index: idx + 1,
+                        offset,
+                        duration: dur,
+                        startSeconds,
+                        date: seg.date || video.date || null,
+                        filename: seg.filename || null
+                    });
+                }
+                runningOffset = offset + dur;
+            });
+            if (mapped.length > 0) {
+                mapped.sort((a, b) => a.offset - b.offset);
+                mapped.forEach((seg, i) => {
+                    seg.index = i + 1;
+                });
+                return mapped;
+            }
+        }
+
+        // 2. Fallback: single continuous clip starting at video.startTime
+        let singleStart = parseTimeStringToSeconds(video.startTime, video.filename);
+        if (singleStart === null && video.filename) {
+            const fnMatch = String(video.filename).match(/(?:19|20)\d{6}[_\-T](\d{2})(\d{2})(\d{2})/);
+            if (fnMatch) {
+                const hrs = parseInt(fnMatch[1], 10);
+                const mins = parseInt(fnMatch[2], 10);
+                const secs = parseInt(fnMatch[3], 10);
+                if (hrs < 24 && mins < 60 && secs < 60) {
+                    singleStart = (hrs * 3600) + (mins * 60) + secs;
+                }
+            }
+        }
+
+        if (singleStart !== null) {
+            return [{
+                index: 1,
+                offset: 0,
+                duration: Infinity,
+                startSeconds: singleStart,
+                date: video.date || null,
+                filename: video.filename || null
+            }];
+        }
+
+        return [];
+    }
+
+    async function maybeFetchSidecarSegments(video) {
+        if (!video || !video.filename || (Array.isArray(video.segments) && video.segments.length > 0)) {
+            return;
+        }
+        const targetFilename = video.filename;
+        const baseName = targetFilename.replace(/\.[^/.]+$/, '');
+        const candidateUrls = [];
+        if (video.sidecarUrl) {
+            candidateUrls.push(video.sidecarUrl);
+        }
+        candidateUrls.push(`/api/video/stream?file=${encodeURIComponent(baseName + '.json')}`);
+
+        for (const url of candidateUrls) {
+            try {
+                const resp = await fetch(url, { credentials: 'include', cache: 'no-store' });
+                if (!resp.ok) continue;
+                const sidecar = await resp.json();
+                if (sidecar && Array.isArray(sidecar.segments) && sidecar.segments.length > 0) {
+                    video.segments = sidecar.segments;
+                    if (activeFilename === targetFilename) {
+                        activeClipSegments = buildClipSegments(video);
+                        renderScrubberTicks();
+                        updateScrubberAndTime();
+                    }
+                    break;
+                }
+            } catch (_) {
+                // Ignore if sidecar endpoint is not exposed separately
+            }
+        }
+    }
+
+    function resolveRecordingTimeAtPosition(elapsedSeconds) {
+        if (!activeClipSegments || activeClipSegments.length === 0) return null;
+        const pos = Number.isFinite(elapsedSeconds) && elapsedSeconds > 0 ? elapsedSeconds : 0;
+
+        let activeSeg = activeClipSegments[0];
+        for (let i = 0; i < activeClipSegments.length; i++) {
+            const seg = activeClipSegments[i];
+            if (pos >= seg.offset) {
+                activeSeg = seg;
+            } else {
+                break;
+            }
+        }
+
+        const rawSegElapsed = Math.max(0, pos - activeSeg.offset);
+        const clampedSegElapsed = Number.isFinite(activeSeg.duration)
+            ? Math.min(activeSeg.duration, rawSegElapsed)
+            : rawSegElapsed;
+
+        const totalSeconds = ((activeSeg.startSeconds + Math.floor(clampedSegElapsed)) % 86400 + 86400) % 86400;
+        const hrs = Math.floor(totalSeconds / 3600);
+        const mins = Math.floor((totalSeconds % 3600) / 60);
+        const secs = totalSeconds % 60;
+        const clockStr = `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+
+        return {
+            clockStr,
+            segment: activeSeg,
+            totalSegments: activeClipSegments.length
+        };
+    }
+
+    function formatTimeLabelText(elapsedSec, durationSec) {
+        const relText = `${formatDurationClock(elapsedSec)} / ${formatDurationClock(durationSec)}`;
+        const resolved = resolveRecordingTimeAtPosition(elapsedSec);
+        if (!resolved) {
+            if (vpTimeLabel) vpTimeLabel.removeAttribute('title');
+            return relText;
+        }
+
+        if (vpTimeLabel) {
+            const datePart = resolved.segment.date ? `${formatDateStr(resolved.segment.date)} ` : '';
+            const segPart = resolved.totalSegments > 1
+                ? ` (Clip ${resolved.segment.index} of ${resolved.totalSegments})`
+                : '';
+            vpTimeLabel.title = `Recorded at ${datePart}${resolved.clockStr}${segPart}`;
+        }
+
+        return `${resolved.clockStr}  •  ${relText}`;
+    }
 
     function formatCamLabel(camId) {
         if (!camId) return 'CLIP';
@@ -266,6 +654,8 @@
 
     function stopAndClearPlayer() {
         activeFilename = null;
+        activeClipSegments = [];
+        clearScrubberTicks();
         try {
             videoPlayer.pause();
             videoPlayer.removeAttribute('src');
@@ -289,6 +679,7 @@
         updatePlayButtonStates();
         vpScrubber.value = 0;
         vpTimeLabel.textContent = '00:00 / 00:00';
+        vpTimeLabel.removeAttribute('title');
     }
 
     function setTransportControlsEnabled(enabled) {
@@ -317,8 +708,15 @@
             updateSummaryBadge();
             renderVideosList();
 
-            if (activeFilename && !allVideos.some(v => v.filename === activeFilename)) {
-                stopAndClearPlayer();
+            if (activeFilename) {
+                const currentObj = allVideos.find(v => v.filename === activeFilename);
+                if (!currentObj) {
+                    stopAndClearPlayer();
+                } else {
+                    activeClipSegments = buildClipSegments(currentObj);
+                    renderScrubberTicks();
+                    updateScrubberAndTime();
+                }
             }
         } catch (err) {
             console.error('Failed to fetch videos list:', err);
@@ -440,7 +838,10 @@
             const subMeta = document.createElement('div');
             subMeta.className = 'video-item-submeta';
             const createdSpan = document.createElement('span');
-            createdSpan.textContent = `Created: ${video.createdAt || 'Unknown'}`;
+            const segCount = Array.isArray(video.segments) && video.segments.length > 1
+                ? ` • ${video.segments.length} clips`
+                : '';
+            createdSpan.textContent = `Created: ${video.createdAt || 'Unknown'}${segCount}`;
             subMeta.appendChild(createdSpan);
 
             const fileRow = document.createElement('div');
@@ -513,6 +914,9 @@
     function loadAndPlayVideo(video) {
         if (!video) return;
         activeFilename = video.filename;
+        activeClipSegments = buildClipSegments(video);
+        renderScrubberTicks();
+        maybeFetchSidecarSegments(video);
 
         const streamUrl = video.streamUrl || `/api/video/stream?file=${encodeURIComponent(video.filename)}`;
         const downloadUrl = video.downloadUrl || `/api/video/stream?file=${encodeURIComponent(video.filename)}&download=1`;
@@ -534,7 +938,7 @@
 
         setTransportControlsEnabled(true);
         vpScrubber.value = 0;
-        vpTimeLabel.textContent = '00:00 / 00:00';
+        vpTimeLabel.textContent = formatTimeLabelText(0, 0);
 
         videoPlayer.play().catch((err) => {
             console.warn('Playback did not auto-start:', err);
@@ -588,7 +992,7 @@
         if (!isScrubbingVideo && Number.isFinite(dur) && dur > 0) {
             vpScrubber.value = Math.min(1000, Math.round((cur / dur) * 1000));
         }
-        vpTimeLabel.textContent = `${formatDurationClock(cur)} / ${formatDurationClock(dur)}`;
+        vpTimeLabel.textContent = formatTimeLabelText(cur, dur);
     }
 
     function openDeleteModal(video) {
@@ -698,7 +1102,11 @@
             const dur = videoPlayer.duration;
             if (Number.isFinite(dur) && dur > 0) {
                 const targetTime = (Number(vpScrubber.value) / 1000) * dur;
-                vpTimeLabel.textContent = `${formatDurationClock(targetTime)} / ${formatDurationClock(dur)}`;
+                vpTimeLabel.textContent = formatTimeLabelText(targetTime, dur);
+
+                const rect = vpScrubber.getBoundingClientRect();
+                const ratio = Number(vpScrubber.value) / 1000;
+                updateScrubberHoverTooltip(rect.left + 7 + (rect.width - 14) * ratio);
             }
         });
 
@@ -708,6 +1116,21 @@
                 videoPlayer.currentTime = (Number(vpScrubber.value) / 1000) * dur;
             }
             isScrubbingVideo = false;
+        });
+
+        vpScrubber.addEventListener('mousemove', (e) => {
+            updateScrubberHoverTooltip(e.clientX);
+        });
+
+        vpScrubber.addEventListener('mouseleave', () => {
+            if (scrubberTooltipEl) {
+                scrubberTooltipEl.classList.remove('visible', 'on-transition');
+            }
+            if (scrubberTicksEl) {
+                scrubberTicksEl.querySelectorAll('.vp-scrubber-tick.active-hover').forEach((t) => {
+                    t.classList.remove('active-hover');
+                });
+            }
         });
     }
 
@@ -767,9 +1190,13 @@
         });
         videoPlayer.addEventListener('loadedmetadata', () => {
             applyPlaybackSpeed();
+            renderScrubberTicks();
             updateScrubberAndTime();
         });
-        videoPlayer.addEventListener('durationchange', updateScrubberAndTime);
+        videoPlayer.addEventListener('durationchange', () => {
+            renderScrubberTicks();
+            updateScrubberAndTime();
+        });
         videoPlayer.addEventListener('timeupdate', updateScrubberAndTime);
         videoPlayer.addEventListener('error', () => {
             if (!activeFilename) return;
