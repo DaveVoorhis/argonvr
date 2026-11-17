@@ -94,6 +94,9 @@
     const vpSpeedSelect = document.getElementById('vp-speed-select');
     const vpBtnFullscreen = document.getElementById('vp-btn-fullscreen');
 
+    let vpBtnPrevClip = document.getElementById('vp-btn-prev-clip');
+    let vpBtnNextClip = document.getElementById('vp-btn-next-clip');
+
     // Remove mute button if present in markup (audio is never recorded)
     const legacyMuteBtn = document.getElementById('vp-btn-mute');
     if (legacyMuteBtn) {
@@ -122,6 +125,36 @@
     let isScrubbingVideo = false;
     let scrubberTicksEl = null;
     let scrubberTooltipEl = null;
+
+    function initClipSkipButtons() {
+        const baseBtnClass = (vpBtnSkipBack && vpBtnSkipBack.className)
+            ? vpBtnSkipBack.className
+            : 'ctrl-btn';
+
+        if (!vpBtnPrevClip && vpBtnSkipBack && vpBtnSkipBack.parentNode) {
+            vpBtnPrevClip = document.createElement('button');
+            vpBtnPrevClip.type = 'button';
+            vpBtnPrevClip.id = 'vp-btn-prev-clip';
+            vpBtnPrevClip.className = baseBtnClass;
+            vpBtnPrevClip.textContent = '⏮ Clip';
+            vpBtnPrevClip.title = 'Previous stitched clip (Shift + Left Arrow)';
+            vpBtnPrevClip.disabled = true;
+            vpBtnPrevClip.style.whiteSpace = 'nowrap';
+            vpBtnSkipBack.parentNode.insertBefore(vpBtnPrevClip, vpBtnSkipBack);
+        }
+
+        if (!vpBtnNextClip && vpBtnSkipFwd && vpBtnSkipFwd.parentNode) {
+            vpBtnNextClip = document.createElement('button');
+            vpBtnNextClip.type = 'button';
+            vpBtnNextClip.id = 'vp-btn-next-clip';
+            vpBtnNextClip.className = baseBtnClass;
+            vpBtnNextClip.textContent = 'Clip ⏭';
+            vpBtnNextClip.title = 'Next stitched clip (Shift + Right Arrow)';
+            vpBtnNextClip.disabled = true;
+            vpBtnNextClip.style.whiteSpace = 'nowrap';
+            vpBtnSkipFwd.parentNode.insertBefore(vpBtnNextClip, vpBtnSkipFwd.nextSibling);
+        }
+    }
 
     function initScrubberTicksContainer() {
         if (!vpScrubber || !vpScrubber.parentNode) return;
@@ -238,11 +271,13 @@
         scrubberTicksEl.innerHTML = '';
 
         if (!activeFilename || !activeClipSegments || activeClipSegments.length <= 1) {
+            updateClipSkipButtonStates();
             return;
         }
 
         const totalDur = getEffectiveClipDuration();
         if (!Number.isFinite(totalDur) || totalDur <= 0) {
+            updateClipSkipButtonStates();
             return;
         }
 
@@ -261,6 +296,8 @@
             tick.style.left = `calc(7px + (100% - 14px) * ${ratio.toFixed(6)})`;
             scrubberTicksEl.appendChild(tick);
         }
+
+        updateClipSkipButtonStates();
     }
 
     function updateScrubberHoverTooltip(clientX) {
@@ -328,6 +365,7 @@
         scrubberTooltipEl.classList.add('visible');
     }
 
+    initClipSkipButtons();
     initScrubberTicksContainer();
 
     function initPlaybackSpeedOptions() {
@@ -362,6 +400,14 @@
     }
 
     initPlaybackSpeedOptions();
+
+    function formatSecondsAsClock(secSinceMidnight) {
+        const total = ((Math.floor(secSinceMidnight) % 86400) + 86400) % 86400;
+        const hrs = Math.floor(total / 3600);
+        const mins = Math.floor((total % 3600) / 60);
+        const secs = total % 60;
+        return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+    }
 
     function parseTimeStringToSeconds(timeStr, filenameHint) {
         if (!timeStr) return null;
@@ -484,6 +530,102 @@
         }
     }
 
+    function getCurrentSegmentIndex(elapsedSeconds) {
+        if (!activeClipSegments || activeClipSegments.length === 0) return -1;
+        const pos = Number.isFinite(elapsedSeconds) && elapsedSeconds > 0 ? elapsedSeconds : 0;
+        let idx = 0;
+        for (let i = 0; i < activeClipSegments.length; i++) {
+            if (pos >= activeClipSegments[i].offset - 0.05) {
+                idx = i;
+            } else {
+                break;
+            }
+        }
+        return idx;
+    }
+
+    function updateClipSkipButtonStates() {
+        if (!vpBtnPrevClip && !vpBtnNextClip) return;
+
+        const hasMultipleClips = Boolean(
+            activeFilename && activeClipSegments && activeClipSegments.length > 1
+        );
+
+        if (!hasMultipleClips) {
+            const disabledReason = activeFilename
+                ? 'Single-clip video (no stitched clip transitions)'
+                : 'Select a video to play';
+            if (vpBtnPrevClip) {
+                vpBtnPrevClip.disabled = true;
+                vpBtnPrevClip.title = disabledReason;
+            }
+            if (vpBtnNextClip) {
+                vpBtnNextClip.disabled = true;
+                vpBtnNextClip.title = disabledReason;
+            }
+            return;
+        }
+
+        const cur = videoPlayer.currentTime || 0;
+        const curIdx = getCurrentSegmentIndex(cur);
+        const curSeg = activeClipSegments[curIdx] || activeClipSegments[0];
+        const elapsedInSeg = Math.max(0, cur - curSeg.offset);
+        const totalClips = activeClipSegments.length;
+
+        if (vpBtnPrevClip) {
+            const canGoPrev = curIdx > 0 || elapsedInSeg > 0.5;
+            vpBtnPrevClip.disabled = !canGoPrev;
+            if (elapsedInSeg > 2.0 || curIdx === 0) {
+                vpBtnPrevClip.title = `Restart Clip ${curSeg.index}/${totalClips} (${formatSecondsAsClock(curSeg.startSeconds)}) • Shift+Left`;
+            } else {
+                const prevSeg = activeClipSegments[curIdx - 1];
+                vpBtnPrevClip.title = `Previous: Clip ${prevSeg.index}/${totalClips} (${formatSecondsAsClock(prevSeg.startSeconds)}) • Shift+Left`;
+            }
+        }
+
+        if (vpBtnNextClip) {
+            const hasNext = curIdx >= 0 && curIdx < totalClips - 1;
+            vpBtnNextClip.disabled = !hasNext;
+            if (hasNext) {
+                const nextSeg = activeClipSegments[curIdx + 1];
+                vpBtnNextClip.title = `Next: Clip ${nextSeg.index}/${totalClips} (${formatSecondsAsClock(nextSeg.startSeconds)}) • Shift+Right`;
+            } else {
+                vpBtnNextClip.title = `Playing final clip (${totalClips}/${totalClips})`;
+            }
+        }
+    }
+
+    function skipToPrevClip() {
+        if (!activeFilename || !activeClipSegments || activeClipSegments.length <= 1) return;
+        const cur = videoPlayer.currentTime || 0;
+        const curIdx = getCurrentSegmentIndex(cur);
+        if (curIdx < 0) return;
+
+        const curSeg = activeClipSegments[curIdx];
+        const elapsedInSeg = cur - curSeg.offset;
+
+        // If more than 2 seconds into the current clip, rewind to the start of the current clip;
+        // otherwise jump to the start of the previous stitched clip.
+        const targetSeg = (elapsedInSeg > 2.0 || curIdx === 0)
+            ? curSeg
+            : activeClipSegments[curIdx - 1];
+
+        videoPlayer.currentTime = Math.max(0, targetSeg.offset);
+        updateScrubberAndTime();
+    }
+
+    function skipToNextClip() {
+        if (!activeFilename || !activeClipSegments || activeClipSegments.length <= 1) return;
+        const cur = videoPlayer.currentTime || 0;
+        const curIdx = getCurrentSegmentIndex(cur);
+        if (curIdx < 0 || curIdx >= activeClipSegments.length - 1) return;
+
+        const nextSeg = activeClipSegments[curIdx + 1];
+        const dur = Number.isFinite(videoPlayer.duration) ? videoPlayer.duration : Infinity;
+        videoPlayer.currentTime = Math.min(dur, nextSeg.offset);
+        updateScrubberAndTime();
+    }
+
     function resolveRecordingTimeAtPosition(elapsedSeconds) {
         if (!activeClipSegments || activeClipSegments.length === 0) return null;
         const pos = Number.isFinite(elapsedSeconds) && elapsedSeconds > 0 ? elapsedSeconds : 0;
@@ -503,11 +645,7 @@
             ? Math.min(activeSeg.duration, rawSegElapsed)
             : rawSegElapsed;
 
-        const totalSeconds = ((activeSeg.startSeconds + Math.floor(clampedSegElapsed)) % 86400 + 86400) % 86400;
-        const hrs = Math.floor(totalSeconds / 3600);
-        const mins = Math.floor((totalSeconds % 3600) / 60);
-        const secs = totalSeconds % 60;
-        const clockStr = `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+        const clockStr = formatSecondsAsClock(activeSeg.startSeconds + Math.floor(clampedSegElapsed));
 
         return {
             clockStr,
@@ -689,6 +827,7 @@
         vpScrubber.disabled = !enabled;
         vpSpeedSelect.disabled = !enabled;
         vpBtnFullscreen.disabled = !enabled;
+        updateClipSkipButtonStates();
     }
 
     async function fetchVideosList() {
@@ -993,6 +1132,7 @@
             vpScrubber.value = Math.min(1000, Math.round((cur / dur) * 1000));
         }
         vpTimeLabel.textContent = formatTimeLabelText(cur, dur);
+        updateClipSkipButtonStates();
     }
 
     function openDeleteModal(video) {
@@ -1081,6 +1221,10 @@
         vpBtnPlay.addEventListener('click', () => togglePlayPause());
     }
 
+    if (vpBtnPrevClip) {
+        vpBtnPrevClip.addEventListener('click', () => skipToPrevClip());
+    }
+
     if (vpBtnSkipBack) {
         vpBtnSkipBack.addEventListener('click', () => {
             if (!activeFilename) return;
@@ -1094,6 +1238,10 @@
             const dur = Number.isFinite(videoPlayer.duration) ? videoPlayer.duration : Infinity;
             videoPlayer.currentTime = Math.min(dur, (videoPlayer.currentTime || 0) + 10);
         });
+    }
+
+    if (vpBtnNextClip) {
+        vpBtnNextClip.addEventListener('click', () => skipToNextClip());
     }
 
     if (vpScrubber) {
@@ -1227,11 +1375,19 @@
             togglePlayPause();
         } else if (e.key === 'ArrowLeft' && activeFilename) {
             e.preventDefault();
-            videoPlayer.currentTime = Math.max(0, (videoPlayer.currentTime || 0) - 5);
+            if (e.shiftKey) {
+                skipToPrevClip();
+            } else {
+                videoPlayer.currentTime = Math.max(0, (videoPlayer.currentTime || 0) - 5);
+            }
         } else if (e.key === 'ArrowRight' && activeFilename) {
             e.preventDefault();
-            const dur = Number.isFinite(videoPlayer.duration) ? videoPlayer.duration : Infinity;
-            videoPlayer.currentTime = Math.min(dur, (videoPlayer.currentTime || 0) + 5);
+            if (e.shiftKey) {
+                skipToNextClip();
+            } else {
+                const dur = Number.isFinite(videoPlayer.duration) ? videoPlayer.duration : Infinity;
+                videoPlayer.currentTime = Math.min(dur, (videoPlayer.currentTime || 0) + 5);
+            }
         }
     });
 
