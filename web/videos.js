@@ -1,5 +1,6 @@
 (() => {
     let CAM_PALETTE = ['#3498db'];
+    const PLAYBACK_SPEEDS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 8, 16];
 
     function computeHslToHex(h, s, l) {
         if (typeof hslToHex === 'function') {
@@ -91,8 +92,13 @@
     const vpScrubber = document.getElementById('vp-scrubber');
     const vpTimeLabel = document.getElementById('vp-time-label');
     const vpSpeedSelect = document.getElementById('vp-speed-select');
-    const vpBtnMute = document.getElementById('vp-btn-mute');
     const vpBtnFullscreen = document.getElementById('vp-btn-fullscreen');
+
+    // Remove mute button if present in markup (audio is never recorded)
+    const legacyMuteBtn = document.getElementById('vp-btn-mute');
+    if (legacyMuteBtn) {
+        legacyMuteBtn.remove();
+    }
 
     const videosListEl = document.getElementById('videos-list');
 
@@ -108,6 +114,39 @@
     let pendingDeleteVideo = null;
     let isScrubbingVideo = false;
 
+    function initPlaybackSpeedOptions() {
+        if (!vpSpeedSelect) return;
+        const previousRate = parseFloat(vpSpeedSelect.value) || 1;
+        const selectedRate = PLAYBACK_SPEEDS.includes(previousRate) ? previousRate : 1;
+
+        vpSpeedSelect.innerHTML = '';
+        PLAYBACK_SPEEDS.forEach((rate) => {
+            const opt = document.createElement('option');
+            opt.value = String(rate);
+            opt.textContent = `${rate}x`;
+            if (rate === selectedRate) {
+                opt.selected = true;
+            }
+            vpSpeedSelect.appendChild(opt);
+        });
+    }
+
+    function applyPlaybackSpeed() {
+        if (!videoPlayer || !vpSpeedSelect) return;
+        const rate = parseFloat(vpSpeedSelect.value) || 1;
+        try {
+            videoPlayer.defaultPlaybackRate = rate;
+            videoPlayer.playbackRate = rate;
+        } catch (err) {
+            console.warn(`Playback rate ${rate}x not supported, falling back to 1x:`, err);
+            videoPlayer.defaultPlaybackRate = 1;
+            videoPlayer.playbackRate = 1;
+            vpSpeedSelect.value = '1';
+        }
+    }
+
+    initPlaybackSpeedOptions();
+
     function formatCamLabel(camId) {
         if (!camId) return 'CLIP';
         const match = String(camId).match(/^cam(\d+)$/i);
@@ -119,6 +158,16 @@
         if (!dateRaw || String(dateRaw).length !== 8) return dateRaw || 'Unknown Date';
         const s = String(dateRaw);
         return `${s.slice(0, 4)}-${s.slice(4, 6)}-${s.slice(6, 8)}`;
+    }
+
+    function formatVideoWindow(video, separator = '  •  ') {
+        if (video.date && video.startTime && video.endTime) {
+            if (video.endDate && video.endDate !== video.date) {
+                return `${formatDateStr(video.date)} ${video.startTime} – ${formatDateStr(video.endDate)} ${video.endTime}`;
+            }
+            return `${formatDateStr(video.date)}${separator}${video.startTime} – ${video.endTime}`;
+        }
+        return video.filename;
     }
 
     function formatBytes(bytes) {
@@ -248,7 +297,6 @@
         vpBtnSkipFwd.disabled = !enabled;
         vpScrubber.disabled = !enabled;
         vpSpeedSelect.disabled = !enabled;
-        vpBtnMute.disabled = !enabled;
         vpBtnFullscreen.disabled = !enabled;
     }
 
@@ -386,11 +434,7 @@
             // Middle Row: Date & Time Window
             const windowRow = document.createElement('div');
             windowRow.className = 'video-item-window';
-            if (video.date && video.startTime && video.endTime) {
-                windowRow.textContent = `${formatDateStr(video.date)}  •  ${video.startTime} – ${video.endTime}`;
-            } else {
-                windowRow.textContent = video.filename;
-            }
+            windowRow.textContent = formatVideoWindow(video, '  •  ');
 
             // Sub-metadata: Created timestamp & filename
             const subMeta = document.createElement('div');
@@ -475,16 +519,13 @@
         const camColor = resolveCameraColor(video.camId);
 
         emptyOverlay.classList.add('hidden');
+        videoPlayer.muted = true;
         videoPlayer.src = streamUrl;
-        videoPlayer.playbackRate = parseFloat(vpSpeedSelect.value) || 1;
+        applyPlaybackSpeed();
 
         npCam.textContent = formatCamLabel(video.camId);
         npCam.style.color = camColor;
-        if (video.date && video.startTime && video.endTime) {
-            npMeta.textContent = `${formatDateStr(video.date)} ${video.startTime}–${video.endTime} (${formatBytes(video.size)})`;
-        } else {
-            npMeta.textContent = `${video.filename} (${formatBytes(video.size)})`;
-        }
+        npMeta.textContent = `${formatVideoWindow(video, ' ')} (${formatBytes(video.size)})`;
 
         npBtnDownload.href = downloadUrl;
         npBtnDownload.setAttribute('download', video.filename);
@@ -553,7 +594,10 @@
     function openDeleteModal(video) {
         if (!video) return;
         pendingDeleteVideo = video;
-        const label = video.camId ? `${formatCamLabel(video.camId)} (${formatDateStr(video.date)})` : video.filename;
+        const dateLabel = (video.endDate && video.endDate !== video.date)
+            ? `${formatDateStr(video.date)} to ${formatDateStr(video.endDate)}`
+            : formatDateStr(video.date);
+        const label = video.camId ? `${formatCamLabel(video.camId)} (${dateLabel})` : video.filename;
         deletePromptEl.textContent = `Are you sure you want to permanently delete this recorded clip from ${label}?`;
         deleteFilenameEl.textContent = `${video.filename} (${formatBytes(video.size)})`;
         modalConfirmBtn.disabled = false;
@@ -669,14 +713,7 @@
 
     if (vpSpeedSelect) {
         vpSpeedSelect.addEventListener('change', () => {
-            videoPlayer.playbackRate = parseFloat(vpSpeedSelect.value) || 1;
-        });
-    }
-
-    if (vpBtnMute) {
-        vpBtnMute.addEventListener('click', () => {
-            videoPlayer.muted = !videoPlayer.muted;
-            vpBtnMute.textContent = videoPlayer.muted ? '🔇' : '🔊';
+            applyPlaybackSpeed();
         });
     }
 
@@ -728,7 +765,10 @@
             updatePlayButtonStates();
             updateScrubberAndTime();
         });
-        videoPlayer.addEventListener('loadedmetadata', updateScrubberAndTime);
+        videoPlayer.addEventListener('loadedmetadata', () => {
+            applyPlaybackSpeed();
+            updateScrubberAndTime();
+        });
         videoPlayer.addEventListener('durationchange', updateScrubberAndTime);
         videoPlayer.addEventListener('timeupdate', updateScrubberAndTime);
         videoPlayer.addEventListener('error', () => {

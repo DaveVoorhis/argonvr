@@ -14,7 +14,7 @@ import tempfile
 import gzip
 import hashlib
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs, unquote, quote
 try:
     import sdnotify
@@ -66,9 +66,17 @@ _DATES_CACHE_LOCK = threading.Lock()
 # Limit concurrent ffmpeg video generation jobs to protect CPU/disk I/O
 _VIDEO_GEN_SEMA = threading.BoundedSemaphore(2)
 
-# Regex matching generated video filenames: {cam_id}_{YYYYMMDD}_{startHHMMSS}-{endHHMMSS}_{createdYYYYMMDD}_{createdHHMMSS}.mp4
+# Regex matching generated video filenames:
+# {cam_id}_{YYYYMMDD}_{startHHMMSS}-{endHHMMSS}_{createdYYYYMMDD}_{createdHHMMSS}.mp4
+# or {cam_id}_{startYYYYMMDD}_{startHHMMSS}-{endYYYYMMDD}_{endHHMMSS}_{createdYYYYMMDD}_{createdHHMMSS}.mp4
 _VIDEO_FILENAME_RE = re.compile(
-    r'^(?P<cam_id>.+)_(?P<date>\d{8})_(?P<start>\d{6})-(?P<end>\d{6})_(?P<cdate>\d{8})_(?P<ctime>\d{6})\.mp4$'
+    r'^(?P<cam_id>.+)_(?P<date>\d{8})_(?P<start>\d{6})-(?:(?P<end_date>\d{8})_)?(?P<end>\d{6})_(?P<cdate>\d{8})_(?P<ctime>\d{6})\.mp4$'
+)
+
+# Regex matching clip filenames containing _{YYYYMMDD}_{HHMMSS}
+_CLIP_TIMESTAMP_RE = re.compile(
+    r'_(?P<date>\d{8})_(?P<time>\d{6})(?:_\d+)?\.(?:m3u8|ts|mp4)$',
+    re.IGNORECASE
 )
 
 
@@ -148,6 +156,7 @@ def _build_video_entry(filename, st):
         "createdAt": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
         "camId": None,
         "date": None,
+        "endDate": None,
         "startTime": None,
         "endTime": None,
         "startSec": None,
@@ -158,13 +167,16 @@ def _build_video_entry(filename, st):
 
     match = _VIDEO_FILENAME_RE.match(filename)
     if match:
+        date_raw = match.group("date")
+        end_date_raw = match.group("end_date") or date_raw
         start_raw = match.group("start")
         end_raw = match.group("end")
         cdate_raw = match.group("cdate")
         ctime_raw = match.group("ctime")
 
         entry["camId"] = match.group("cam_id")
-        entry["date"] = match.group("date")
+        entry["date"] = date_raw
+        entry["endDate"] = end_date_raw
         entry["startTime"] = f"{start_raw[0:2]}:{start_raw[2:4]}:{start_raw[4:6]}"
         entry["endTime"] = f"{end_raw[0:2]}:{end_raw[2:4]}:{end_raw[4:6]}"
         entry["startSec"] = _hhmmss_to_seconds(start_raw)
@@ -254,6 +266,126 @@ def _extract_clip_reference(clip_item):
     return None, ""
 
 
+def _get_m3u8_duration(m3u8_path):
+    """Calculates total duration in seconds from #EXTINF tags in an .m3u8 playlist."""
+    try:
+        total_dur = 0.0
+        with open(m3u8_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('#EXTINF:'):
+                    val = line.split(':', 1)[1].split(',', 1)[0].strip()
+                    total_dur += float(val)
+        if total_dur > 0:
+            return total_dur
+    except Exception:
+        pass
+    return 0.0
+
+
+def _get_clip_duration(cam_id, date_str, clip_ref, clip_item=None):
+    """Resolves the duration in seconds of a clip from its dict metadata, history JSON, or .m3u8 playlist."""
+    if isinstance(clip_item, dict) and clip_item.get('duration') is not None:
+        try:
+            dur = float(clip_item['duration'])
+            if dur > 0:
+                return dur
+        except (ValueError, TypeError):
+            pass
+
+    clean_name = os.path.basename(unquote((clip_ref or '').strip()).split('?', 1)[0].split('#', 1)[0])
+
+    if cam_id and date_str and clean_name:
+        history_path = os.path.join(ABS_STORE_DIR, cam_id, f'history_{date_str}.json')
+        if os.path.exists(history_path):
+            for entry in _load_cached_history_file(history_path):
+                if isinstance(entry, dict) and entry.get('filename') == clean_name:
+                    try:
+                        dur = float(entry.get('duration') or 0.0)
+                        if dur > 0:
+                            return dur
+                    except (ValueError, TypeError):
+                        pass
+
+    resolved = _safe_store_path(clip_ref, cam_id, date_str)
+    if resolved:
+        if os.path.isdir(resolved):
+            try:
+                m3u8_files = sorted(e for e in os.listdir(resolved) if e.endswith('.m3u8'))
+                if m3u8_files:
+                    return _get_m3u8_duration(os.path.join(resolved, m3u8_files[0]))
+            except OSError:
+                pass
+        elif resolved.endswith('.m3u8') and os.path.isfile(resolved):
+            return _get_m3u8_duration(resolved)
+
+    return 0.0
+
+
+def _extract_clip_time_range(
+        clips,
+        cam_id="",
+        fallback_date="",
+        fallback_start_sec=0,
+        fallback_end_sec=86400,
+        last_clip_duration=None
+):
+    """Extracts the earliest clip start and latest clip end (including the last clip's duration)."""
+    parsed_stamps = []
+    for idx, item in enumerate(clips or []):
+        ref, _ = _extract_clip_reference(item)
+        if not ref:
+            continue
+        clean_name = os.path.basename(unquote(ref.strip()).split('?', 1)[0].split('#', 1)[0])
+        match = _CLIP_TIMESTAMP_RE.search(clean_name)
+        if match:
+            parsed_stamps.append((match.group('date'), match.group('time'), idx, item, ref))
+
+    if parsed_stamps:
+        parsed_stamps.sort(key=lambda x: (x[0], x[1], x[2]))
+        start_date, start_tag, _, _, _ = parsed_stamps[0]
+        end_date, end_tag, _, last_item, last_ref = parsed_stamps[-1]
+
+        dur_sec = _get_clip_duration(cam_id, end_date, last_ref, last_item)
+        if dur_sec <= 0 and last_clip_duration is not None:
+            try:
+                dur_sec = max(0.0, float(last_clip_duration))
+            except (ValueError, TypeError):
+                dur_sec = 0.0
+
+        add_secs = max(0, int(round(dur_sec)))
+        if add_secs > 0:
+            try:
+                end_dt = datetime.strptime(f"{end_date}_{end_tag}", "%Y%m%d_%H%M%S") + timedelta(seconds=add_secs)
+                end_date = end_dt.strftime("%Y%m%d")
+                end_tag = end_dt.strftime("%H%M%S")
+            except ValueError:
+                pass
+
+        start_sec = _hhmmss_to_seconds(start_tag)
+        end_sec = _hhmmss_to_seconds(end_tag)
+        return (
+            start_date,
+            end_date,
+            start_tag,
+            end_tag,
+            start_sec if start_sec is not None else fallback_start_sec,
+            end_sec if end_sec is not None else fallback_end_sec,
+        )
+
+    start_tag = _format_seconds_hhmmss(fallback_start_sec)
+    end_tag = _format_seconds_hhmmss(fallback_end_sec)
+    return fallback_date, fallback_date, start_tag, end_tag, fallback_start_sec, fallback_end_sec
+
+
+def _build_generated_video_filename(cam_id, start_date, end_date, start_tag, end_tag, created_stamp=None):
+    """Formats the output MP4 filename using the clip date/time range."""
+    if not created_stamp:
+        created_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if end_date and end_date != start_date:
+        return f"{cam_id}_{start_date}_{start_tag}-{end_date}_{end_tag}_{created_stamp}.mp4"
+    return f"{cam_id}_{start_date}_{start_tag}-{end_tag}_{created_stamp}.mp4"
+
+
 def _expand_m3u8_segments(m3u8_path, cam_id="", date_str=""):
     """Parses an HLS .m3u8 playlist and returns a list of existing segment file paths."""
     segments = []
@@ -337,21 +469,45 @@ def _resolve_clip_files(cam_id, date_str, clips):
     return media_files, resolved_clips
 
 
-def generate_video_clip(cam_id, date_str, start_sec, end_sec, clips, output_filename=None):
+def generate_video_clip(
+        cam_id,
+        date_str,
+        start_sec,
+        end_sec,
+        clips,
+        output_filename=None,
+        last_clip_duration=None
+):
     """Background worker to generate and store an MP4 video clip from displayed history."""
     start_time_Wall = time.monotonic()
-    start_fmt = _format_seconds_hhmmss(start_sec, ":")
-    end_fmt = _format_seconds_hhmmss(end_sec, ":")
-    start_tag = _format_seconds_hhmmss(start_sec)
-    end_tag = _format_seconds_hhmmss(end_sec)
+    (
+        start_date,
+        end_date,
+        start_tag,
+        end_tag,
+        resolved_start_sec,
+        resolved_end_sec,
+    ) = _extract_clip_time_range(
+        clips,
+        cam_id=cam_id,
+        fallback_date=date_str,
+        fallback_start_sec=start_sec,
+        fallback_end_sec=end_sec,
+        last_clip_duration=last_clip_duration
+    )
+
+    start_fmt = _format_seconds_hhmmss(resolved_start_sec, ":")
+    end_fmt = _format_seconds_hhmmss(resolved_end_sec, ":")
 
     if not output_filename:
-        created_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_filename = f"{cam_id}_{date_str}_{start_tag}-{end_tag}_{created_stamp}.mp4"
+        output_filename = _build_generated_video_filename(
+            cam_id, start_date, end_date, start_tag, end_tag
+        )
 
+    date_window_label = f"{start_date}" if start_date == end_date else f"{start_date}..{end_date}"
     print(
         f"[🎬] Queued background video generation for {cam_id} -> {output_filename} "
-        f"(date={date_str}, window={start_fmt}-{end_fmt}, clips={len(clips)})"
+        f"(date={date_window_label}, window={start_fmt}-{end_fmt}, clips={len(clips)})"
     )
 
     concat_list_path = None
@@ -361,15 +517,15 @@ def generate_video_clip(cam_id, date_str, start_sec, end_sec, clips, output_file
         try:
             os.makedirs(ABS_VIDEO_DIR, exist_ok=True)
 
-            media_files, resolved_clips = _resolve_clip_files(cam_id, date_str, clips)
+            media_files, resolved_clips = _resolve_clip_files(cam_id, start_date, clips)
             print(
                 f"[🔍] Resolved {resolved_clips}/{len(clips)} clips into "
-                f"{len(media_files)} media segment(s) for {cam_id} ({date_str})"
+                f"{len(media_files)} media segment(s) for {cam_id} ({date_window_label})"
             )
 
             if not media_files:
                 print(
-                    f"[❌] Aborting video generation for {cam_id} ({date_str}): "
+                    f"[❌] Aborting video generation for {cam_id} ({date_window_label}): "
                     f"no valid media segments found on disk."
                 )
                 return
@@ -467,9 +623,9 @@ def generate_video_clip(cam_id, date_str, start_sec, end_sec, clips, output_file
             )
 
         except subprocess.TimeoutExpired:
-            print(f"[❌] Timed out generating video clip for {cam_id} ({date_str}) after 600s")
+            print(f"[❌] Timed out generating video clip for {cam_id} ({date_window_label}) after 600s")
         except Exception as e:
-            print(f"[❌] Error generating video clip for {cam_id} ({date_str}): {e}")
+            print(f"[❌] Error generating video clip for {cam_id} ({date_window_label}): {e}")
         finally:
             if concat_list_path and os.path.exists(concat_list_path):
                 try:
@@ -1017,6 +1173,7 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                 date_str = os.path.basename(str(payload.get('date', '')).strip())
                 start_sec = int(payload.get('startSec', 0))
                 end_sec = int(payload.get('endSec', 86400))
+                last_clip_duration = payload.get('lastClipDuration')
                 clips = payload.get('clips', [])
 
                 if not cam_id or not date_str or not isinstance(clips, list) or len(clips) == 0:
@@ -1030,20 +1187,44 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                     )
                     return
 
-                start_tag = _format_seconds_hhmmss(start_sec)
-                end_tag = _format_seconds_hhmmss(end_sec)
+                (
+                    start_date,
+                    end_date,
+                    start_tag,
+                    end_tag,
+                    clip_start_sec,
+                    clip_end_sec,
+                ) = _extract_clip_time_range(
+                    clips,
+                    cam_id=cam_id,
+                    fallback_date=date_str,
+                    fallback_start_sec=start_sec,
+                    fallback_end_sec=end_sec,
+                    last_clip_duration=last_clip_duration
+                )
+
                 created_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                output_filename = f"{cam_id}_{date_str}_{start_tag}-{end_tag}_{created_stamp}.mp4"
+                output_filename = _build_generated_video_filename(
+                    cam_id, start_date, end_date, start_tag, end_tag, created_stamp
+                )
                 encoded_name = quote(output_filename)
 
                 print(
                     f"[📥] Accepted /api/video/create from {self.address_string()} "
-                    f"for {cam_id} on {date_str} ({len(clips)} clip(s)) -> {output_filename}"
+                    f"for {cam_id} on {start_date} ({len(clips)} clip(s)) -> {output_filename}"
                 )
 
                 threading.Thread(
                     target=generate_video_clip,
-                    args=(cam_id, date_str, start_sec, end_sec, clips, output_filename),
+                    args=(
+                        cam_id,
+                        start_date,
+                        clip_start_sec,
+                        clip_end_sec,
+                        clips,
+                        output_filename,
+                        last_clip_duration
+                    ),
                     daemon=True
                 ).start()
 

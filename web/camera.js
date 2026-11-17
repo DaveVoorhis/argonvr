@@ -41,13 +41,49 @@
         return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
     }
 
-    function parseFilenameToSeconds(filename) {
-        const match = filename.match(/_(\d{8})_(\d{2})(\d{2})(\d{2})\.m3u8/);
+    function parseClipFilenameMeta(filename) {
+        if (typeof filename !== 'string') return null;
+        const match = filename.match(/_(\d{8})_(\d{2})(\d{2})(\d{2})\.(?:m3u8|ts|mp4)$/i);
         if (!match) return null;
+        const dateStr = match[1];
         const h = parseInt(match[2], 10);
         const m = parseInt(match[3], 10);
         const s = parseInt(match[4], 10);
-        return (h * 3600) + (m * 60) + s;
+        return {
+            date: dateStr,
+            timeTag: `${match[2]}${match[3]}${match[4]}`,
+            seconds: (h * 3600) + (m * 60) + s
+        };
+    }
+
+    function addSecondsToClipMeta(meta, addSec) {
+        if (!meta) return null;
+        const delta = Math.max(0, Math.round(Number(addSec) || 0));
+        const totalSec = meta.seconds + delta;
+        const dayCarry = Math.floor(totalSec / 86400);
+        const endSecOfDay = totalSec % 86400;
+        let endDateStr = meta.date;
+
+        if (dayCarry > 0 && meta.date && meta.date.length === 8) {
+            const y = parseInt(meta.date.slice(0, 4), 10);
+            const mo = parseInt(meta.date.slice(4, 6), 10) - 1;
+            const d = parseInt(meta.date.slice(6, 8), 10);
+            const dt = new Date(Date.UTC(y, mo, d + dayCarry));
+            const yy = dt.getUTCFullYear();
+            const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
+            const dd = String(dt.getUTCDate()).padStart(2, '0');
+            endDateStr = `${yy}${mm}${dd}`;
+        }
+
+        return {
+            date: endDateStr,
+            seconds: endSecOfDay
+        };
+    }
+
+    function parseFilenameToSeconds(filename) {
+        const meta = parseClipFilenameMeta(filename);
+        return meta ? meta.seconds : null;
     }
 
     const fwVideo = document.getElementById('fw-video');
@@ -324,11 +360,26 @@
         isCreatingVideo = true;
         clearCreateVideoTimers();
 
+        const firstClip = dayClips[0];
+        const lastClip = dayClips[dayClips.length - 1];
+        const firstMeta = parseClipFilenameMeta(firstClip.filename);
+        const lastMeta = parseClipFilenameMeta(lastClip.filename);
+        const lastDurationSec = Number(lastClip.duration) || 0;
+        const lastEndMeta = addSecondsToClipMeta(lastMeta, lastDurationSec);
+
+        const clipStartDate = firstMeta ? firstMeta.date : currentDayString;
+        const clipEndDate = lastEndMeta ? lastEndMeta.date : clipStartDate;
+        const clipStartSec = firstMeta ? firstMeta.seconds : timelineStartSec;
+        const clipEndSec = lastEndMeta ? lastEndMeta.seconds : timelineEndSec;
+
         const payload = {
             camId: camId,
-            date: currentDayString,
-            startSec: timelineStartSec,
-            endSec: timelineEndSec,
+            date: clipStartDate,
+            startDate: clipStartDate,
+            endDate: clipEndDate,
+            startSec: clipStartSec,
+            endSec: clipEndSec,
+            lastClipDuration: lastDurationSec,
             clips: dayClips.map(c => c.filename)
         };
 
