@@ -377,6 +377,7 @@ const cameraLiveMode = {}; // 'snapshot' | 'hls-sub' | 'hls-main' | 'none'
 const visibleCameras = new Set();
 let cardIntersectionObserver = null;
 let manifestFetchInFlight = false;
+let hoveredCameraId = null;
 
 const activeCameras = [];
 let vttCache = {};
@@ -405,6 +406,24 @@ const dateDisplay = document.getElementById('global-date');
 const zoomSlider = document.getElementById('zoom-slider');
 const timelineContent = document.getElementById('timeline-content');
 const timelineViewport = document.getElementById('timeline-viewport');
+
+function applyHeatmapHoverState() {
+	const heatmap = document.getElementById('heatmap');
+	if (!heatmap) return;
+
+	heatmap.classList.toggle('has-hover', Boolean(hoveredCameraId));
+
+	const rows = heatmap.querySelectorAll('.heatmap-row');
+	rows.forEach(row => {
+		row.classList.toggle('highlighted', row.dataset.cam === hoveredCameraId);
+	});
+}
+
+function setHoveredCamera(camId) {
+	if (hoveredCameraId === camId) return;
+	hoveredCameraId = camId;
+	applyHeatmapHoverState();
+}
 
 function bumpCameraGeneration(camId) {
 	cameraModeGeneration[camId] = (cameraModeGeneration[camId] || 0) + 1;
@@ -965,6 +984,13 @@ function renderTimelineHeatmap() {
 		const laneHeight = 100 / numCams;
 		const topPct = index * laneHeight;
 
+		const row = document.createElement('div');
+		row.className = 'heatmap-row';
+		row.dataset.cam = camId;
+		row.style.setProperty('--cam-color', camColor);
+		row.style.top = `${topPct}%`;
+		row.style.height = `${laneHeight}%`;
+
 		clips.forEach(clip => {
 			const startSec = parseFilenameToSeconds(clip.filename);
 			if (startSec === null) return;
@@ -979,14 +1005,15 @@ function renderTimelineHeatmap() {
 			tick.style.left = `${leftPct}%`;
 			tick.style.width = `${widthPct}%`;
 			tick.style.backgroundColor = camColor;
-			tick.style.top = `${topPct}%`;
-			tick.style.height = `${laneHeight}%`;
 
-			frag.appendChild(tick);
+			row.appendChild(tick);
 		});
+
+		frag.appendChild(row);
 	});
 
 	heatmap.appendChild(frag);
+	applyHeatmapHoverState();
 }
 
 function toggleCalendar() {
@@ -1224,6 +1251,7 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 // --- SPA Navigational Hooks ---
 function openCameraPage(camId) {
 	const hexColor = getCameraColor(camId).replace('#', '');
+	setHoveredCamera(null);
 	isSingleCameraOpen = true;
 
 	// 1. Swap Views
@@ -1769,6 +1797,10 @@ function createCameraDOM(camId) {
     `;
 
 	card.addEventListener('click', () => openCameraPage(camId));
+	card.addEventListener('mouseenter', () => setHoveredCamera(camId));
+	card.addEventListener('mouseleave', () => {
+		if (hoveredCameraId === camId) setHoveredCamera(null);
+	});
 
 	grid.appendChild(card);
 	activeCameras.push(camId);

@@ -327,11 +327,48 @@ video {
 	z-index: 1;
 }
 
+.heatmap-row {
+	position: absolute;
+	left: 0;
+	right: 0;
+	transform-origin: center;
+	transition: opacity 0.15s ease, background-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.heatmap-row:first-child {
+	transform-origin: top center;
+}
+
+.heatmap-row:last-child {
+	transform-origin: bottom center;
+}
+
 .heatmap-tick {
 	position: absolute;
+	top: 0;
+	height: 100%;
 	min-width: 1px;
 	opacity: 0.8;
 	border-radius: 1px;
+	transition: opacity 0.15s ease, filter 0.15s ease, box-shadow 0.15s ease;
+}
+
+.heatmap-track.has-hover .heatmap-row:not(.highlighted) {
+	opacity: 0.28;
+}
+
+.heatmap-track.has-hover .heatmap-row.highlighted {
+	z-index: 5;
+	opacity: 1;
+	transform: scaleY(1.4);
+	background: color-mix(in srgb, var(--cam-color, #fff) 24%, transparent);
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--cam-color, #fff) 65%, transparent);
+}
+
+.heatmap-track.has-hover .heatmap-row.highlighted .heatmap-tick {
+	opacity: 1;
+	filter: brightness(1.45) saturate(1.25);
+	box-shadow: 0 0 6px var(--cam-color, #fff);
 }
 
 .timeline-ruler {

@@ -39,6 +39,7 @@ This is human-written.
 22. Use camera sub_url if available for live.jpg snapshots and motion detection.
 23. Improved motion detection rejects light changes.
 24. Improved video playback smoothness.
+25. Heatmap highlighting on camera rollover.
 
 ## Features
 
