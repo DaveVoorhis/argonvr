@@ -21,10 +21,10 @@ def detect_rtsp_timeout_args(timeout_seconds=10):
             timeout=5
         )
         help_text = (proc.stdout or "") + "\n" + (proc.stderr or "")
-        if re.search(r'(?m)^\s*-timeout\b', help_text):
-            return ["-timeout", timeout_us]
         if re.search(r'(?m)^\s*-stimeout\b', help_text):
             return ["-stimeout", timeout_us]
+        if re.search(r'(?m)^\s*-timeout\b.*(?:socket|I/O|microseconds)', help_text, re.IGNORECASE):
+            return ["-timeout", timeout_us]
     except Exception:
         pass
     return []

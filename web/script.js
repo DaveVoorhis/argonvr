@@ -1295,7 +1295,7 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 					if (srcChanged) {
 						videoEl.dataset.clipUrl = manifestRef.url;
 
-						if (Hls.isSupported()) {
+						if (typeof Hls !== 'undefined' && Hls.isSupported()) {
 							destroyHlsPlayer(camId);
 							videoEl._onVideoReady = onVideoReady;
 							videoEl.addEventListener('seeked', onVideoReady);
@@ -1438,7 +1438,7 @@ function startHlsLiveForCamera(camId) {
 	cameraLiveMode[camId] = usingSubStream ? 'hls-sub' : 'hls-main';
 	const freshPlaylistUrl = networkMonitor.getLiveStreamUrl(baseDir, camId, false);
 
-	if (Hls.isSupported()) {
+	if (typeof Hls !== 'undefined' && Hls.isSupported()) {
 		const hls = new Hls(networkMonitor.getHlsConfig(true, false));
 		let mediaRecoveryCount = 0;
 		let lastMediaRecoveryTs = 0;
