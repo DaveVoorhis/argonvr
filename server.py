@@ -8,20 +8,21 @@ import ssl
 import json
 import yaml
 import socket
+import signal
 import subprocess
 import threading
 import tempfile
 import gzip
 import hashlib
 import time
+from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, parse_qs, unquote, quote
 try:
     import sdnotify
 except ImportError:
     sdnotify = None
-
-from socketserver import ThreadingMixIn
 
 with open('argonvr.yaml', 'r', encoding='utf-8') as f:
     config = yaml.safe_load(f)
@@ -42,9 +43,12 @@ ABS_WEB_DIR = os.path.abspath(WEB_DIR)
 ABS_VIDEO_DIR = os.path.abspath(VIDEO_DIR)
 STORE_DIR_NAME = os.path.basename(os.path.normpath(STORE_DIR))
 BASE_DIR_NAME = os.path.basename(os.path.normpath(BASE_DIR))
+VIDEO_DIR_NAME = os.path.basename(os.path.normpath(VIDEO_DIR))
+NON_CAMERA_STORE_DIRS = {VIDEO_DIR_NAME, 'videos'}
 
 PORT = int(SETTINGS.get('PORT', 8000))
-CAMERA_COUNT = len(CAMERAS)
+CAMERA_IDS = list(CAMERAS.keys())
+CAMERA_COUNT = len(CAMERA_IDS)
 SUB_STREAMS = {
     cam_id: bool(cam_cfg.get('sub_url'))
     for cam_id, cam_cfg in CAMERAS.items()
@@ -54,27 +58,48 @@ SUB_STREAMS = {
 SSL_CERT = SETTINGS.get('SSL_CERT_PATH', '')
 SSL_KEY = SETTINGS.get('SSL_KEY_PATH', '')
 LOG_HTTP_REQUESTS = SETTINGS.get('LOG_HTTP_REQUESTS', False)
+LIVE_SNAPSHOT_FPS = max(0.2, float(SETTINGS.get('LIVE_SNAPSHOT_FPS', 1.0)))
+LIVE_SNAPSHOT_QUALITY = int(SETTINGS.get('LIVE_SNAPSHOT_QUALITY', 6))
+LIVE_SNAPSHOT_WIDTH = max(160, int(SETTINGS.get('LIVE_SNAPSHOT_WIDTH', 320)))
+LIVE_SNAPSHOT_CACHE_TTL = max(0.5, min(5.0, 1.0 / LIVE_SNAPSHOT_FPS))
+CONTINUOUS_LIVE_SNAPSHOTS = bool(SETTINGS.get('CONTINUOUS_LIVE_SNAPSHOTS', False))
 
-# In-memory cache for parsed camera history files keyed by path -> ((mtime_ns, size), parsed_data)
-_HISTORY_FILE_CACHE = {}
+MAX_JSON_BODY_BYTES = 2 * 1024 * 1024  # 2 MB cap for POST/DELETE JSON payloads
+
+# Bounded LRU caches
+_HISTORY_FILE_CACHE = OrderedDict()  # path -> ((mtime_ns, size), parsed_data)
 _HISTORY_CACHE_LOCK = threading.Lock()
+_HISTORY_FILE_CACHE_MAX = 512
 
-# In-memory cache for parsed MP4 sidecar JSON files keyed by path -> ((mtime_ns, size), parsed_data)
-_VIDEO_SIDECAR_CACHE = {}
+_HISTORY_RESPONSE_CACHE = OrderedDict()  # (req_date, req_cam, stat_sig) -> (etag, raw_bytes, gzip_bytes)
+_HISTORY_RESPONSE_LOCK = threading.Lock()
+_HISTORY_RESPONSE_CACHE_MAX = 64
+
+_VIDEO_SIDECAR_CACHE = OrderedDict()  # path -> ((mtime_ns, size), parsed_data)
 _VIDEO_SIDECAR_LOCK = threading.Lock()
+_VIDEO_SIDECAR_CACHE_MAX = 512
 
 # In-memory cache for available dates with short TTL
-_DATES_CACHE = {"timestamp": 0.0, "dates": [], "etag": ""}
+_DATES_CACHE = {"timestamp": 0.0, "populated": False, "dates": [], "etag": ""}
 _DATES_CACHE_LOCK = threading.Lock()
 
-# Limit concurrent ffmpeg video generation jobs to protect CPU/disk I/O
+# Video generation concurrency limiter & job status tracker
 _VIDEO_GEN_SEMA = threading.BoundedSemaphore(2)
+_VIDEO_JOBS = {}  # filename -> {status, error, startedAt, updatedAt}
+_VIDEO_JOBS_LOCK = threading.Lock()
+
+# On-demand live.jpg snapshot cache & concurrency guards
+_LIVE_SNAPSHOT_CACHE = {}  # cam_id -> {"ts": float, "seg_key": tuple, "jpeg": bytes, "etag": str}
+_LIVE_SNAPSHOT_CACHE_LOCK = threading.Lock()
+_LIVE_SNAPSHOT_LOCKS = {}  # cam_id -> threading.Lock()
+_LIVE_SNAPSHOT_LOCKS_GUARD = threading.Lock()
+_LIVE_SNAPSHOT_SEMA = threading.BoundedSemaphore(4)
 
 # Regex matching generated video filenames:
-# {cam_id}_{YYYYMMDD}_{startHHMMSS}-{endHHMMSS}_{createdYYYYMMDD}_{createdHHMMSS}.mp4
-# or {cam_id}_{startYYYYMMDD}_{startHHMMSS}-{endYYYYMMDD}_{endHHMMSS}_{createdYYYYMMDD}_{createdHHMMSS}.mp4
+# {cam_id}_{YYYYMMDD}_{startHHMMSS}-{endHHMMSS}_{createdYYYYMMDD}_{createdHHMMSS}[_N].mp4
+# or {cam_id}_{startYYYYMMDD}_{startHHMMSS}-{endYYYYMMDD}_{endHHMMSS}_{createdYYYYMMDD}_{createdHHMMSS}[_N].mp4
 _VIDEO_FILENAME_RE = re.compile(
-    r'^(?P<cam_id>.+)_(?P<date>\d{8})_(?P<start>\d{6})-(?:(?P<end_date>\d{8})_)?(?P<end>\d{6})_(?P<cdate>\d{8})_(?P<ctime>\d{6})\.mp4$'
+    r'^(?P<cam_id>.+)_(?P<date>\d{8})_(?P<start>\d{6})-(?:(?P<end_date>\d{8})_)?(?P<end>\d{6})_(?P<cdate>\d{8})_(?P<ctime>\d{6})(?:_\d+)?\.mp4$'
 )
 
 # Regex matching clip filenames containing _{YYYYMMDD}_{HHMMSS}
@@ -84,8 +109,211 @@ _CLIP_TIMESTAMP_RE = re.compile(
 )
 
 
+def _cleanup_orphaned_video_temps():
+    """Removes stale .part.mp4 and concat_*.txt temp files left behind by unclean server restarts."""
+    if not os.path.isdir(ABS_VIDEO_DIR):
+        return
+    removed = 0
+    try:
+        for entry in os.scandir(ABS_VIDEO_DIR):
+            if not entry.is_file():
+                continue
+            name = entry.name
+            if name.endswith('.part.mp4') or (name.startswith('concat_') and name.endswith('.txt')) or name.endswith('.json.tmp'):
+                try:
+                    os.remove(entry.path)
+                    removed += 1
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    if removed > 0:
+        print(f"[🧹] Cleaned up {removed} orphaned temporary video file(s) in {ABS_VIDEO_DIR}.")
+
+
+def _get_live_snapshot_lock(cam_id):
+    """Returns a per-camera single-flight lock for on-demand live.jpg generation."""
+    with _LIVE_SNAPSHOT_LOCKS_GUARD:
+        lock = _LIVE_SNAPSHOT_LOCKS.get(cam_id)
+        if lock is None:
+            lock = threading.Lock()
+            _LIVE_SNAPSHOT_LOCKS[cam_id] = lock
+        return lock
+
+
+def _find_latest_live_segment(cam_dir):
+    """Finds the newest available live HLS .ts segment in cam_dir (preferring sub-stream)."""
+    for playlist_name in ('stream_sub.m3u8', 'stream.m3u8'):
+        playlist_path = os.path.join(cam_dir, playlist_name)
+        if not os.path.isfile(playlist_path):
+            continue
+        try:
+            with open(playlist_path, 'r', encoding='utf-8') as f:
+                seg_names = [
+                    os.path.basename(line.strip().split('?', 1)[0].split('#', 1)[0])
+                    for line in f
+                    if line.strip() and not line.strip().startswith('#')
+                ]
+        except OSError:
+            continue
+
+        for seg_name in reversed(seg_names):
+            if not seg_name.endswith('.ts'):
+                continue
+            seg_path = os.path.join(cam_dir, seg_name)
+            try:
+                st = os.stat(seg_path)
+                if st.st_size > 0:
+                    return seg_path, (seg_name, st.st_mtime_ns, st.st_size)
+            except OSError:
+                continue
+
+    # Fallback if playlists are mid-rotation: pick newest non-empty live segment directly
+    best_sub = None
+    best_main = None
+    try:
+        for entry in os.scandir(cam_dir):
+            if not entry.is_file() or not entry.name.endswith('.ts'):
+                continue
+            try:
+                st = entry.stat()
+            except OSError:
+                continue
+            if st.st_size <= 0:
+                continue
+            cand = (st.st_mtime_ns, entry.path, (entry.name, st.st_mtime_ns, st.st_size))
+            if entry.name.startswith('stream_sub_'):
+                if best_sub is None or cand[0] > best_sub[0]:
+                    best_sub = cand
+            elif entry.name.startswith('stream_'):
+                if best_main is None or cand[0] > best_main[0]:
+                    best_main = cand
+    except OSError:
+        pass
+
+    chosen = best_sub or best_main
+    if chosen:
+        return chosen[1], chosen[2]
+    return None, None
+
+
+def _get_or_generate_live_snapshot(cam_id):
+    """Extracts a live JPEG frame on demand from the latest HLS segment, cached per camera in RAM."""
+    cam_dir = os.path.abspath(os.path.join(ABS_BASE_DIR, cam_id))
+    if not cam_dir.startswith(ABS_BASE_DIR + os.sep) or not os.path.isdir(cam_dir):
+        return None, None
+
+    now = time.monotonic()
+    with _LIVE_SNAPSHOT_CACHE_LOCK:
+        cached = _LIVE_SNAPSHOT_CACHE.get(cam_id)
+        if cached and (now - cached["ts"]) < LIVE_SNAPSHOT_CACHE_TTL:
+            return cached["jpeg"], cached["etag"]
+
+    cam_lock = _get_live_snapshot_lock(cam_id)
+    with cam_lock:
+        now = time.monotonic()
+        with _LIVE_SNAPSHOT_CACHE_LOCK:
+            cached = _LIVE_SNAPSHOT_CACHE.get(cam_id)
+            if cached and (now - cached["ts"]) < LIVE_SNAPSHOT_CACHE_TTL:
+                return cached["jpeg"], cached["etag"]
+
+        seg_path, seg_key = _find_latest_live_segment(cam_dir)
+        if not seg_path:
+            # Fallback to an existing on-disk live.jpg if present
+            disk_snap = os.path.join(cam_dir, 'live.jpg')
+            if os.path.isfile(disk_snap):
+                try:
+                    with open(disk_snap, 'rb') as f:
+                        data = f.read()
+                    if data:
+                        etag = f'"{hashlib.md5(data).hexdigest()}"'
+                        return data, etag
+                except OSError:
+                    pass
+            return None, None
+
+        # If the newest segment hasn't changed since our last extraction, reuse cached JPEG without running FFmpeg
+        if cached and cached.get("seg_key") == seg_key:
+            with _LIVE_SNAPSHOT_CACHE_LOCK:
+                cached["ts"] = now
+            return cached["jpeg"], cached["etag"]
+
+        cmd = [
+            "ffmpeg",
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel", "error",
+            "-i", seg_path,
+            "-frames:v", "1",
+            "-vf", f"scale={LIVE_SNAPSHOT_WIDTH}:-2",
+            "-q:v", str(LIVE_SNAPSHOT_QUALITY),
+            "-f", "image2pipe",
+            "-vcodec", "mjpeg",
+            "pipe:1",
+        ]
+        jpeg_bytes = None
+        try:
+            with _LIVE_SNAPSHOT_SEMA:
+                res = subprocess.run(
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+            if res.returncode == 0 and len(res.stdout) > 256 and res.stdout.startswith(b'\xff\xd8'):
+                jpeg_bytes = res.stdout
+        except (subprocess.TimeoutExpired, OSError):
+            jpeg_bytes = None
+
+        if jpeg_bytes:
+            etag = f'"{hashlib.md5(jpeg_bytes).hexdigest()}"'
+            with _LIVE_SNAPSHOT_CACHE_LOCK:
+                _LIVE_SNAPSHOT_CACHE[cam_id] = {
+                    "ts": time.monotonic(),
+                    "seg_key": seg_key,
+                    "jpeg": jpeg_bytes,
+                    "etag": etag,
+                }
+            return jpeg_bytes, etag
+
+        # Graceful fallback if the segment rotated mid-read: serve recent cached frame if still fresh
+        if cached and (now - cached["ts"]) < 15.0:
+            return cached["jpeg"], cached["etag"]
+
+        return None, None
+
+
+def _set_video_job_state(filename, status, error=None):
+    """Updates the in-memory status tracker for a background video export job."""
+    now = time.time()
+    with _VIDEO_JOBS_LOCK:
+        # Prune entries older than 30 minutes
+        stale = [k for k, v in _VIDEO_JOBS.items() if (now - v.get("updatedAt", now)) > 1800]
+        for k in stale:
+            _VIDEO_JOBS.pop(k, None)
+
+        existing = _VIDEO_JOBS.get(filename)
+        started_at = existing["startedAt"] if existing else now
+        _VIDEO_JOBS[filename] = {
+            "status": status,
+            "error": error,
+            "startedAt": started_at,
+            "updatedAt": now,
+        }
+
+
+def _get_video_job_state(filename):
+    """Returns job status for a generated video filename."""
+    with _VIDEO_JOBS_LOCK:
+        job = _VIDEO_JOBS.get(filename)
+        if job:
+            return dict(job)
+    return None
+
+
 def _load_cached_history_file(history_path):
-    """Reads and caches a camera's daily history JSON file based on its mtime_ns and size."""
+    """Reads and LRU-caches a camera's daily history JSON file based on its mtime_ns and size."""
     try:
         st = os.stat(history_path)
     except OSError:
@@ -95,15 +323,17 @@ def _load_cached_history_file(history_path):
     with _HISTORY_CACHE_LOCK:
         cached = _HISTORY_FILE_CACHE.get(history_path)
         if cached and cached[0] == key:
+            _HISTORY_FILE_CACHE.move_to_end(history_path)
             return cached[1]
 
     try:
         with open(history_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         with _HISTORY_CACHE_LOCK:
-            if len(_HISTORY_FILE_CACHE) > 512:
-                _HISTORY_FILE_CACHE.clear()
             _HISTORY_FILE_CACHE[history_path] = (key, data)
+            _HISTORY_FILE_CACHE.move_to_end(history_path)
+            while len(_HISTORY_FILE_CACHE) > _HISTORY_FILE_CACHE_MAX:
+                _HISTORY_FILE_CACHE.popitem(last=False)
         return data
     except Exception as e:
         print(f"Error reading {history_path}: {e}")
@@ -111,7 +341,7 @@ def _load_cached_history_file(history_path):
 
 
 def _load_cached_video_sidecar(sidecar_path):
-    """Reads and caches an MP4 sidecar JSON file based on its mtime_ns and size."""
+    """Reads and LRU-caches an MP4 sidecar JSON file based on its mtime_ns and size."""
     try:
         st = os.stat(sidecar_path)
     except OSError:
@@ -121,15 +351,17 @@ def _load_cached_video_sidecar(sidecar_path):
     with _VIDEO_SIDECAR_LOCK:
         cached = _VIDEO_SIDECAR_CACHE.get(sidecar_path)
         if cached and cached[0] == key:
+            _VIDEO_SIDECAR_CACHE.move_to_end(sidecar_path)
             return cached[1]
 
     try:
         with open(sidecar_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         with _VIDEO_SIDECAR_LOCK:
-            if len(_VIDEO_SIDECAR_CACHE) > 512:
-                _VIDEO_SIDECAR_CACHE.clear()
             _VIDEO_SIDECAR_CACHE[sidecar_path] = (key, data)
+            _VIDEO_SIDECAR_CACHE.move_to_end(sidecar_path)
+            while len(_VIDEO_SIDECAR_CACHE) > _VIDEO_SIDECAR_CACHE_MAX:
+                _VIDEO_SIDECAR_CACHE.popitem(last=False)
         return data
     except Exception as e:
         print(f"Error reading video sidecar {sidecar_path}: {e}")
@@ -180,8 +412,9 @@ def _resolve_video_file(raw_filename, allow_json=False):
     return clean_name, candidate
 
 
-def _build_video_entry(filename, st):
-    """Builds a metadata dictionary for a video file in ABS_VIDEO_DIR, including sidecar segments if present."""
+def _build_video_entry(filename, st, include_segments=False):
+    """Builds a metadata dictionary for a video file in ABS_VIDEO_DIR.
+    By default omits the bulky segments array from list payloads (frontend fetches sidecar on playback)."""
     encoded_name = quote(filename)
     entry = {
         "filename": filename,
@@ -196,7 +429,7 @@ def _build_video_entry(filename, st):
         "startSec": None,
         "endSec": None,
         "duration": None,
-        "segments": [],
+        "segmentCount": 0,
         "streamUrl": f"/api/video/stream?file={encoded_name}",
         "downloadUrl": f"/api/video/stream?file={encoded_name}&download=1",
     }
@@ -227,8 +460,11 @@ def _build_video_entry(filename, st):
     sidecar_path = os.path.join(ABS_VIDEO_DIR, sidecar_name)
     sidecar_data = _load_cached_video_sidecar(sidecar_path)
     if isinstance(sidecar_data, dict):
-        if isinstance(sidecar_data.get("segments"), list):
-            entry["segments"] = sidecar_data["segments"]
+        segs = sidecar_data.get("segments")
+        if isinstance(segs, list):
+            entry["segmentCount"] = len(segs)
+            if include_segments:
+                entry["segments"] = segs
         if sidecar_data.get("duration") is not None:
             entry["duration"] = sidecar_data["duration"]
         if not entry["camId"] and sidecar_data.get("camId"):
@@ -247,7 +483,7 @@ def _build_video_entry(filename, st):
 
 
 def _list_video_files():
-    """Returns metadata for all completed MP4 files in ABS_VIDEO_DIR sorted newest-first."""
+    """Returns compact metadata for all completed MP4 files in ABS_VIDEO_DIR sorted newest-first."""
     videos = []
     if not os.path.isdir(ABS_VIDEO_DIR):
         return videos
@@ -262,7 +498,7 @@ def _list_video_files():
             try:
                 st = entry.stat()
                 if st.st_size > 0:
-                    videos.append(_build_video_entry(name, st))
+                    videos.append(_build_video_entry(name, st, include_segments=False))
             except OSError:
                 continue
     except OSError as e:
@@ -457,13 +693,29 @@ def _extract_clip_time_range(
     return fallback_date, fallback_date, start_tag, end_tag, fallback_start_sec, fallback_end_sec
 
 
-def _build_generated_video_filename(cam_id, start_date, end_date, start_tag, end_tag, created_stamp=None):
-    """Formats the output MP4 filename using the clip date/time range."""
+def _build_unique_video_filename(cam_id, start_date, end_date, start_tag, end_tag, created_stamp=None):
+    """Formats a collision-safe output MP4 filename using the clip date/time range."""
     if not created_stamp:
         created_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     if end_date and end_date != start_date:
-        return f"{cam_id}_{start_date}_{start_tag}-{end_date}_{end_tag}_{created_stamp}.mp4"
-    return f"{cam_id}_{start_date}_{start_tag}-{end_tag}_{created_stamp}.mp4"
+        base = f"{cam_id}_{start_date}_{start_tag}-{end_date}_{end_tag}_{created_stamp}"
+    else:
+        base = f"{cam_id}_{start_date}_{start_tag}-{end_tag}_{created_stamp}"
+
+    with _VIDEO_JOBS_LOCK:
+        suffix = 0
+        while True:
+            candidate = f"{base}.mp4" if suffix == 0 else f"{base}_{suffix}.mp4"
+            final_path = os.path.join(ABS_VIDEO_DIR, candidate)
+            if candidate not in _VIDEO_JOBS and not os.path.exists(final_path):
+                _VIDEO_JOBS[candidate] = {
+                    "status": "queued",
+                    "error": None,
+                    "startedAt": time.time(),
+                    "updatedAt": time.time(),
+                }
+                return candidate
+            suffix += 1
 
 
 def _expand_m3u8_segments(m3u8_path, cam_id="", date_str=""):
@@ -659,40 +911,19 @@ def _write_video_sidecar_json(
 
 def generate_video_clip(
         cam_id,
-        date_str,
+        start_date,
+        end_date,
         start_sec,
         end_sec,
         clips,
-        output_filename=None,
-        last_clip_duration=None
+        output_filename,
 ):
     """Background worker to generate and store an MP4 video clip and its sidecar .json from displayed history."""
-    start_time_Wall = time.monotonic()
-    (
-        start_date,
-        end_date,
-        start_tag,
-        end_tag,
-        resolved_start_sec,
-        resolved_end_sec,
-    ) = _extract_clip_time_range(
-        clips,
-        cam_id=cam_id,
-        fallback_date=date_str,
-        fallback_start_sec=start_sec,
-        fallback_end_sec=end_sec,
-        last_clip_duration=last_clip_duration
-    )
-
-    start_fmt = _format_seconds_hhmmss(resolved_start_sec, ":")
-    end_fmt = _format_seconds_hhmmss(resolved_end_sec, ":")
-
-    if not output_filename:
-        output_filename = _build_generated_video_filename(
-            cam_id, start_date, end_date, start_tag, end_tag
-        )
-
+    start_time_wall = time.monotonic()
+    start_fmt = _format_seconds_hhmmss(start_sec, ":")
+    end_fmt = _format_seconds_hhmmss(end_sec, ":")
     date_window_label = f"{start_date}" if start_date == end_date else f"{start_date}..{end_date}"
+
     print(
         f"[🎬] Queued background video generation for {cam_id} -> {output_filename} "
         f"(date={date_window_label}, window={start_fmt}-{end_fmt}, clips={len(clips)})"
@@ -702,6 +933,7 @@ def generate_video_clip(
     temp_output_path = None
 
     with _VIDEO_GEN_SEMA:
+        _set_video_job_state(output_filename, "running")
         try:
             os.makedirs(ABS_VIDEO_DIR, exist_ok=True)
 
@@ -712,10 +944,9 @@ def generate_video_clip(
             )
 
             if not media_files:
-                print(
-                    f"[❌] Aborting video generation for {cam_id} ({date_window_label}): "
-                    f"no valid media segments found on disk."
-                )
+                err_msg = "No valid media segments found on disk"
+                print(f"[❌] Aborting video generation for {cam_id} ({date_window_label}): {err_msg}.")
+                _set_video_job_state(output_filename, "failed", err_msg)
                 return
 
             final_output_path = os.path.join(ABS_VIDEO_DIR, output_filename)
@@ -748,7 +979,8 @@ def generate_video_clip(
                 "-f", "concat",
                 "-safe", "0",
                 "-i", concat_list_path,
-                "-c", "copy",
+                "-c:v", "copy",
+                "-an",
                 "-avoid_negative_ts", "make_zero",
                 "-movflags", "+faststart",
                 temp_output_path,
@@ -756,6 +988,7 @@ def generate_video_clip(
 
             proc = subprocess.run(
                 cmd,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
@@ -765,26 +998,27 @@ def generate_video_clip(
             if proc.returncode != 0:
                 err_msg = (proc.stderr or "").strip() or f"exit code {proc.returncode}"
                 print(
-                    f"[⚠️] Stream copy failed for {output_filename} ({err_msg}); "
-                    f"retrying with AAC audio bitstream filter..."
+                    f"[⚠️] Primary stream copy failed for {output_filename} ({err_msg}); "
+                    f"retrying with genpts-only timestamp remux..."
                 )
                 cmd_retry = [
                     "ffmpeg",
                     "-hide_banner",
                     "-loglevel", "error",
                     "-y",
-                    "-fflags", "+genpts+igndts",
+                    "-fflags", "+genpts+discardcorrupt",
                     "-f", "concat",
                     "-safe", "0",
                     "-i", concat_list_path,
-                    "-c", "copy",
-                    "-bsf:a", "aac_adtstoasc",
+                    "-c:v", "copy",
+                    "-an",
                     "-avoid_negative_ts", "make_zero",
                     "-movflags", "+faststart",
                     temp_output_path,
                 ]
                 proc = subprocess.run(
                     cmd_retry,
+                    stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -794,10 +1028,13 @@ def generate_video_clip(
             if proc.returncode != 0:
                 err_msg = (proc.stderr or "").strip() or f"exit code {proc.returncode}"
                 print(f"[❌] ffmpeg failed to generate {output_filename} for {cam_id}: {err_msg}")
+                _set_video_job_state(output_filename, "failed", err_msg)
                 return
 
             if not os.path.isfile(temp_output_path) or os.path.getsize(temp_output_path) == 0:
-                print(f"[❌] ffmpeg produced an empty or missing file for {output_filename}")
+                err_msg = "ffmpeg produced an empty or missing file"
+                print(f"[❌] {err_msg} for {output_filename}")
+                _set_video_job_state(output_filename, "failed", err_msg)
                 return
 
             os.replace(temp_output_path, final_output_path)
@@ -813,17 +1050,22 @@ def generate_video_clip(
                 clip_segments_meta=clip_segments_meta
             )
 
+            _set_video_job_state(output_filename, "ready")
+
             size_mb = os.path.getsize(final_output_path) / (1024 * 1024)
-            elapsed = time.monotonic() - start_time_Wall
+            elapsed = time.monotonic() - start_time_wall
             print(
                 f"[✅] Video created for {cam_id}: {final_output_path} "
                 f"({size_mb:.2f} MB, {len(clip_segments_meta)} clip segment(s) in {elapsed:.1f}s)"
             )
 
         except subprocess.TimeoutExpired:
-            print(f"[❌] Timed out generating video clip for {cam_id} ({date_window_label}) after 600s")
+            err_msg = "Timed out generating video clip after 600s"
+            print(f"[❌] {err_msg} for {cam_id} ({date_window_label})")
+            _set_video_job_state(output_filename, "failed", err_msg)
         except Exception as e:
             print(f"[❌] Error generating video clip for {cam_id} ({date_window_label}): {e}")
+            _set_video_job_state(output_filename, "failed", str(e))
         finally:
             if concat_list_path and os.path.exists(concat_list_path):
                 try:
@@ -837,45 +1079,81 @@ def generate_video_clip(
                     pass
 
 
-class ThreadedHTTPServer(ThreadingMixIn, socketserver.TCPServer):
-    """Handle requests in a separate thread with bounded concurrency and per-thread TLS handshakes."""
-    daemon_threads = True
+class PooledHTTPServer(socketserver.TCPServer):
+    """Bounded ThreadPoolExecutor HTTP/HTTPS server with per-worker TLS handshakes and load shedding."""
     allow_reuse_address = True
     request_queue_size = 64
+    MAX_WORKERS = 64
+    MAX_INFLIGHT = 128
 
     def __init__(self, server_address, RequestHandlerClass, ssl_context=None):
         super().__init__(server_address, RequestHandlerClass)
         self.ssl_context = ssl_context
-        self._thread_sema = threading.BoundedSemaphore(64)
+        self._executor = ThreadPoolExecutor(max_workers=self.MAX_WORKERS, thread_name_prefix="http-worker")
+        self._conn_lock = threading.Lock()
+        self._inflight = 0
+        self._active_workers = 0
 
-    def process_request_thread(self, request, client_address):
-        """Performs the TLS handshake inside the worker thread with a strict timeout
-        so a stalled client connection can never block the main accept() loop."""
-        with self._thread_sema:
-            try:
-                request.settimeout(10)
+    def active_connection_ratio(self):
+        with self._conn_lock:
+            return self._active_workers / float(self.MAX_WORKERS)
+
+    def process_request(self, request, client_address):
+        with self._conn_lock:
+            if self._inflight >= self.MAX_INFLIGHT:
+                # Shed load gracefully instead of spawning unbounded threads/FDs
                 try:
-                    request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                except OSError:
+                    self.shutdown_request(request)
+                except Exception:
                     pass
-                if self.ssl_context is not None:
-                    request = self.ssl_context.wrap_socket(request, server_side=True)
-                self.finish_request(request, client_address)
-            except (ConnectionResetError, BrokenPipeError, socket.timeout, ssl.SSLError, OSError):
+                return
+            self._inflight += 1
+
+        try:
+            self._executor.submit(self._process_request_worker, request, client_address)
+        except RuntimeError:
+            with self._conn_lock:
+                self._inflight = max(0, self._inflight - 1)
+            self.shutdown_request(request)
+
+    def _process_request_worker(self, request, client_address):
+        """Performs TLS handshake and handles requests inside the pooled worker thread."""
+        with self._conn_lock:
+            self._active_workers += 1
+        try:
+            request.settimeout(10)
+            try:
+                request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except OSError:
                 pass
-            except Exception:
-                self.handle_error(request, client_address)
-            finally:
-                self.shutdown_request(request)
+            if self.ssl_context is not None:
+                request = self.ssl_context.wrap_socket(request, server_side=True)
+            self.finish_request(request, client_address)
+        except (ConnectionResetError, BrokenPipeError, socket.timeout, ssl.SSLError, OSError):
+            pass
+        except Exception:
+            self.handle_error(request, client_address)
+        finally:
+            self.shutdown_request(request)
+            with self._conn_lock:
+                self._active_workers = max(0, self._active_workers - 1)
+                self._inflight = max(0, self._inflight - 1)
+
+    def server_close(self):
+        super().server_close()
+        try:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+        except TypeError:
+            self._executor.shutdown(wait=False)
 
 
 class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
 
-    # Enable HTTP/1.1 persistent connections (Keep-Alive) to avoid repeated TCP/TLS handshakes on mobile
+    # Enable HTTP/1.1 persistent connections (Keep-Alive) to avoid repeated TCP/TLS handshakes
     protocol_version = "HTTP/1.1"
 
-    # Kills zombie threads if the client hangs for 10 seconds
-    timeout = 10
+    # Keep idle Keep-Alive sockets short so worker slots recycle quickly under concurrency
+    timeout = 5
 
     # Ensure correct HLS & media MIME types across both Linux and macOS
     extensions_map = {
@@ -916,15 +1194,25 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
         accept_enc = self.headers.get('Accept-Encoding', '')
         return 'gzip' in accept_enc.lower()
 
+    def _maybe_close_under_load(self):
+        """Instructs clients to close Keep-Alive connections when worker pool pressure exceeds 50%."""
+        if self.close_connection or (
+                hasattr(self.server, 'active_connection_ratio') and self.server.active_connection_ratio() >= 0.5
+        ):
+            self.close_connection = True
+            self.send_header('Connection', 'close')
+
     def end_headers(self):
-        """Intercept header generation to inject custom cache headers before flushing."""
+        """Intercept header generation to inject custom cache headers and load-aware Connection headers."""
         clean_path = getattr(self, 'path', '').split('?', 1)[0].split('#', 1)[0]
+        basename = os.path.basename(clean_path)
 
         if (
                 clean_path.endswith('.html')
                 or clean_path == '/'
                 or clean_path.endswith(('/stream.m3u8', '/stream_sub.m3u8'))
                 or clean_path.endswith('/live.jpg')
+                or (basename.startswith('history_') and basename.endswith('.json'))
                 or clean_path in (
                 '/history',
                 '/available_dates',
@@ -933,6 +1221,7 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                 '/health',
                 '/api/video/list',
                 '/api/videos',
+                '/api/video/status',
         )
         ):
             self.send_header('Cache-Control', 'no-cache, must-revalidate, max-age=0')
@@ -940,7 +1229,7 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                 clean_path.startswith(f'/{BASE_DIR_NAME}/')
                 and clean_path.endswith('.ts')
         ):
-            # Live ring-buffer segments wrap around; cache briefly for active playback without long-term staleness
+            # Live segments use epoch-based numbering so short caching is safe and fast
             self.send_header('Cache-Control', 'private, max-age=15')
         elif (
                 clean_path.startswith('/recordings/')
@@ -948,6 +1237,7 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
         ) and clean_path.endswith(('.ts', '.jpg', '.vtt', '.m3u8', '.json')):
             self.send_header('Cache-Control', 'public, max-age=86400, immutable')
 
+        self._maybe_close_under_load()
         super().end_headers()
 
     @staticmethod
@@ -983,13 +1273,15 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
         # 4. Everything else defaults to being securely served out of WEB_DIR
         return super().translate_path(path)
 
-    def do_AUTHHEAD(self, body=b"Authentication required."):
+    def do_AUTHHEAD(self, body=b"Authentication required.", send_body=True):
+        if self.headers and self.headers.get('Content-Length') not in (None, '', '0'):
+            self.close_connection = True
         self.send_response(401)
         self.send_header("WWW-Authenticate", 'Basic realm="ArgoNVR Secure Access"')
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        if body:
+        if send_body and body:
             self.wfile.write(body)
 
     def _is_authenticated(self):
@@ -1009,7 +1301,53 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
         except Exception:
             return False
 
-    def _send_json(self, payload, status=200, etag=None):
+    def _read_json_body(self):
+        """Safely reads and parses a bounded JSON request body."""
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+        except ValueError:
+            self.close_connection = True
+            return None, (400, "Invalid Content-Length header")
+
+        if content_length < 0:
+            self.close_connection = True
+            return None, (400, "Invalid negative Content-Length")
+        if content_length > MAX_JSON_BODY_BYTES:
+            self.close_connection = True
+            return None, (413, "Request body too large")
+        if content_length == 0:
+            return {}, None
+
+        raw_body = self.rfile.read(content_length)
+        try:
+            return json.loads(raw_body.decode('utf-8')), None
+        except Exception:
+            return None, (400, "Invalid JSON payload")
+
+    def _send_preencoded_json(self, raw_bytes, gzip_bytes, status=200, etag=None, send_body=True):
+        if status == 200 and etag and self.headers.get('If-None-Match') == etag:
+            self.send_response(304)
+            self.send_header('ETag', etag)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+
+        use_gzip = self._accepts_gzip() and gzip_bytes is not None
+        body = gzip_bytes if use_gzip else raw_bytes
+
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        if etag:
+            self.send_header('ETag', etag)
+        if use_gzip:
+            self.send_header('Content-Encoding', 'gzip')
+            self.send_header('Vary', 'Accept-Encoding')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        if send_body:
+            self.wfile.write(body)
+
+    def _send_json(self, payload, status=200, etag=None, send_body=True):
         raw_bytes = json.dumps(payload, separators=(',', ':')).encode('utf-8')
         if etag is None and status == 200:
             etag = f'"{hashlib.md5(raw_bytes).hexdigest()}"'
@@ -1033,10 +1371,12 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Vary', 'Accept-Encoding')
         self.send_header('Content-Length', str(len(body)))
         self.end_headers()
-        self.wfile.write(body)
+        if send_body:
+            self.wfile.write(body)
 
-    def _serve_optimized_file(self, filepath, clean_path, extra_headers=None):
+    def _serve_optimized_file(self, filepath, clean_path, extra_headers=None, send_body=True):
         """Serves static/media files with ETag/304 support, Gzip compression, and strict Content-Length safety."""
+        headers_sent = False
         try:
             with open(filepath, 'rb') as f:
                 st = os.fstat(f.fileno())
@@ -1074,7 +1414,9 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                         self.send_header('Vary', 'Accept-Encoding')
                     self.send_header('Content-Length', str(len(body)))
                     self.end_headers()
-                    self.wfile.write(body)
+                    headers_sent = True
+                    if send_body:
+                        self.wfile.write(body)
                 else:
                     self.send_response(200)
                     self.send_header('Content-Type', ctype)
@@ -1086,45 +1428,68 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                             self.send_header(h_key, h_val)
                     self.send_header('Content-Length', str(st.st_size))
                     self.end_headers()
-                    remaining = st.st_size
-                    while remaining > 0:
-                        chunk = f.read(min(65536, remaining))
-                        if not chunk:
-                            break
-                        self.wfile.write(chunk)
-                        remaining -= len(chunk)
+                    headers_sent = True
+                    if send_body:
+                        remaining = st.st_size
+                        while remaining > 0:
+                            chunk = f.read(min(65536, remaining))
+                            if not chunk:
+                                # File truncated mid-transfer: close socket to avoid corrupting Keep-Alive framing
+                                self.close_connection = True
+                                break
+                            self.wfile.write(chunk)
+                            remaining -= len(chunk)
         except FileNotFoundError:
-            self.send_error(404)
+            if not headers_sent:
+                self.send_error(404)
+            else:
+                self.close_connection = True
         except (ConnectionResetError, BrokenPipeError, socket.timeout, ssl.SSLError, OSError):
-            pass
+            self.close_connection = True
 
-    def serve_range(self, filepath, range_header, extra_headers=None):
+    def _send_range_not_satisfiable(self, file_len):
+        body = b"Requested Range Not Satisfiable"
+        self.send_response(416)
+        self.send_header('Content-Range', f'bytes */{file_len}')
+        self.send_header('Content-Type', 'text/plain; charset=utf-8')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def serve_range(self, filepath, range_header, extra_headers=None, send_body=True):
+        headers_sent = False
         try:
             with open(filepath, 'rb') as f:
                 fs = os.fstat(f.fileno())
                 file_len = fs.st_size
                 etag = f'"{fs.st_mtime_ns:x}-{fs.st_size:x}"'
 
-                if not range_header.startswith('bytes='):
-                    self.send_error(416, "Requested Range Not Satisfiable")
+                if file_len <= 0 or not range_header.startswith('bytes='):
+                    self._send_range_not_satisfiable(file_len)
                     return
 
-                byte_range = range_header[6:].split(',', 1)[0].strip().split('-')
-                if not byte_range[0]:
-                    # Suffix byte range: bytes=-500
-                    suffix_len = int(byte_range[1]) if (len(byte_range) > 1 and byte_range[1]) else 0
-                    if suffix_len <= 0:
-                        self.send_error(416, "Requested Range Not Satisfiable")
-                        return
-                    start = max(0, file_len - suffix_len)
-                    end = file_len - 1
-                else:
-                    start = int(byte_range[0])
-                    end = int(byte_range[1]) if (len(byte_range) > 1 and byte_range[1]) else file_len - 1
-                    end = min(end, file_len - 1)
+                try:
+                    byte_range = range_header[6:].split(',', 1)[0].strip().split('-')
+                    if len(byte_range) != 2:
+                        raise ValueError("Invalid range syntax")
+                    if not byte_range[0]:
+                        # Suffix byte range: bytes=-500
+                        suffix_len = int(byte_range[1]) if byte_range[1] else 0
+                        if suffix_len <= 0:
+                            self._send_range_not_satisfiable(file_len)
+                            return
+                        start = max(0, file_len - suffix_len)
+                        end = file_len - 1
+                    else:
+                        start = int(byte_range[0])
+                        end = int(byte_range[1]) if byte_range[1] else file_len - 1
+                        end = min(end, file_len - 1)
+                except ValueError:
+                    self._send_range_not_satisfiable(file_len)
+                    return
 
                 if start >= file_len or start > end or start < 0:
-                    self.send_error(416, "Requested Range Not Satisfiable")
+                    self._send_range_not_satisfiable(file_len)
                     return
 
                 length = end - start + 1
@@ -1139,21 +1504,27 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                         self.send_header(h_key, h_val)
                 self.send_header('Content-Length', str(length))
                 self.end_headers()
+                headers_sent = True
 
-                f.seek(start)
-                remaining = length
-                while remaining > 0:
-                    chunk = f.read(min(65536, remaining))
-                    if not chunk:
-                        break
-                    self.wfile.write(chunk)
-                    remaining -= len(chunk)
-        except (ConnectionResetError, BrokenPipeError, socket.timeout, ssl.SSLError):
-            pass
+                if send_body:
+                    f.seek(start)
+                    remaining = length
+                    while remaining > 0:
+                        chunk = f.read(min(65536, remaining))
+                        if not chunk:
+                            self.close_connection = True
+                            break
+                        self.wfile.write(chunk)
+                        remaining -= len(chunk)
+        except (ConnectionResetError, BrokenPipeError, socket.timeout, ssl.SSLError, OSError):
+            self.close_connection = True
         except Exception as e:
-            self.send_error(500, f"Server Error: {e}")
+            if not headers_sent:
+                self.send_error(500, f"Server Error: {e}")
+            else:
+                self.close_connection = True
 
-    def _handle_video_stream(self, path_no_query, query_params):
+    def _handle_video_stream(self, path_no_query, query_params, send_body=True):
         """Streams or downloads a requested video (or sidecar .json) file from ABS_VIDEO_DIR."""
         raw_file = (
                 query_params.get('file', [None])[0]
@@ -1165,11 +1536,11 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
 
         clean_name, filepath = _resolve_video_file(raw_file, allow_json=True)
         if not clean_name or not filepath:
-            self._send_json({"error": "Invalid or missing video filename"}, status=400)
+            self._send_json({"error": "Invalid or missing video filename"}, status=400, send_body=send_body)
             return
 
         if not os.path.isfile(filepath):
-            self._send_json({"error": "Video file not found"}, status=404)
+            self._send_json({"error": "Video file not found"}, status=404, send_body=send_body)
             return
 
         is_download = query_params.get('download', ['0'])[0].lower() in ('1', 'true', 'yes')
@@ -1180,9 +1551,47 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
 
         range_header = self.headers.get('Range')
         if range_header and clean_name.lower().endswith('.mp4'):
-            self.serve_range(filepath, range_header, extra_headers=extra_headers)
+            self.serve_range(filepath, range_header, extra_headers=extra_headers, send_body=send_body)
         else:
-            self._serve_optimized_file(filepath, clean_name, extra_headers=extra_headers)
+            self._serve_optimized_file(filepath, clean_name, extra_headers=extra_headers, send_body=send_body)
+
+    def _handle_video_status(self, query_params, send_body=True):
+        """Returns background export status (queued/running/ready/failed) for a target filename."""
+        raw_file = (
+                query_params.get('file', [None])[0]
+                or query_params.get('filename', [None])[0]
+                or query_params.get('name', [None])[0]
+        )
+        clean_name, filepath = _resolve_video_file(raw_file, allow_json=False)
+        if not clean_name or not filepath:
+            self._send_json({"error": "Invalid or missing video filename"}, status=400, send_body=send_body)
+            return
+
+        job = _get_video_job_state(clean_name)
+        if os.path.isfile(filepath) and os.path.getsize(filepath) > 0:
+            elapsed = round(time.time() - job["startedAt"], 1) if job else 0.0
+            self._send_json(
+                {"status": "ready", "filename": clean_name, "error": None, "elapsedSec": elapsed},
+                status=200,
+                send_body=send_body
+            )
+            return
+
+        if job:
+            elapsed = round(time.time() - job["startedAt"], 1)
+            self._send_json(
+                {
+                    "status": job["status"],
+                    "filename": clean_name,
+                    "error": job.get("error"),
+                    "elapsedSec": elapsed
+                },
+                status=200,
+                send_body=send_body
+            )
+            return
+
+        self._send_json({"status": "not_found", "filename": clean_name}, status=404, send_body=send_body)
 
     def _handle_video_delete(self, path_no_query, query_params):
         """Deletes a specified video file and its sidecar .json from ABS_VIDEO_DIR."""
@@ -1195,19 +1604,16 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
             raw_file = path_no_query[len('/api/video/delete/'):]
 
         if not raw_file:
-            content_length = int(self.headers.get('Content-Length', 0))
-            if content_length > 0:
-                try:
-                    raw_body = self.rfile.read(content_length)
-                    payload = json.loads(raw_body.decode('utf-8'))
-                    if isinstance(payload, dict):
-                        raw_file = (
-                                payload.get('file')
-                                or payload.get('filename')
-                                or payload.get('name')
-                        )
-                except Exception:
-                    pass
+            payload, err = self._read_json_body()
+            if err:
+                self._send_json({"error": err[1]}, status=err[0])
+                return
+            if isinstance(payload, dict):
+                raw_file = (
+                        payload.get('file')
+                        or payload.get('filename')
+                        or payload.get('name')
+                )
 
         clean_name, filepath = _resolve_video_file(raw_file)
         if not clean_name or not filepath:
@@ -1228,6 +1634,8 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                     pass
             with _VIDEO_SIDECAR_LOCK:
                 _VIDEO_SIDECAR_CACHE.pop(sidecar_path, None)
+            with _VIDEO_JOBS_LOCK:
+                _VIDEO_JOBS.pop(clean_name, None)
 
             print(f"[🗑️] Deleted video file '{clean_name}' (requested by {self.address_string()})")
             self._send_json({"status": "deleted", "filename": clean_name}, status=200)
@@ -1235,7 +1643,105 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
             print(f"[❌] Failed to delete video file '{clean_name}': {e}")
             self._send_json({"error": f"Failed to delete video file: {e}"}, status=500)
 
-    def do_GET(self):
+    def _handle_history_request(self, query_params, send_body=True):
+        """Serves /history with a stat-based composite ETag and pre-encoded LRU cache
+        so unchanged 30s polls return 304 without reading, serializing, or hashing JSON."""
+        req_date = query_params.get('date', [None])[0]
+        req_cam = query_params.get('cam', [None])[0]
+
+        if not req_date:
+            self.send_error(400, "Missing 'date' parameter")
+            return
+
+        safe_date = os.path.basename(req_date)
+        safe_cam = os.path.basename(req_cam) if req_cam else ""
+
+        cam_targets = []
+        if safe_cam:
+            history_path = os.path.join(ABS_STORE_DIR, safe_cam, f'history_{safe_date}.json')
+            try:
+                st = os.stat(history_path)
+                cam_targets.append((safe_cam, history_path, st.st_mtime_ns, st.st_size))
+            except OSError:
+                cam_targets.append((safe_cam, history_path, 0, 0))
+        else:
+            try:
+                if os.path.isdir(ABS_STORE_DIR):
+                    cam_dirs = sorted(
+                        e.name for e in os.scandir(ABS_STORE_DIR)
+                        if e.is_dir() and e.name not in NON_CAMERA_STORE_DIRS
+                    )
+                    for cam_dir in cam_dirs:
+                        history_path = os.path.join(ABS_STORE_DIR, cam_dir, f'history_{safe_date}.json')
+                        try:
+                            st = os.stat(history_path)
+                            cam_targets.append((cam_dir, history_path, st.st_mtime_ns, st.st_size))
+                        except OSError:
+                            cam_targets.append((cam_dir, history_path, 0, 0))
+            except Exception as e:
+                print(f"Error reading history directories: {e}")
+
+        stat_sig = tuple((c, m, s) for c, _, m, s in cam_targets)
+        sig_str = f"{safe_date}|{safe_cam}|{stat_sig}"
+        etag = f'"{hashlib.md5(sig_str.encode("utf-8")).hexdigest()}"'
+
+        if self.headers.get('If-None-Match') == etag:
+            self.send_response(304)
+            self.send_header('ETag', etag)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+
+        cache_key = (safe_date, safe_cam, stat_sig)
+        with _HISTORY_RESPONSE_LOCK:
+            cached_resp = _HISTORY_RESPONSE_CACHE.get(cache_key)
+            if cached_resp:
+                _HISTORY_RESPONSE_CACHE.move_to_end(cache_key)
+
+        if cached_resp:
+            cached_etag, raw_bytes, gzip_bytes = cached_resp
+            self._send_preencoded_json(raw_bytes, gzip_bytes, status=200, etag=cached_etag, send_body=send_body)
+            return
+
+        response_data = {}
+        for cam_dir, history_path, mtime_ns, size in cam_targets:
+            response_data[cam_dir] = _load_cached_history_file(history_path) if size > 0 else []
+
+        raw_bytes = json.dumps(response_data, separators=(',', ':')).encode('utf-8')
+        gzip_bytes = gzip.compress(raw_bytes, compresslevel=6) if len(raw_bytes) > 256 else None
+
+        with _HISTORY_RESPONSE_LOCK:
+            _HISTORY_RESPONSE_CACHE[cache_key] = (etag, raw_bytes, gzip_bytes)
+            _HISTORY_RESPONSE_CACHE.move_to_end(cache_key)
+            while len(_HISTORY_RESPONSE_CACHE) > _HISTORY_RESPONSE_CACHE_MAX:
+                _HISTORY_RESPONSE_CACHE.popitem(last=False)
+
+        self._send_preencoded_json(raw_bytes, gzip_bytes, status=200, etag=etag, send_body=send_body)
+
+    def _handle_live_snapshot_request(self, cam_id, send_body=True):
+        """Serves an on-demand live.jpg extracted from the camera's latest HLS segment."""
+        jpeg_bytes, etag = _get_or_generate_live_snapshot(cam_id)
+        if not jpeg_bytes:
+            self.send_error(404)
+            return
+
+        if etag and self.headers.get('If-None-Match') == etag:
+            self.send_response(304)
+            self.send_header('ETag', etag)
+            self.send_header('Content-Length', '0')
+            self.end_headers()
+            return
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'image/jpeg')
+        if etag:
+            self.send_header('ETag', etag)
+        self.send_header('Content-Length', str(len(jpeg_bytes)))
+        self.end_headers()
+        if send_body:
+            self.wfile.write(jpeg_bytes)
+
+    def _handle_get_or_head(self, send_body=True):
         parsed_url = urlparse(self.path)
         path_no_query = parsed_url.path
         query_params = parse_qs(parsed_url.query)
@@ -1245,65 +1751,44 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Content-Type', 'text/plain')
             self.send_header('Content-Length', '2')
             self.end_headers()
-            self.wfile.write(b"OK")
+            if send_body:
+                self.wfile.write(b"OK")
             return
 
         # --- PWA Whitelist ---
         if path_no_query in ('/manifest.json', '/sw.js') or path_no_query.startswith('/icons/'):
-            super().do_GET()
+            if send_body:
+                super().do_GET()
+            else:
+                super().do_HEAD()
             return
         # ---------------------
 
         if not self._is_authenticated():
-            self.do_AUTHHEAD()
+            self.do_AUTHHEAD(send_body=send_body)
             return
 
         if path_no_query in ('/api/video/list', '/api/videos'):
             videos = _list_video_files()
-            self._send_json({"videos": videos})
+            self._send_json({"videos": videos}, send_body=send_body)
+            return
+
+        if path_no_query == '/api/video/status':
+            self._handle_video_status(query_params, send_body=send_body)
             return
 
         if path_no_query == '/api/video/stream' or path_no_query.startswith('/api/video/stream/'):
-            self._handle_video_stream(path_no_query, query_params)
+            self._handle_video_stream(path_no_query, query_params, send_body=send_body)
             return
 
         if path_no_query == '/history':
-            req_date = query_params.get('date', [None])[0]
-            req_cam = query_params.get('cam', [None])[0]
-
-            if not req_date:
-                self.send_error(400, "Missing 'date' parameter")
-                return
-
-            safe_date = os.path.basename(req_date)
-            response_data = {}
-
-            if req_cam:
-                safe_cam = os.path.basename(req_cam)
-                history_path = os.path.join(ABS_STORE_DIR, safe_cam, f'history_{safe_date}.json')
-                response_data[safe_cam] = _load_cached_history_file(history_path) if os.path.exists(history_path) else []
-            else:
-                try:
-                    if os.path.exists(ABS_STORE_DIR):
-                        for cam_dir in sorted(os.listdir(ABS_STORE_DIR)):
-                            cam_path = os.path.join(ABS_STORE_DIR, cam_dir)
-                            if os.path.isdir(cam_path):
-                                history_path = os.path.join(cam_path, f'history_{safe_date}.json')
-                                response_data[cam_dir] = (
-                                    _load_cached_history_file(history_path)
-                                    if os.path.exists(history_path)
-                                    else []
-                                )
-                except Exception as e:
-                    print(f"Error reading history directories: {e}")
-
-            self._send_json(response_data)
+            self._handle_history_request(query_params, send_body=send_body)
             return
 
         if path_no_query == '/available_dates':
             now = time.time()
             with _DATES_CACHE_LOCK:
-                if now - _DATES_CACHE["timestamp"] < 10.0 and _DATES_CACHE["dates"]:
+                if _DATES_CACHE["populated"] and (now - _DATES_CACHE["timestamp"]) < 10.0:
                     cached_dates = _DATES_CACHE["dates"]
                     cached_etag = _DATES_CACHE["etag"]
                 else:
@@ -1313,15 +1798,19 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
             if cached_dates is None:
                 dates = set()
                 try:
-                    if os.path.exists(ABS_STORE_DIR):
-                        for cam_dir in os.listdir(ABS_STORE_DIR):
-                            cam_path = os.path.join(ABS_STORE_DIR, cam_dir)
-                            if os.path.isdir(cam_path):
-                                for file in os.listdir(cam_path):
-                                    if file.startswith('history_') and file.endswith('.json'):
-                                        date_str = file[8:16]
+                    if os.path.isdir(ABS_STORE_DIR):
+                        for cam_entry in os.scandir(ABS_STORE_DIR):
+                            if not cam_entry.is_dir() or cam_entry.name in NON_CAMERA_STORE_DIRS:
+                                continue
+                            try:
+                                for f_entry in os.scandir(cam_entry.path):
+                                    fname = f_entry.name
+                                    if fname.startswith('history_') and fname.endswith('.json') and len(fname) == 21:
+                                        date_str = fname[8:16]
                                         if date_str.isdigit():
                                             dates.add(date_str)
+                            except OSError:
+                                continue
                 except Exception as e:
                     print(f"Error reading available dates: {e}")
 
@@ -1329,19 +1818,30 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                 cached_etag = f'"{hashlib.md5(json.dumps(cached_dates).encode()).hexdigest()}"'
                 with _DATES_CACHE_LOCK:
                     _DATES_CACHE["timestamp"] = now
+                    _DATES_CACHE["populated"] = True
                     _DATES_CACHE["dates"] = cached_dates
                     _DATES_CACHE["etag"] = cached_etag
 
-            self._send_json(cached_dates, etag=cached_etag)
+            self._send_json(cached_dates, etag=cached_etag, send_body=send_body)
             return
 
         if path_no_query == '/cameracount':
-            self._send_json({"count": CAMERA_COUNT, "subStreams": SUB_STREAMS})
+            self._send_json({"count": CAMERA_COUNT, "cameras": CAMERA_IDS, "subStreams": SUB_STREAMS}, send_body=send_body)
             return
 
         if path_no_query == '/basedir':
-            self._send_json({"baseDir": BASE_DIR, "subStreams": SUB_STREAMS})
+            self._send_json({"baseDir": BASE_DIR, "subStreams": SUB_STREAMS}, send_body=send_body)
             return
+
+        live_snap_prefix = f'/{BASE_DIR_NAME}/'
+        if path_no_query.startswith(live_snap_prefix) and path_no_query.endswith('/live.jpg'):
+            rel_parts = unquote(path_no_query[len(live_snap_prefix):]).split('/')
+            if len(rel_parts) == 2 and rel_parts[1] == 'live.jpg':
+                snap_cam_id = rel_parts[0]
+                if snap_cam_id and snap_cam_id not in ('.', '..') and '/' not in snap_cam_id and '\\' not in snap_cam_id:
+                    if not CONTINUOUS_LIVE_SNAPSHOTS or not os.path.isfile(self.translate_path(path_no_query)):
+                        self._handle_live_snapshot_request(snap_cam_id, send_body=send_body)
+                        return
 
         filepath = self.translate_path(path_no_query)
 
@@ -1352,14 +1852,23 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
 
         range_header = self.headers.get('Range')
         if path_no_query.endswith('.mp4') and range_header:
-            self.serve_range(filepath, range_header)
+            self.serve_range(filepath, range_header, send_body=send_body)
             return
 
         if os.path.isfile(filepath):
-            self._serve_optimized_file(filepath, path_no_query)
+            self._serve_optimized_file(filepath, path_no_query, send_body=send_body)
             return
 
-        super().do_GET()
+        if send_body:
+            super().do_GET()
+        else:
+            super().do_HEAD()
+
+    def do_GET(self):
+        self._handle_get_or_head(send_body=True)
+
+    def do_HEAD(self):
+        self._handle_get_or_head(send_body=False)
 
     def do_POST(self):
         parsed_url = urlparse(self.path)
@@ -1372,9 +1881,10 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
 
         if path_no_query == '/api/video/create':
             try:
-                content_length = int(self.headers.get('Content-Length', 0))
-                raw_body = self.rfile.read(content_length) if content_length > 0 else b"{}"
-                payload = json.loads(raw_body.decode('utf-8'))
+                payload, err = self._read_json_body()
+                if err:
+                    self._send_json({"error": err[1]}, status=err[0])
+                    return
 
                 cam_id = os.path.basename(str(payload.get('camId', '')).strip())
                 date_str = os.path.basename(str(payload.get('date', '')).strip())
@@ -1411,7 +1921,7 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                 )
 
                 created_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                output_filename = _build_generated_video_filename(
+                output_filename = _build_unique_video_filename(
                     cam_id, start_date, end_date, start_tag, end_tag, created_stamp
                 )
                 encoded_name = quote(output_filename)
@@ -1426,11 +1936,11 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                     args=(
                         cam_id,
                         start_date,
+                        end_date,
                         clip_start_sec,
                         clip_end_sec,
                         clips,
                         output_filename,
-                        last_clip_duration
                     ),
                     daemon=True
                 ).start()
@@ -1440,6 +1950,7 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
                         "status": "accepted",
                         "message": "Video generation started in background.",
                         "filename": output_filename,
+                        "statusUrl": f"/api/video/status?file={encoded_name}",
                         "streamUrl": f"/api/video/stream?file={encoded_name}",
                         "downloadUrl": f"/api/video/stream?file={encoded_name}&download=1",
                     },
@@ -1489,12 +2000,20 @@ class SecureAuthHandler(http.server.SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    _cleanup_orphaned_video_temps()
+
     tls_context = None
     if SSL_CERT and SSL_KEY and os.path.exists(SSL_CERT) and os.path.exists(SSL_KEY):
         tls_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         tls_context.load_cert_chain(certfile=SSL_CERT, keyfile=SSL_KEY)
 
-    with ThreadedHTTPServer(("", PORT), SecureAuthHandler, ssl_context=tls_context) as httpd:
+    with PooledHTTPServer(("", PORT), SecureAuthHandler, ssl_context=tls_context) as httpd:
+        def _handle_shutdown_signal(signum, frame):
+            threading.Thread(target=httpd.shutdown, daemon=True).start()
+
+        signal.signal(signal.SIGTERM, _handle_shutdown_signal)
+        signal.signal(signal.SIGINT, _handle_shutdown_signal)
+
         if tls_context is not None:
             print(f"🔒 Secure HTTPS ArgoNVR server running on port {PORT}")
         else:

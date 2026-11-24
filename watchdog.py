@@ -1,4 +1,6 @@
 import os
+import signal
+import sys
 import time
 import urllib.request
 from urllib.error import URLError, HTTPError
@@ -25,10 +27,19 @@ def get_health_url():
         scheme = "https" if use_https else "http"
         return f"{scheme}://127.0.0.1:{port}/health"
     except Exception:
-        return "https://localhost/health"
+        return "http://127.0.0.1:8000/health"
 
 
 def start_watchdog():
+    running = True
+
+    def _stop(signum, frame):
+        nonlocal running
+        running = False
+
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+
     notifier = sdnotify.SystemdNotifier() if sdnotify is not None else None
     health_url = get_health_url()
 
@@ -39,7 +50,7 @@ def start_watchdog():
 
     print(f"Watchdog started. Polling {health_url} every {CHECK_INTERVAL}s (Ignoring SSL).")
 
-    while True:
+    while running:
         try:
             ctx = ssl_context if health_url.startswith("https://") else None
             with urllib.request.urlopen(
@@ -61,7 +72,12 @@ def start_watchdog():
         except Exception as e:
             print(f"Watchdog failed: Unexpected error: {e}")
 
-        time.sleep(CHECK_INTERVAL)
+        for _ in range(CHECK_INTERVAL):
+            if not running:
+                break
+            time.sleep(1)
+
+    sys.exit(0)
 
 
 if __name__ == "__main__":

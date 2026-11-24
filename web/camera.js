@@ -7,6 +7,8 @@
 
     // vttCache, spriteImages, baseDir, and window.networkMonitor inherit cleanly from script.js global scope
     const vttInFlight = new Map();
+    const failedSprites = new Set();
+    const chunkElByUrl = new Map();
 
     // Helper Functions
     function getTodayString() {
@@ -116,11 +118,37 @@
 
     let timelineStartSec = 0;
     let timelineEndSec = 86400;
+    let cachedDayClips = [];
+    let cachedDayClipsKey = '';
+    let cachedDayTotalDuration = 0;
+    let fwReconnectTimer = null;
 
     // Video generation button state & timers
     let isCreatingVideo = false;
     let createVideoTickTimer = null;
     let createVideoResetTimer = null;
+    let createVideoAbortController = null;
+
+    function invalidateDayClipsCache() {
+        cachedDayClipsKey = '';
+    }
+
+    function clearFwReconnectTimer() {
+        if (fwReconnectTimer) {
+            clearTimeout(fwReconnectTimer);
+            fwReconnectTimer = null;
+        }
+    }
+
+    function scheduleFwReconnect(delayMs = 2500) {
+        if (fwReconnectTimer || !isViewActive || fwTimeLabel.innerText !== "LIVE" || fwIsScrubbing) return;
+        fwReconnectTimer = setTimeout(() => {
+            fwReconnectTimer = null;
+            if (isViewActive && fwTimeLabel.innerText === "LIVE" && !fwIsScrubbing && document.visibilityState === "visible") {
+                fwGoLive();
+            }
+        }, delayMs);
+    }
 
     function clearCreateVideoTimers() {
         if (createVideoTickTimer) {
@@ -159,30 +187,79 @@
         }
     }
 
-    async function waitForVideoFile(filename, maxWaitMs = 300000) {
+    function abortableSleep(ms, signal) {
+        return new Promise((resolve, reject) => {
+            if (signal && signal.aborted) {
+                reject(new DOMException('Aborted', 'AbortError'));
+                return;
+            }
+            const timer = setTimeout(() => {
+                if (signal) signal.removeEventListener('abort', onAbort);
+                resolve();
+            }, ms);
+            const onAbort = () => {
+                clearTimeout(timer);
+                reject(new DOMException('Aborted', 'AbortError'));
+            };
+            if (signal) {
+                signal.addEventListener('abort', onAbort, { once: true });
+            }
+        });
+    }
+
+    async function waitForVideoFile(filename, maxWaitMs = 300000, signal = null) {
         if (!filename) {
             throw new Error('Server did not return a target video filename');
         }
 
+        const statusUrl = `/api/video/status?file=${encodeURIComponent(filename)}`;
         const probeUrl = `/api/video/stream?file=${encodeURIComponent(filename)}`;
         const deadline = Date.now() + maxWaitMs;
 
         while (Date.now() < deadline) {
-            await new Promise(r => setTimeout(r, 1500));
+            await abortableSleep(1500, signal);
+            if (signal && signal.aborted) {
+                throw new DOMException('Aborted', 'AbortError');
+            }
             try {
-                const resp = await fetch(probeUrl, {
+                const statusResp = await fetch(statusUrl, {
                     method: 'GET',
                     credentials: 'include',
                     cache: 'no-store',
-                    headers: {
-                        'Range': 'bytes=0-0'
-                    }
+                    signal
                 });
 
-                if (resp.status === 206 || resp.status === 200) {
-                    return true;
+                if (statusResp.ok) {
+                    const statusData = await statusResp.json();
+                    if (statusData.status === 'ready') {
+                        return true;
+                    }
+                    if (statusData.status === 'failed') {
+                        throw new Error(statusData.error || 'Video creation failed on server');
+                    }
+                    continue;
+                }
+
+                // Fallback for older servers without /api/video/status
+                if (statusResp.status === 404) {
+                    const resp = await fetch(probeUrl, {
+                        method: 'GET',
+                        credentials: 'include',
+                        cache: 'no-store',
+                        signal,
+                        headers: {
+                            'Range': 'bytes=0-0'
+                        }
+                    });
+
+                    if (resp.status === 206 || resp.status === 200) {
+                        return true;
+                    }
                 }
             } catch (e) {
+                if (e && e.name === 'AbortError') throw e;
+                if (e && e.message && e.message.toLowerCase().includes('video creation failed')) throw e;
+                if (e && e.message && e.message.toLowerCase().includes('ffmpeg')) throw e;
                 // Ignore transient network errors while polling
             }
         }
@@ -223,6 +300,7 @@
     }
 
     function destroyFwHlsPlayer() {
+        clearFwReconnectTimer();
         if (fwHlsPlayer) {
             try {
                 fwHlsPlayer.stopLoad();
@@ -253,12 +331,12 @@
             return (now.getHours() * 3600) + (now.getMinutes() * 60) + now.getSeconds();
         }
         const clips = globalManifest[camId] || [];
-        let parsed = clips.filter(c => parseFilenameToSeconds(c.filename) !== null)
-            .sort((a,b) => parseFilenameToSeconds(a.filename) - parseFilenameToSeconds(b.filename));
-
-        if (parsed.length > 0) {
-            const lastClip = parsed[parsed.length - 1];
-            return parseFilenameToSeconds(lastClip.filename) + (lastClip.duration || 0);
+        for (let i = clips.length - 1; i >= 0; i--) {
+            const c = clips[i];
+            const startSec = c._startSec !== undefined ? c._startSec : parseFilenameToSeconds(c.filename);
+            if (startSec !== null) {
+                return startSec + (Number(c.duration) || 0);
+            }
         }
         return 86400;
     }
@@ -287,15 +365,27 @@
 
     function getDayClips() {
         const clips = globalManifest[camId] || [];
-        let parsed = clips.filter(c => parseFilenameToSeconds(c.filename) !== null)
-            .sort((a,b) => parseFilenameToSeconds(a.filename) - parseFilenameToSeconds(b.filename));
+        const key = `${camId}|${currentDayString}|${timelineStartSec}|${timelineEndSec}|${clips.length}`;
+        if (key === cachedDayClipsKey) {
+            return cachedDayClips;
+        }
 
-        parsed = parsed.filter(c => {
-            const clipStart = parseFilenameToSeconds(c.filename);
-            const clipEnd = clipStart + (c.duration || 0);
+        const parsed = clips.filter(c => {
+            const clipStart = c._startSec !== undefined ? c._startSec : parseFilenameToSeconds(c.filename);
+            if (clipStart === null) return false;
+            const clipEnd = (c._endSec !== undefined && c._endSec !== null)
+                ? c._endSec
+                : clipStart + (Number(c.duration) || 0);
             return clipEnd > timelineStartSec && clipStart < timelineEndSec;
         });
 
+        let totalDur = 0;
+        for (let i = 0; i < parsed.length; i++) {
+            totalDur += Number(parsed[i].duration) || 0;
+        }
+        cachedDayClips = parsed;
+        cachedDayTotalDuration = totalDur;
+        cachedDayClipsKey = key;
         return parsed;
     }
 
@@ -359,6 +449,11 @@
 
         isCreatingVideo = true;
         clearCreateVideoTimers();
+        if (createVideoAbortController) {
+            try { createVideoAbortController.abort(); } catch (e) {}
+        }
+        createVideoAbortController = new AbortController();
+        const abortSignal = createVideoAbortController.signal;
 
         const firstClip = dayClips[0];
         const lastClip = dayClips[dayClips.length - 1];
@@ -395,6 +490,7 @@
             const response = await fetch('/api/video/create', {
                 method: 'POST',
                 credentials: 'include',
+                signal: abortSignal,
                 headers: {
                     'Content-Type': 'application/json'
                 },
@@ -406,9 +502,10 @@
             }
 
             const data = await response.json();
-            await waitForVideoFile(data.filename);
+            await waitForVideoFile(data.filename, 300000, abortSignal);
 
             clearCreateVideoTimers();
+            createVideoAbortController = null;
             isCreatingVideo = false;
             setCreateVideoBtnVisual('success', '✅ Video Ready!');
 
@@ -416,9 +513,14 @@
                 setCreateVideoBtnVisual('idle');
             }, 3500);
         } catch (err) {
-            console.error("Failed to complete video creation:", err);
             clearCreateVideoTimers();
+            createVideoAbortController = null;
             isCreatingVideo = false;
+            if (err && err.name === 'AbortError') {
+                setCreateVideoBtnVisual('idle');
+                return;
+            }
+            console.error("Failed to complete video creation:", err);
             setCreateVideoBtnVisual('error', '❌ Failed');
 
             createVideoResetTimer = setTimeout(() => {
@@ -482,7 +584,8 @@
 
         if (fwTimeLabel.innerText === "LIVE") {
             const lastClip = clips[clips.length - 1];
-            return parseFilenameToSeconds(lastClip.filename) + (lastClip.duration || 0);
+            const lastStart = lastClip._startSec !== undefined ? lastClip._startSec : parseFilenameToSeconds(lastClip.filename);
+            return (lastStart || 0) + (Number(lastClip.duration) || 0);
         }
 
         if (fwTimeLabel.innerText && fwTimeLabel.innerText !== "LOADING") {
@@ -496,10 +599,12 @@
 
         const leftStyle = fwIndicator.style.left;
         const indicatorPct = leftStyle ? parseFloat(leftStyle) : 100;
-        const totalDuration = clips.reduce((sum, c) => sum + (c.duration || 0), 0);
+        const totalDuration = cachedDayTotalDuration > 0
+            ? cachedDayTotalDuration
+            : clips.reduce((sum, c) => sum + (c.duration || 0), 0);
         const targetOffset = (indicatorPct / 100) * totalDuration;
 
-        const firstClipSeconds = parseFilenameToSeconds(clips[0].filename);
+        const firstClipSeconds = clips[0]._startSec !== undefined ? clips[0]._startSec : parseFilenameToSeconds(clips[0].filename);
         return firstClipSeconds + targetOffset;
     }
 
@@ -610,11 +715,12 @@
         }
 
         if (playingClip) {
-            const absoluteSeconds = parseFilenameToSeconds(playingClip.filename) + fwVideo.currentTime;
+            const startSec = playingClip._startSec !== undefined ? playingClip._startSec : parseFilenameToSeconds(playingClip.filename);
+            const absoluteSeconds = (startSec || 0) + fwVideo.currentTime;
             fwTimeLabel.innerText = secondsToTimeStr(absoluteSeconds);
             fwTimeLabel.classList.remove('time-live', 'time-scrub');
 
-            const totalDuration = dayClips.reduce((sum, c) => sum + c.duration, 0);
+            const totalDuration = cachedDayTotalDuration;
             if (totalDuration > 0) {
                 const progressPercentage = ((accumOffset + fwVideo.currentTime) / totalDuration) * 100;
                 fwIndicator.style.left = `${progressPercentage}%`;
@@ -631,7 +737,7 @@
         }
 
         clips.forEach((c, i) => {
-            if (c._index === undefined) c._index = i;
+            c._index = i;
         });
 
         while (isViewActive && session === currentLoadSession) {
@@ -643,14 +749,17 @@
             }
 
             const batchSize = netTier === 'low' ? 1 : (netTier === 'medium' ? 2 : 4);
+            const maxBudget = netTier === 'low' ? 26 : 72;
             let allComplete = true;
 
             for (const clip of clips) {
-                const hasVtt = !!vttCache[clip.url];
-                const hasSprite = spriteImages[clip.sprite_url] && spriteImages[clip.sprite_url].complete;
+                const hasVtt = !clip.vtt_url || Boolean(vttCache[clip.url]);
+                const hasSprite = !clip.sprite_url ||
+                    failedSprites.has(clip.sprite_url) ||
+                    Boolean(spriteImages[clip.sprite_url] && spriteImages[clip.sprite_url].complete);
 
                 if (hasVtt && hasSprite) {
-                    const chunkEl = document.querySelector(`.fw-timeline-chunk[data-url="${clip.url}"]`);
+                    const chunkEl = chunkElByUrl.get(clip.url);
                     if (chunkEl && !chunkEl.classList.contains('chunk-loaded')) {
                         chunkEl.classList.add('chunk-loaded');
                     }
@@ -662,28 +771,55 @@
             if (allComplete) break;
 
             const playheadTime = getPlayheadAbsoluteSeconds(clips);
+            const getClipCenter = (c) => {
+                const s = c._startSec !== undefined ? c._startSec : (parseFilenameToSeconds(c.filename) || 0);
+                return s + ((Number(c.duration) || 0) / 2);
+            };
 
-            let pendingClips = clips.filter(c =>
-                (c.sprite_url && (!spriteImages[c.sprite_url] || !spriteImages[c.sprite_url].complete)) ||
+            // Select a bounded target set within cache budget to prevent OOM & eviction thrash
+            const targetSet = new Set();
+            if (priorityClipUrl) {
+                const prioClip = clips.find(c => c.url === priorityClipUrl);
+                if (prioClip) targetSet.add(prioClip);
+            }
+
+            if (netTier === 'high' && clips.length <= maxBudget) {
+                for (const c of clips) targetSet.add(c);
+            } else {
+                const overviewTarget = netTier === 'low' ? 0 : (netTier === 'medium' ? 12 : 20);
+                if (overviewTarget > 0 && clips.length > 0) {
+                    const stride = Math.max(1, Math.ceil(clips.length / overviewTarget));
+                    for (let i = 0; i < clips.length && targetSet.size < maxBudget; i += stride) {
+                        targetSet.add(clips[i]);
+                    }
+                }
+
+                const radiusSec = netTier === 'low' ? 180 : (netTier === 'medium' ? 900 : 3600);
+                const nearby = clips
+                    .map(c => ({ clip: c, dist: Math.abs(getClipCenter(c) - playheadTime) }))
+                    .filter(item => item.dist <= radiusSec)
+                    .sort((a, b) => a.dist - b.dist);
+
+                for (const item of nearby) {
+                    if (targetSet.size >= maxBudget) break;
+                    targetSet.add(item.clip);
+                }
+            }
+
+            const protectedSprites = new Set();
+            const protectedClips = new Set();
+            for (const c of targetSet) {
+                if (c.sprite_url) protectedSprites.add(c.sprite_url);
+                if (c.url) protectedClips.add(c.url);
+            }
+
+            let pendingClips = Array.from(targetSet).filter(c =>
+                (c.sprite_url && !failedSprites.has(c.sprite_url) && (!spriteImages[c.sprite_url] || !spriteImages[c.sprite_url].complete)) ||
                 (c.vtt_url && !vttCache[c.url])
             );
 
-            if (netTier === 'low') {
-                pendingClips = pendingClips.filter(c => {
-                    if (c.url === priorityClipUrl) return true;
-                    const center = parseFilenameToSeconds(c.filename) + ((c.duration || 0) / 2);
-                    return Math.abs(center - playheadTime) <= 180;
-                });
-            } else if (netTier === 'medium') {
-                pendingClips = pendingClips.filter(c => {
-                    if (c.url === priorityClipUrl || c._index % 10 === 0) return true;
-                    const center = parseFilenameToSeconds(c.filename) + ((c.duration || 0) / 2);
-                    return Math.abs(center - playheadTime) <= 900;
-                });
-            }
-
             if (pendingClips.length === 0) {
-                await new Promise(r => setTimeout(r, 400));
+                await new Promise(r => setTimeout(r, 600));
                 continue;
             }
 
@@ -691,11 +827,8 @@
                 if (a.url === priorityClipUrl) return -1;
                 if (b.url === priorityClipUrl) return 1;
 
-                const aCenter = parseFilenameToSeconds(a.filename) + ((a.duration || 0) / 2);
-                const bCenter = parseFilenameToSeconds(b.filename) + ((b.duration || 0) / 2);
-
-                const aDist = Math.abs(aCenter - playheadTime);
-                const bDist = Math.abs(bCenter - playheadTime);
+                const aDist = Math.abs(getClipCenter(a) - playheadTime);
+                const bDist = Math.abs(getClipCenter(b) - playheadTime);
 
                 const getTier = (clip, dist) => {
                     if (dist < 300) return 0;
@@ -713,6 +846,10 @@
                 return aDist - bDist;
             });
 
+            if (typeof window.evictMediaCaches === 'function') {
+                window.evictMediaCaches(protectedSprites, protectedClips);
+            }
+
             const batch = pendingClips.slice(0, batchSize);
             const batchPromises = [];
 
@@ -721,12 +858,16 @@
                     priorityClipUrl = null;
                 }
 
-                if (targetClip.sprite_url) {
+                if (targetClip.sprite_url && !failedSprites.has(targetClip.sprite_url)) {
                     if (!spriteImages[targetClip.sprite_url]) {
                         const img = new Image();
                         const p = new Promise(resolve => {
                             img.onload = resolve;
-                            img.onerror = resolve;
+                            img.onerror = () => {
+                                failedSprites.add(targetClip.sprite_url);
+                                delete spriteImages[targetClip.sprite_url];
+                                resolve();
+                            };
                         });
                         img.src = targetClip.sprite_url;
                         img._loadPromise = p;
@@ -792,9 +933,16 @@
             const newManifest = await response.json();
 
             Object.keys(newManifest).forEach(id => {
-                newManifest[id].sort((a, b) => (parseFilenameToSeconds(a.filename) || 0) - (parseFilenameToSeconds(b.filename) || 0));
+                const list = newManifest[id] || [];
+                list.forEach(c => {
+                    const s = parseFilenameToSeconds(c.filename);
+                    c._startSec = s;
+                    c._endSec = s !== null ? s + (Number(c.duration) || 0) : null;
+                });
+                list.sort((a, b) => (a._startSec !== null ? a._startSec : -1) - (b._startSec !== null ? b._startSec : -1));
             });
             globalManifest = newManifest;
+            invalidateDayClipsCache();
 
             updateSliderMaxBounds();
             handleScaleChange();
@@ -806,10 +954,11 @@
 
     function drawTimelineChunks() {
         document.querySelectorAll('.fw-timeline-chunk').forEach(el => el.remove());
+        chunkElByUrl.clear();
         const dayClips = getDayClips();
         if (dayClips.length === 0) return;
 
-        const totalDuration = dayClips.reduce((sum, c) => sum + c.duration, 0);
+        const totalDuration = cachedDayTotalDuration;
         if (totalDuration <= 0) return;
         let accum = 0;
 
@@ -824,10 +973,15 @@
             chunk.style.left = `${startPct}%`;
             chunk.style.width = `${widthPct}%`;
 
-            if (vttCache[clip.url] && spriteImages[clip.sprite_url]?.complete) {
+            const hasVtt = !clip.vtt_url || Boolean(vttCache[clip.url]);
+            const hasSprite = !clip.sprite_url ||
+                failedSprites.has(clip.sprite_url) ||
+                Boolean(spriteImages[clip.sprite_url]?.complete);
+            if (hasVtt && hasSprite) {
                 chunk.classList.add('chunk-loaded');
             }
 
+            chunkElByUrl.set(clip.url, chunk);
             frag.appendChild(chunk);
             accum += clip.duration;
         });
@@ -891,19 +1045,31 @@
             : `${baseDir}/${camId}/stream.m3u8?t=${Date.now()}`;
 
         if (typeof Hls !== 'undefined' && Hls.isSupported()) {
-            fwHlsPlayer = new Hls(getAdaptiveSingleHlsConfig(true));
-            attachSingleHlsTelemetry(fwHlsPlayer);
+            const hls = new Hls(getAdaptiveSingleHlsConfig(true));
+            let networkRecoveryCount = 0;
+            let mediaRecoveryCount = 0;
+            let lastMediaRecoveryTs = 0;
 
-            fwHlsPlayer.attachMedia(fwVideo);
-            fwHlsPlayer.on(Hls.Events.MEDIA_ATTACHED, () => fwHlsPlayer.loadSource(freshPlaylistUrl));
-            fwHlsPlayer.on(Hls.Events.MANIFEST_PARSED, () => {
+            fwHlsPlayer = hls;
+            attachSingleHlsTelemetry(hls);
+
+            hls.attachMedia(fwVideo);
+            hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+                if (fwHlsPlayer !== hls) return;
+                hls.loadSource(freshPlaylistUrl);
+            });
+            hls.on(Hls.Events.MANIFEST_PARSED, () => {
+                if (fwHlsPlayer !== hls) return;
+                networkRecoveryCount = 0;
+                mediaRecoveryCount = 0;
                 if (activeLiveSubStream && window.networkMonitor) {
                     window.networkMonitor.clearSubStreamFailure(camId);
                 }
                 fwVideo.play().catch(e => {});
             });
 
-            fwHlsPlayer.on(Hls.Events.ERROR, (event, data) => {
+            hls.on(Hls.Events.ERROR, (event, data) => {
+                if (fwHlsPlayer !== hls) return;
                 if (data.fatal) {
                     if (activeLiveSubStream && data.type === Hls.ErrorTypes.NETWORK_ERROR && window.networkMonitor) {
                         const lockedOut = window.networkMonitor.markSubStreamFailure(camId);
@@ -915,13 +1081,35 @@
                     }
                     switch (data.type) {
                         case Hls.ErrorTypes.NETWORK_ERROR:
-                            fwHlsPlayer.startLoad();
+                            networkRecoveryCount++;
+                            if (networkRecoveryCount <= 2) {
+                                hls.startLoad();
+                            } else {
+                                destroyFwHlsPlayer();
+                                scheduleFwReconnect(2500);
+                            }
                             break;
-                        case Hls.ErrorTypes.MEDIA_ERROR:
-                            fwHlsPlayer.recoverMediaError();
+                        case Hls.ErrorTypes.MEDIA_ERROR: {
+                            const now = performance.now();
+                            if (now - lastMediaRecoveryTs > 15000) {
+                                mediaRecoveryCount = 0;
+                            }
+                            mediaRecoveryCount++;
+                            lastMediaRecoveryTs = now;
+                            if (mediaRecoveryCount === 1) {
+                                hls.recoverMediaError();
+                            } else if (mediaRecoveryCount === 2) {
+                                hls.swapAudioCodec();
+                                hls.recoverMediaError();
+                            } else {
+                                destroyFwHlsPlayer();
+                                scheduleFwReconnect(2500);
+                            }
                             break;
+                        }
                         default:
                             destroyFwHlsPlayer();
+                            scheduleFwReconnect(2500);
                             break;
                     }
                 }
@@ -937,6 +1125,8 @@
                 if (activeLiveSubStream && window.networkMonitor) {
                     window.networkMonitor.markSubStreamFailure(camId);
                     fwGoLive();
+                } else {
+                    scheduleFwReconnect(2500);
                 }
             };
             fwVideo.play().catch(e=>{});
@@ -952,7 +1142,7 @@
         const dayClips = getDayClips();
         if (dayClips.length === 0) return null;
 
-        const totalDuration = dayClips.reduce((sum, c) => sum + c.duration, 0);
+        const totalDuration = cachedDayTotalDuration;
         const targetSeconds = scrubFraction * totalDuration;
 
         let accum = 0;
@@ -972,7 +1162,7 @@
             scrubFraction,
             selectedClip,
             offsetInClip,
-            actualSec: parseFilenameToSeconds(selectedClip.filename) + offsetInClip
+            actualSec: (selectedClip._startSec !== undefined ? selectedClip._startSec : parseFilenameToSeconds(selectedClip.filename)) + offsetInClip
         };
     }
 
@@ -1113,7 +1303,25 @@
     setInterval(() => {
         if (!isViewActive || document.visibilityState === "hidden") return;
         if (fwTimeLabel.innerText !== "LIVE" || fwIsScrubbing) return;
-        if (!fwVideo || fwVideo.paused) return;
+        if (!fwVideo) return;
+
+        if (!fwHlsPlayer && !fwVideo.canPlayType('application/vnd.apple.mpegurl')) {
+            if (!fwReconnectTimer) {
+                fwGoLive();
+            }
+            return;
+        }
+
+        if (fwVideo.paused) {
+            fwWatchdogFreezeCount++;
+            fwVideo.play().catch(() => {});
+            if (fwWatchdogFreezeCount >= 2) {
+                console.warn(`[Watchdog] Single camera ${camId} remained paused in live mode. Resetting...`);
+                fwWatchdogFreezeCount = 0;
+                fwGoLive();
+            }
+            return;
+        }
 
         if (fwVideo.currentTime === fwWatchdogLastTime) {
             fwWatchdogFreezeCount++;
@@ -1155,6 +1363,8 @@
         currentDayString = dateParam || getTodayString();
         isViewActive = true;
         activeLiveSubStream = false;
+        failedSprites.clear();
+        invalidateDayClipsCache();
 
         if (window.networkMonitor && typeof window.networkMonitor.clearSubStreamFailure === 'function') {
             window.networkMonitor.clearSubStreamFailure(camId);
@@ -1200,6 +1410,16 @@
         targetClipUrl = null;
         targetClipOffset = -1;
         activeLiveSubStream = false;
+        chunkElByUrl.clear();
+        invalidateDayClipsCache();
+
+        if (createVideoAbortController) {
+            try { createVideoAbortController.abort(); } catch (e) {}
+            createVideoAbortController = null;
+        }
+        clearCreateVideoTimers();
+        isCreatingVideo = false;
+        setCreateVideoBtnVisual('idle');
 
         if (fwVideo) {
             fwVideo.pause();

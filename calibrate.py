@@ -7,6 +7,29 @@ import time
 
 CONFIG_FILE = 'argonvr.yaml'
 
+
+def detect_rtsp_timeout_args(timeout_seconds=10):
+    if timeout_seconds <= 0:
+        return []
+    timeout_us = str(int(timeout_seconds * 1_000_000))
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-h", "demuxer=rtsp"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5
+        )
+        help_text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+        if re.search(r'(?m)^\s*-timeout\b', help_text):
+            return ["-timeout", timeout_us]
+        if re.search(r'(?m)^\s*-stimeout\b', help_text):
+            return ["-stimeout", timeout_us]
+    except Exception:
+        pass
+    return []
+
+
 def load_config():
     try:
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
@@ -15,11 +38,13 @@ def load_config():
         print(f"❌ Could not find {CONFIG_FILE}")
         sys.exit(1)
 
+
 def save_config(config):
     shutil.copy(CONFIG_FILE, CONFIG_FILE + '.bak')  # Create a quick backup
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         yaml.dump(config, f, default_flow_style=False, sort_keys=False)
     print(f"✅ Saved updated configuration to {CONFIG_FILE} (backup at {CONFIG_FILE}.bak)")
+
 
 def iter_lines_cr_lf(stream):
     """Yields lines split on either CR or LF from a binary stream without buffering lag."""
@@ -50,6 +75,7 @@ def iter_lines_cr_lf(stream):
                 buffer = buffer[sep_idx + 1:]
 
             yield line.decode('utf-8', errors='ignore')
+
 
 def main():
     config = load_config()
@@ -132,14 +158,16 @@ def main():
         f"select='gte(scene,0)',metadata=mode=print"
     )
 
+    rtsp_timeout_args = detect_rtsp_timeout_args(int(settings.get('RTSP_IO_TIMEOUT_SECONDS', 10)))
+
     cmd = [
-        "ffmpeg", "-nostats", "-rtsp_transport", "tcp", "-i", rtsp_url,
+        "ffmpeg", "-nostats", "-rtsp_transport", "tcp", *rtsp_timeout_args, "-i", rtsp_url,
         "-map", "0:v", "-an",
         "-vf", vf_graph,
         "-f", "null", "-"
     ]
 
-    proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stderr=subprocess.PIPE)
 
     peak_score = 0.0
     error_log = []
@@ -252,6 +280,7 @@ def main():
             save_config(config)
         else:
             print("No configuration changes made. Exiting.")
+
 
 if __name__ == "__main__":
     main()
