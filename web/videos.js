@@ -229,18 +229,27 @@
             document.head.appendChild(styleEl);
         }
 
-        const wrap = document.createElement('div');
-        wrap.className = 'vp-scrubber-wrap';
-        vpScrubber.parentNode.insertBefore(wrap, vpScrubber);
-        wrap.appendChild(vpScrubber);
+        let wrap = vpScrubber.parentNode;
+        if (!wrap.classList.contains('vp-scrubber-wrap')) {
+            wrap = document.createElement('div');
+            wrap.className = 'vp-scrubber-wrap';
+            vpScrubber.parentNode.insertBefore(wrap, vpScrubber);
+            wrap.appendChild(vpScrubber);
+        }
 
-        scrubberTicksEl = document.createElement('div');
-        scrubberTicksEl.className = 'vp-scrubber-ticks';
-        wrap.appendChild(scrubberTicksEl);
+        scrubberTicksEl = wrap.querySelector('.vp-scrubber-ticks');
+        if (!scrubberTicksEl) {
+            scrubberTicksEl = document.createElement('div');
+            scrubberTicksEl.className = 'vp-scrubber-ticks';
+            wrap.appendChild(scrubberTicksEl);
+        }
 
-        scrubberTooltipEl = document.createElement('div');
-        scrubberTooltipEl.className = 'vp-scrubber-tooltip';
-        wrap.appendChild(scrubberTooltipEl);
+        scrubberTooltipEl = wrap.querySelector('.vp-scrubber-tooltip');
+        if (!scrubberTooltipEl) {
+            scrubberTooltipEl = document.createElement('div');
+            scrubberTooltipEl.className = 'vp-scrubber-tooltip';
+            wrap.appendChild(scrubberTooltipEl);
+        }
     }
 
     function getEffectiveClipDuration() {
@@ -720,17 +729,29 @@
         if (typeof isSingleCameraOpen !== 'undefined') {
             isSingleCameraOpen = true;
         }
+        if (cameraView && !cameraView.classList.contains('hidden') && typeof window.stopCameraView === 'function') {
+            try { window.stopCameraView(); } catch (_) {}
+        }
         if (typeof activeCameras !== 'undefined' && Array.isArray(activeCameras)) {
             activeCameras.forEach((id) => {
-                if (typeof clearCameraReconnectTimer === 'function') clearCameraReconnectTimer(id);
-                if (typeof clearCameraStaggerTimer === 'function') clearCameraStaggerTimer(id);
-                if (typeof stopCameraSnapshotLoop === 'function') stopCameraSnapshotLoop(id);
-                const videoEl = document.getElementById(`video-${id}`);
-                if (videoEl && !videoEl.paused) {
-                    try { videoEl.pause(); } catch (_) {}
+                if (typeof destroyHlsPlayer === 'function') {
+                    try { destroyHlsPlayer(id); } catch (_) {}
+                } else {
+                    if (typeof clearCameraReconnectTimer === 'function') clearCameraReconnectTimer(id);
+                    if (typeof clearCameraStaggerTimer === 'function') clearCameraStaggerTimer(id);
+                    if (typeof stopCameraSnapshotLoop === 'function') stopCameraSnapshotLoop(id);
+                    if (typeof hlsPlayers !== 'undefined' && hlsPlayers[id]) {
+                        try { hlsPlayers[id].stopLoad(); } catch (_) {}
+                    }
                 }
-                if (typeof hlsPlayers !== 'undefined' && hlsPlayers[id]) {
-                    try { hlsPlayers[id].stopLoad(); } catch (_) {}
+                const videoEl = document.getElementById(`video-${id}`);
+                if (videoEl) {
+                    delete videoEl.dataset.clipUrl;
+                    try {
+                        videoEl.pause();
+                        videoEl.removeAttribute('src');
+                        videoEl.load();
+                    } catch (_) {}
                 }
             });
         }
@@ -844,7 +865,6 @@
             const data = await response.json();
             allVideos = Array.isArray(data.videos) ? data.videos : [];
             populateCameraFilter();
-            updateSummaryBadge();
             renderVideosList();
 
             if (activeFilename) {
@@ -855,6 +875,7 @@
                     activeClipSegments = buildClipSegments(currentObj);
                     renderScrubberTicks();
                     updateScrubberAndTime();
+                    maybeFetchSidecarSegments(currentObj);
                 }
             }
         } catch (err) {
@@ -920,16 +941,16 @@
         return filtered;
     }
 
-    function updateSummaryBadge() {
-        const filtered = getFilteredAndSortedVideos();
+    function updateSummaryBadge(filteredVideos = null) {
+        const filtered = Array.isArray(filteredVideos) ? filteredVideos : getFilteredAndSortedVideos();
         const totalBytes = filtered.reduce((acc, v) => acc + (Number(v.size) || 0), 0);
         const countLabel = filtered.length === 1 ? '1 video' : `${filtered.length} videos`;
         summaryBadge.textContent = `${countLabel} • ${formatBytes(totalBytes)}`;
     }
 
     function renderVideosList() {
-        updateSummaryBadge();
         const videos = getFilteredAndSortedVideos();
+        updateSummaryBadge(videos);
         videosListEl.innerHTML = '';
 
         if (videos.length === 0) {
@@ -977,9 +998,10 @@
             const subMeta = document.createElement('div');
             subMeta.className = 'video-item-submeta';
             const createdSpan = document.createElement('span');
-            const segCount = Array.isArray(video.segments) && video.segments.length > 1
-                ? ` • ${video.segments.length} clips`
-                : '';
+            const clipCount = Number.isFinite(Number(video.segmentCount))
+                ? Number(video.segmentCount)
+                : (Array.isArray(video.segments) ? video.segments.length : 0);
+            const segCount = clipCount > 1 ? ` • ${clipCount} clips` : '';
             createdSpan.textContent = `Created: ${video.createdAt || 'Unknown'}${segCount}`;
             subMeta.appendChild(createdSpan);
 

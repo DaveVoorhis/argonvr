@@ -1,0 +1,24 @@
+[Unit]
+Description=ArgoNVR Web Server & Health Watchdog
+After=network-online.target argonvr-engine.service
+Wants=argonvr-engine.service
+
+[Service]
+Type=notify
+NotifyAccess=all
+User=root
+WorkingDirectory=/home/dave/argonvr
+ExecStart=/bin/bash -c '/usr/bin/python3 /home/dave/argonvr/server.py & /usr/bin/python3 /home/dave/argonvr/watchdog.py & wait -n'
+
+KillMode=mixed
+TimeoutStopSec=15
+
+# Automatically restart only the web server if it crashes or stops responding to /health
+Restart=always
+RestartSec=3
+WatchdogSec=60s
+
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

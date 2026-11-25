@@ -1,0 +1,25 @@
+[Unit]
+Description=ArgoNVR Recording & Streaming Engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+User=root
+WorkingDirectory=/home/dave/argonvr
+ExecStart=/usr/bin/python3 /home/dave/argonvr/argonvr.py
+
+# Gracefully finalize active recordings and reap FFmpeg children on stop/restart
+KillMode=mixed
+TimeoutStopSec=20
+
+# Automatically restart if the engine crashes or its event loop stops heartbeating
+Restart=always
+RestartSec=5
+WatchdogSec=60s
+
+Environment=PYTHONUNBUFFERED=1
+Environment=ARGONVR_ENGINE_NOTIFY=1
+
+[Install]
+WantedBy=multi-user.target

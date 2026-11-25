@@ -26,7 +26,11 @@ function hslToHex(h, s, l) {
 }
 
 function getCameraColor(camId) {
-	const num = parseInt(camId.replace(/\D/g, '')) || 1;
+	const idx = activeCameras.indexOf(camId);
+	if (idx >= 0 && CAMERA_COLORS.length > 0) {
+		return CAMERA_COLORS[idx % CAMERA_COLORS.length];
+	}
+	const num = parseInt(String(camId).replace(/\D/g, ''), 10) || 1;
 	return CAMERA_COLORS[(num - 1) % CAMERA_COLORS.length];
 }
 
@@ -174,7 +178,7 @@ const networkMonitor = {
 	recordStall() {
 		const now = performance.now();
 		if (now < this.suppressPenaltiesUntil) return;
-		if (!document.hasFocus && document.visibilityState === 'hidden') return;
+		if (document.visibilityState === 'hidden') return;
 		// Coalesce simultaneous stalls across multiple cameras into a single network event
 		if (now - this.lastStallTs < 4000) return;
 
@@ -377,6 +381,10 @@ const cameraLiveMode = {}; // 'snapshot' | 'hls-sub' | 'hls-main' | 'none'
 const visibleCameras = new Set();
 let cardIntersectionObserver = null;
 let manifestFetchInFlight = false;
+let manifestAbortController = null;
+let manifestRequestSeq = 0;
+let lastManifestEtag = null;
+let lastManifestDate = null;
 let hoveredCameraId = null;
 
 const activeCameras = [];
@@ -699,10 +707,10 @@ function handleStreamError(camId, hlsInstance, wasSubStream = false) {
 
 async function fetchAvailableDates() {
 	try {
-		const response = await fetch('/available_dates', { credentials: 'include' });
+		const response = await fetch('/available_dates', { cache: 'no-cache', credentials: 'include' });
 		if (response.ok) {
 			const dates = await response.json();
-			dates.forEach(d => availableDates.add(d));
+			availableDates = new Set(Array.isArray(dates) ? dates : []);
 			const popup = document.getElementById('calendar-popup');
 			if (popup && popup.classList.contains('visible')) {
 				renderCalendar();
@@ -725,6 +733,41 @@ function parseVTTTime(timeStr) {
 
 const pendingMetadata = new Set();
 
+function evictMediaCaches(protectedSpriteUrls = null, protectedClipUrls = null) {
+	const maxSprites = networkMonitor.tier === 'low' ? 30 : 80;
+	const maxVtts = 150;
+	const protectSprites = protectedSpriteUrls instanceof Set ? protectedSpriteUrls : new Set(protectedSpriteUrls || []);
+	const protectClips = protectedClipUrls instanceof Set ? protectedClipUrls : new Set(protectedClipUrls || []);
+
+	const spriteKeys = Object.keys(spriteImages);
+	if (spriteKeys.length > maxSprites) {
+		let toEvict = spriteKeys.length - maxSprites;
+		for (let i = 0; i < spriteKeys.length && toEvict > 0; i++) {
+			const key = spriteKeys[i];
+			if (protectSprites.has(key)) continue;
+			const img = spriteImages[key];
+			if (img) {
+				img.onload = null;
+				img.onerror = null;
+			}
+			delete spriteImages[key];
+			toEvict--;
+		}
+	}
+
+	const vttKeys = Object.keys(vttCache);
+	if (vttKeys.length > maxVtts) {
+		let toEvict = vttKeys.length - maxVtts;
+		for (let i = 0; i < vttKeys.length && toEvict > 0; i++) {
+			const key = vttKeys[i];
+			if (protectClips.has(key)) continue;
+			delete vttCache[key];
+			toEvict--;
+		}
+	}
+}
+window.evictMediaCaches = evictMediaCaches;
+
 async function ensureClipMetadata(clip) {
 	if (!clip || pendingMetadata.has(clip.url)) return;
 
@@ -733,14 +776,10 @@ async function ensureClipMetadata(clip) {
 
 	if (!needsSprite && !needsVtt) return;
 
-	const maxSprites = networkMonitor.tier === 'low' ? 30 : 80;
-	const spriteKeys = Object.keys(spriteImages);
-	if (spriteKeys.length > maxSprites) {
-		const evictCount = Math.min(20, spriteKeys.length - maxSprites + 5);
-		for (let i = 0; i < evictCount; i++) {
-			delete spriteImages[spriteKeys[i]];
-		}
-	}
+	evictMediaCaches(
+		clip.sprite_url ? [clip.sprite_url] : [],
+		clip.url ? [clip.url] : []
+	);
 
 	pendingMetadata.add(clip.url);
 	const promises = [];
@@ -761,7 +800,10 @@ async function ensureClipMetadata(clip) {
 	if (needsVtt) {
 		promises.push(
 			fetch(clip.vtt_url, { credentials: 'include' })
-				.then(resp => resp.text())
+				.then(resp => {
+					if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+					return resp.text();
+				})
 				.then(text => {
 					const cues = [];
 					const regex = /(\d{2}:\d{2}:\d{2}\.\d{3})\s-->\s(\d{2}:\d{2}:\d{2}\.\d{3})\s+.*?#xywh=(\d+),(\d+),(\d+),(\d+)/g;
@@ -873,11 +915,20 @@ function setDate(dateObj) {
 	const mm = String(dateObj.getMonth() + 1).padStart(2, '0');
 	const dd = String(dateObj.getDate()).padStart(2, '0');
 	const nextDayString = `${yyyy}${mm}${dd}`;
+	const dateChanged = currentDayString !== nextDayString;
 
-	if (currentDayString && currentDayString !== nextDayString) {
+	if (currentDayString && dateChanged) {
 		spriteImages = {};
 		vttCache = {};
 	}
+
+	if (manifestAbortController) {
+		try { manifestAbortController.abort(); } catch (e) {}
+		manifestAbortController = null;
+	}
+	manifestFetchInFlight = false;
+	lastManifestEtag = null;
+	lastManifestDate = null;
 
 	currentDayString = nextDayString;
 	dateDisplay.innerHTML = `<span>${dd}/${mm}/${yyyy}</span> 📅`;
@@ -885,7 +936,10 @@ function setDate(dateObj) {
 	globalManifest = {};
 	renderTimelineHeatmap();
 
-	fetchManifest();
+	if (dateChanged) {
+		fetchAvailableDates();
+	}
+	fetchManifest(null, true);
 
 	if (activeCameras.length > 0) {
 		if (isPlayingHistory) playBtn.click();
@@ -933,30 +987,64 @@ function parseFilenameToSeconds(filename) {
 	return (h * 3600) + (m * 60) + s;
 }
 
-async function fetchManifest(camId = null) {
+async function fetchManifest(camId = null, force = false) {
 	if (activeCameras.length === 0) return;
-	if (!camId && manifestFetchInFlight) return;
-	if (!camId) manifestFetchInFlight = true;
+	if (!camId && !force && manifestFetchInFlight) return;
+
+	const requestedDate = currentDayString;
+	let reqSeq = 0;
+	let signal = undefined;
+	if (!camId) {
+		if (force && manifestAbortController) {
+			try { manifestAbortController.abort(); } catch (e) {}
+		}
+		manifestAbortController = new AbortController();
+		signal = manifestAbortController.signal;
+		manifestFetchInFlight = true;
+		reqSeq = ++manifestRequestSeq;
+	}
 
 	try {
 		const url = camId
-			? `/history?date=${currentDayString}&cam=${camId}`
-			: `/history?date=${currentDayString}`;
+			? `/history?date=${requestedDate}&cam=${camId}`
+			: `/history?date=${requestedDate}`;
 
-		const response = await fetch(url, { cache: 'no-cache', credentials: 'include' });
+		const headers = {};
+		if (!camId && !force && lastManifestEtag && lastManifestDate === requestedDate) {
+			headers['If-None-Match'] = lastManifestEtag;
+		}
+
+		const response = await fetch(url, {
+			cache: 'no-cache',
+			credentials: 'include',
+			headers,
+			signal
+		});
+		if (response.status === 304) return;
 		if (!response.ok) return;
 		const allData = await response.json();
 
+		if (requestedDate !== currentDayString || (!camId && reqSeq !== manifestRequestSeq)) {
+			return;
+		}
+
+		if (!camId) {
+			lastManifestEtag = response.headers.get('ETag') || null;
+			lastManifestDate = requestedDate;
+		}
+
 		Object.keys(allData).forEach(cam => {
 			let clips = allData[cam] || [];
-			clips.sort((a, b) => (parseFilenameToSeconds(a.filename) || 0) - (parseFilenameToSeconds(b.filename) || 0));
-
-			globalManifest[cam] = clips;
-
 			clips.forEach(clip => {
-				const match = clip.filename.match(/_(\d{8})_/);
+				const startSec = parseFilenameToSeconds(clip.filename);
+				clip._startSec = startSec;
+				clip._endSec = startSec !== null ? startSec + (Number(clip.duration) || 0) : null;
+				const match = typeof clip.filename === 'string' ? clip.filename.match(/_(\d{8})_/) : null;
 				if (match) availableDates.add(match[1]);
 			});
+			clips.sort((a, b) => (a._startSec !== null ? a._startSec : -1) - (b._startSec !== null ? b._startSec : -1));
+
+			globalManifest[cam] = clips;
 		});
 
 		renderTimelineHeatmap();
@@ -965,9 +1053,13 @@ async function fetchManifest(camId = null) {
 			renderCalendar();
 		}
 	} catch (e) {
+		if (e && e.name === 'AbortError') return;
 		console.log(`Could not load history manifest${camId ? ' for ' + camId : ''}. Likely an auth issue.`);
 	} finally {
-		if (!camId) manifestFetchInFlight = false;
+		if (!camId && reqSeq === manifestRequestSeq) {
+			manifestFetchInFlight = false;
+			manifestAbortController = null;
+		}
 	}
 }
 
@@ -992,7 +1084,7 @@ function renderTimelineHeatmap() {
 		row.style.height = `${laneHeight}%`;
 
 		clips.forEach(clip => {
-			const startSec = parseFilenameToSeconds(clip.filename);
+			const startSec = clip._startSec !== undefined ? clip._startSec : parseFilenameToSeconds(clip.filename);
 			if (startSec === null) return;
 
 			const clipDuration = clip.duration;
@@ -1024,6 +1116,7 @@ function toggleCalendar() {
 		const m = parseInt(currentDayString.substring(4, 6)) - 1;
 		calViewDate = new Date(y, m, 1);
 		renderCalendar();
+		fetchAvailableDates();
 	}
 }
 
@@ -1082,13 +1175,34 @@ function selectQuickDate(keyword) {
 }
 
 function findClipForCamera(camId, targetSeconds) {
-	const clips = globalManifest[camId] || [];
-	for (let clipRef of clips) {
-		const startSec = parseFilenameToSeconds(clipRef.filename);
+	const clips = globalManifest[camId];
+	if (!clips || clips.length === 0) return null;
+
+	let lo = 0;
+	let hi = clips.length - 1;
+	let candidate = -1;
+
+	while (lo <= hi) {
+		const mid = (lo + hi) >> 1;
+		const clip = clips[mid];
+		const startSec = clip._startSec !== undefined ? clip._startSec : parseFilenameToSeconds(clip.filename);
+		if (startSec === null || startSec <= targetSeconds) {
+			candidate = mid;
+			lo = mid + 1;
+		} else {
+			hi = mid - 1;
+		}
+	}
+
+	for (let idx = candidate; idx >= Math.max(0, candidate - 1); idx--) {
+		const clipRef = clips[idx];
+		if (!clipRef) continue;
+		const startSec = clipRef._startSec !== undefined ? clipRef._startSec : parseFilenameToSeconds(clipRef.filename);
 		if (startSec === null) continue;
 
-		const clipDuration = clipRef.duration;
-		const endSec = startSec + clipDuration;
+		const endSec = (clipRef._endSec !== undefined && clipRef._endSec !== null)
+			? clipRef._endSec
+			: startSec + (Number(clipRef.duration) || 0);
 
 		if (targetSeconds >= startSec && targetSeconds <= endSec) {
 			return { manifestRef: clipRef, offset: targetSeconds - startSec };
@@ -1181,7 +1295,7 @@ function updateCamerasToScrubber(targetSeconds, isDragging = false) {
 					if (srcChanged) {
 						videoEl.dataset.clipUrl = manifestRef.url;
 
-						if (Hls.isSupported()) {
+						if (typeof Hls !== 'undefined' && Hls.isSupported()) {
 							destroyHlsPlayer(camId);
 							videoEl._onVideoReady = onVideoReady;
 							videoEl.addEventListener('seeked', onVideoReady);
@@ -1258,17 +1372,17 @@ function openCameraPage(camId) {
 	document.getElementById('dashboard-view').classList.add('hidden');
 	document.getElementById('camera-view').classList.remove('hidden');
 
-	// 2. Pause and stop loading dashboard HLS players and snapshot loops to free up network/CPU
+	// 2. Destroy dashboard HLS players and stop snapshot loops to free MSE buffers, decoders, and network/CPU
 	activeCameras.forEach(id => {
-		clearCameraReconnectTimer(id);
-		clearCameraStaggerTimer(id);
-		stopCameraSnapshotLoop(id);
+		destroyHlsPlayer(id);
 		const videoEl = document.getElementById(`video-${id}`);
-		if (videoEl && !videoEl.paused) {
-			videoEl.pause();
-		}
-		if (hlsPlayers[id]) {
-			hlsPlayers[id].stopLoad();
+		if (videoEl) {
+			delete videoEl.dataset.clipUrl;
+			try {
+				videoEl.pause();
+				videoEl.removeAttribute('src');
+				videoEl.load();
+			} catch (e) {}
 		}
 	});
 
@@ -1324,7 +1438,7 @@ function startHlsLiveForCamera(camId) {
 	cameraLiveMode[camId] = usingSubStream ? 'hls-sub' : 'hls-main';
 	const freshPlaylistUrl = networkMonitor.getLiveStreamUrl(baseDir, camId, false);
 
-	if (Hls.isSupported()) {
+	if (typeof Hls !== 'undefined' && Hls.isSupported()) {
 		const hls = new Hls(networkMonitor.getHlsConfig(true, false));
 		let mediaRecoveryCount = 0;
 		let lastMediaRecoveryTs = 0;
@@ -1775,13 +1889,14 @@ function ensureIntersectionObserver() {
 	});
 }
 
-function createCameraDOM(camId) {
+function createCameraDOM(camId, startStream = true) {
 	ensureIntersectionObserver();
 	const grid = document.getElementById('grid');
 	const card = document.createElement('div');
 	card.className = 'camera-card state-video';
 	card.id = `card-${camId}`;
 
+	activeCameras.push(camId);
 	const camColor = getCameraColor(camId);
 	card.style.setProperty('--cam-color', camColor);
 
@@ -1803,22 +1918,26 @@ function createCameraDOM(camId) {
 	});
 
 	grid.appendChild(card);
-	activeCameras.push(camId);
 	visibleCameras.add(camId);
 	if (cardIntersectionObserver) {
 		cardIntersectionObserver.observe(card);
 	}
-	adjustGridLayout();
-
-	resetIndividualCamera(camId);
+	if (startStream) {
+		adjustGridLayout();
+		resetIndividualCamera(camId);
+	}
 }
 
 async function discoverCameras() {
+	if (activeCameras.length > 0) return;
 	try {
 		const response = await fetch('/cameracount', { cache: 'no-store', credentials: 'include' });
 		if (response.ok) {
 			const data = await response.json();
-			const count = data.count || 1;
+			const rawCameras = Array.isArray(data.cameras) && data.cameras.length > 0
+				? data.cameras
+				: Array.from({ length: data.count || 1 }, (_, i) => `cam${i + 1}`);
+			const count = rawCameras.length;
 			if (data.subStreams) {
 				window.cameraSubStreams = data.subStreams;
 			}
@@ -1829,12 +1948,29 @@ async function discoverCameras() {
 				CAMERA_COLORS.push(`#${hslToHex(hue, 80, 55)}`);
 			}
 
-			for (let index = 1; index <= count; index++) {
-				const camId = `cam${index}`;
-				createCameraDOM(camId);
-			}
+			rawCameras.forEach(camId => {
+				createCameraDOM(camId, false);
+			});
 
-			fetchManifest();
+			adjustGridLayout();
+			fetchManifest(null, true);
+
+			if (isLive && !isSingleCameraOpen && document.visibilityState === 'visible') {
+				activeCameras.forEach((camId, idx) => {
+					clearCameraStaggerTimer(camId);
+					const delay = idx * 80;
+					if (delay === 0) {
+						resetIndividualCamera(camId);
+					} else {
+						cameraStaggerTimers[camId] = setTimeout(() => {
+							delete cameraStaggerTimers[camId];
+							if (isLive && !isSingleCameraOpen && document.visibilityState === 'visible') {
+								resetIndividualCamera(camId);
+							}
+						}, delay);
+					}
+				});
+			}
 		} else {
 			setTimeout(discoverCameras, 2000);
 		}
